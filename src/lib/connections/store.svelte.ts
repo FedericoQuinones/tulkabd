@@ -13,6 +13,7 @@ class ConnectionStore {
     try {
       this.startupError = await ipc.startupError();
     } catch {
+      // An IPC failure hides the banner on purpose: it is only an advisory.
       this.startupError = null;
     }
   }

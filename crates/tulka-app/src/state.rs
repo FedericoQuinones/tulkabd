@@ -116,7 +116,7 @@ impl AppState {
 
     /// State with an empty in-memory config that never touches the config
     /// file: `save_connection` / `delete_connection` fail with
-    /// "connections file is read-only: {error}". Used when the file cannot
+    /// "the connections file is read-only: {error}". Used when the file cannot
     /// be read, so the app still opens and the file is never overwritten.
     pub fn new_read_only(
         error: String,
