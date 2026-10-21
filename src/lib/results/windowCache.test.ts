@@ -100,3 +100,52 @@ test("error stays while another window is failed, and clears after retry succeed
   expect(c.get(0)).toEqual(row(0));
   expect(c.error).toBeNull();
 });
+
+test("keeps at most maxWindows windows, evicting the least recently ensured", async () => {
+  const fetch = vi.fn(async (o: number, l: number) => rowsOf(o, l));
+  const c = new WindowCache(fetch, undefined, 10, 3);
+  for (const start of [0, 10, 20]) {
+    c.ensure(start, start + 10, 1000);
+    await flush();
+  }
+  c.ensure(0, 10, 1000); // window 0 becomes the most recent
+  await flush();
+  c.ensure(30, 40, 1000); // a fourth window evicts window 10, the least recent
+  await flush();
+  expect(c.get(5)).toEqual(row(5));
+  expect(c.get(15)).toBeUndefined();
+  expect(c.get(25)).toEqual(row(25));
+  expect(c.get(35)).toEqual(row(35));
+  expect(fetch).toHaveBeenCalledTimes(4);
+  // Scrolling back refetches the evicted window.
+  c.ensure(10, 20, 1000);
+  await flush();
+  expect(fetch).toHaveBeenCalledTimes(5);
+  expect(c.get(15)).toEqual(row(15));
+  expect(c.get(25)).toBeUndefined();
+});
+
+test("never evicts windows of the current range", async () => {
+  const fetch = vi.fn(async (o: number, l: number) => rowsOf(o, l));
+  const c = new WindowCache(fetch, undefined, 10, 2);
+  c.ensure(0, 40, 1000); // four windows in range, more than maxWindows
+  await flush();
+  for (const r of [0, 15, 25, 39]) expect(c.get(r)).toEqual(row(r));
+  c.ensure(100, 110, 1000);
+  await flush();
+  expect(c.get(105)).toEqual(row(105));
+  expect([0, 15, 25, 35].filter((r) => c.get(r) !== undefined)).toHaveLength(1);
+});
+
+test("the default bound is 50 windows of 200 rows", async () => {
+  const fetch = vi.fn(async (o: number, l: number) => rowsOf(o, l));
+  const c = new WindowCache(fetch);
+  for (let start = 0; start < 60 * 200; start += 200) {
+    c.ensure(start, start + 200, 100_000);
+    await flush();
+  }
+  expect(c.get(0)).toBeUndefined();
+  expect(c.get(9 * 200)).toBeUndefined();
+  expect(c.get(10 * 200)).toEqual(row(10 * 200));
+  expect(c.get(59 * 200 + 199)).toEqual(row(59 * 200 + 199));
+});

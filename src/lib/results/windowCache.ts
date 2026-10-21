@@ -3,13 +3,19 @@ import { WINDOW_SIZE, windowOffsets } from "./virtual";
 
 type Fetch = (offset: number, limit: number) => Promise<Value[][]>;
 
+/** Most windows kept (10,000 rows at the default window size); the backend owns the rows. */
+export const MAX_WINDOWS = 50;
+
 /**
  * Row cache for one result of one run, filled in aligned windows.
  * Dedupes in-flight windows, refetches windows that were short because rows were still
  * streaming, drops responses after `destroy()` (stale run) and keeps the last failure.
+ * Keeps at most `maxWindows` windows: the least recently ensured ones outside the current
+ * range are evicted, and fetched again when scrolled back to.
  */
 export class WindowCache {
-  private rows = new Map<number, Value[]>();
+  /** Rows per window offset, in least to most recently ensured order. */
+  private windows = new Map<number, Value[][]>();
   private inflight = new Set<number>();
   private failed = new Set<number>();
   private destroyed = false;
@@ -22,10 +28,12 @@ export class WindowCache {
     private fetch: Fetch,
     private onChange: () => void = () => {},
     private size = WINDOW_SIZE,
+    private maxWindows = MAX_WINDOWS,
   ) {}
 
   get(row: number): Value[] | undefined {
-    return this.rows.get(row);
+    const offset = Math.floor(row / this.size) * this.size;
+    return this.windows.get(offset)?.[row - offset];
   }
 
   /** Requests the windows covering `[start, end)`; `total` is the current row count. */
@@ -33,9 +41,11 @@ export class WindowCache {
     this.range = { start, end };
     this.total = total;
     for (const o of windowOffsets(start, end, this.size)) {
+      this.touch(o);
       // Windows that failed are retried only through `retry()`, never in a loop.
       if (!this.failed.has(o)) void this.load(o);
     }
+    this.evict();
   }
 
   /** Clears the error and requests the failed windows again. */
@@ -52,11 +62,29 @@ export class WindowCache {
     this.destroyed = true;
   }
 
+  /** Marks a cached window as the most recently ensured one. */
+  private touch(offset: number): void {
+    const rows = this.windows.get(offset);
+    if (rows === undefined) return;
+    this.windows.delete(offset);
+    this.windows.set(offset, rows);
+  }
+
+  /** Drops the least recently ensured windows outside the current range, down to `maxWindows`. */
+  private evict(): void {
+    if (this.windows.size <= this.maxWindows) return;
+    const first = Math.floor(this.range.start / this.size) * this.size;
+    for (const offset of this.windows.keys()) {
+      if (this.windows.size <= this.maxWindows) break;
+      if (offset >= first && offset < this.range.end) continue;
+      this.windows.delete(offset);
+    }
+  }
+
   private incomplete(offset: number): boolean {
     const limit = Math.min(this.size, this.total - offset);
     if (limit <= 0) return false;
-    for (let i = offset; i < offset + limit; i++) if (!this.rows.has(i)) return true;
-    return false;
+    return (this.windows.get(offset)?.length ?? 0) < limit;
   }
 
   private async load(offset: number): Promise<void> {
@@ -66,7 +94,12 @@ export class WindowCache {
     try {
       const rows = await this.fetch(offset, this.size);
       if (this.destroyed) return;
-      rows.forEach((r, i) => this.rows.set(offset + i, r));
+      // A response never shrinks a window (rows only grow while streaming).
+      if (rows.length >= (this.windows.get(offset)?.length ?? 0)) {
+        this.windows.delete(offset);
+        this.windows.set(offset, rows);
+        this.evict();
+      }
       this.failed.delete(offset);
       // The notice stays while any other window is still failed.
       if (this.failed.size === 0) this.error = null;
