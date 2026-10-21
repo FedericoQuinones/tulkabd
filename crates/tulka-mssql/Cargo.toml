@@ -4,12 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+tulka-core = { path = "../tulka-core" }
 # Vendored and patched fork of tiberius 0.13.0, see vendor/tiberius/TULKA_PATCHES.md.
 tiberius = { path = "../../vendor/tiberius", default-features = false, features = ["tds73", "rustls", "chrono"] }
+async-trait = "0.1"
+futures-util = "0.3"
+tokio = { version = "1", features = ["net", "time", "sync", "macros"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["compat"] }
-futures-util = "0.3"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
