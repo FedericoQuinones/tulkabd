@@ -12,7 +12,11 @@ pub mod results;
 pub mod state;
 pub mod types;
 
-pub use connections::{delete_connection, list_connections, save_connection, test_connection};
+pub use connections::{
+    create_folder, delete_connection, delete_folder, list_connections, list_folders,
+    list_server_databases, move_connection, move_folder, rename_folder, save_connection,
+    set_expanded, test_connection,
+};
 pub use query::{
     cancel_query, close_session, copy_results, fetch_rows, open_session, run_query, use_database,
     MAX_FETCH_ROWS,
@@ -24,7 +28,7 @@ pub use results::{
 pub use state::{AppState, SharedBuffer, TabState};
 pub use types::{
     Clipboard, CopyMode, CopyOutcome, RunOutcome, RunSummary, SaveConnectionResult, SessionInfo,
-    UiEvent, BUSY, CLOSED, DISCONNECTED, PASSWORD_REQUIRED,
+    UiEvent, BUSY, CLOSED, CYCLE, DISCONNECTED, EMPTY_NAME, NOT_FOUND, PASSWORD_REQUIRED,
 };
 
 /// The core types used in the command signatures (`ConnectionConfig`,

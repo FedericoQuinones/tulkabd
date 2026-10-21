@@ -1212,3 +1212,233 @@ async fn unreadable_config_opens_read_only_and_is_never_overwritten() {
     let ok = fixture(Arc::new(MemoryStore::default()));
     assert!(ok.state.startup_error().is_none());
 }
+
+// ------------------------------------------------------------------- folders
+
+#[tokio::test]
+async fn folders_nest_and_deleting_moves_children_to_the_parent() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let a = create_folder(&f.state, "Cliente A".into(), None)
+        .await
+        .unwrap();
+    let x = create_folder(&f.state, "Proyecto X".into(), Some(a.id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(x.parent_id.as_deref(), Some(a.id.as_str()));
+    let conn = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    move_connection(&f.state, conn.id.clone(), Some(a.id.clone()))
+        .await
+        .unwrap();
+
+    delete_folder(&f.state, a.id.clone()).await.unwrap();
+    let folders = list_folders(&f.state).await;
+    assert_eq!(folders.len(), 1);
+    assert_eq!(
+        (folders[0].id.as_str(), folders[0].parent_id.clone()),
+        (x.id.as_str(), None)
+    );
+    let conns = list_connections(&f.state).await;
+    assert_eq!(conns.len(), 1);
+    assert_eq!(conns[0].folder_id, None);
+    assert!(conns[0].password_saved);
+
+    // Persisted: a fresh state over the same file sees it.
+    let reopened = AppState::new(
+        ConfigStore::at(f._dir.path().join("config.json")),
+        f.secrets.clone(),
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(list_folders(&reopened).await, folders);
+}
+
+#[tokio::test]
+async fn folders_rename_and_validate_names() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let a = create_folder(&f.state, "  A ".into(), None).await.unwrap();
+    assert_eq!(a.name, "A");
+    rename_folder(&f.state, a.id.clone(), "B".into())
+        .await
+        .unwrap();
+    assert_eq!(list_folders(&f.state).await[0].name, "B");
+    assert_eq!(
+        rename_folder(&f.state, a.id.clone(), "  ".into())
+            .await
+            .unwrap_err(),
+        "empty_name"
+    );
+    assert_eq!(
+        create_folder(&f.state, "".into(), None).await.unwrap_err(),
+        "empty_name"
+    );
+    assert_eq!(
+        create_folder(&f.state, "C".into(), Some("nope".into()))
+            .await
+            .unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(
+        rename_folder(&f.state, "nope".into(), "Z".into())
+            .await
+            .unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(
+        delete_folder(&f.state, "nope".into()).await.unwrap_err(),
+        "not_found"
+    );
+}
+
+#[tokio::test]
+async fn folders_move_rejects_cycles() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let a = create_folder(&f.state, "A".into(), None).await.unwrap();
+    let b = create_folder(&f.state, "B".into(), Some(a.id.clone()))
+        .await
+        .unwrap();
+    let c = create_folder(&f.state, "C".into(), Some(b.id.clone()))
+        .await
+        .unwrap();
+    for target in [&a, &b, &c] {
+        assert_eq!(
+            move_folder(&f.state, a.id.clone(), Some(target.id.clone()))
+                .await
+                .unwrap_err(),
+            "cycle"
+        );
+    }
+    assert_eq!(
+        move_folder(&f.state, "nope".into(), None)
+            .await
+            .unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(
+        move_folder(&f.state, a.id.clone(), Some("nope".into()))
+            .await
+            .unwrap_err(),
+        "not_found"
+    );
+    move_folder(&f.state, c.id.clone(), None).await.unwrap();
+    move_folder(&f.state, a.id.clone(), Some(c.id.clone()))
+        .await
+        .unwrap();
+    let folders = list_folders(&f.state).await;
+    let parent = |id: &str| {
+        folders
+            .iter()
+            .find(|x| x.id == id)
+            .unwrap()
+            .parent_id
+            .clone()
+    };
+    assert_eq!(parent(&c.id), None);
+    assert_eq!(parent(&a.id), Some(c.id.clone()));
+}
+
+#[tokio::test]
+async fn folders_move_connection_and_expanded_persist() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let a = create_folder(&f.state, "A".into(), None).await.unwrap();
+    let conn = save_connection(&f.state, new_conn(), None)
+        .await
+        .unwrap()
+        .connection;
+    move_connection(&f.state, conn.id.clone(), Some(a.id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        move_connection(&f.state, "nope".into(), None)
+            .await
+            .unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(
+        move_connection(&f.state, conn.id.clone(), Some("nope".into()))
+            .await
+            .unwrap_err(),
+        "not_found"
+    );
+    set_expanded(&f.state, vec![a.id.clone(), conn.id.clone(), a.id.clone()])
+        .await
+        .unwrap();
+
+    let reopened = AppState::new(
+        ConfigStore::at(f._dir.path().join("config.json")),
+        f.secrets.clone(),
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(
+        list_connections(&reopened).await[0].folder_id.as_deref(),
+        Some(a.id.as_str())
+    );
+    assert_eq!(
+        ConfigStore::at(f._dir.path().join("config.json"))
+            .load()
+            .unwrap()
+            .expanded,
+        vec![a.id.clone(), conn.id.clone()]
+    );
+}
+
+#[tokio::test]
+async fn folders_read_only_mode_rejects_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let original = "{ not json";
+    std::fs::write(&path, original).unwrap();
+    let state = AppState::open(
+        ConfigStore::at(&path),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakeDriver)],
+    );
+    let ro = |r: Result<(), String>| assert!(r.unwrap_err().contains("read-only"));
+    assert!(create_folder(&state, "A".into(), None)
+        .await
+        .unwrap_err()
+        .contains("read-only"));
+    ro(rename_folder(&state, "x".into(), "y".into()).await);
+    ro(delete_folder(&state, "x".into()).await);
+    ro(move_folder(&state, "x".into(), None).await);
+    ro(move_connection(&state, "x".into(), None).await);
+    ro(set_expanded(&state, vec!["x".into()]).await);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn folders_list_server_databases_connects_and_lists() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    // Explicit password.
+    let names = list_server_databases(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap();
+    assert_eq!(names, ["a", "b", "c", "master"]);
+    // Saved password.
+    assert_eq!(
+        list_server_databases(&f.state, saved, None)
+            .await
+            .unwrap()
+            .len(),
+        4
+    );
+    // Nothing saved and nothing given.
+    assert_eq!(
+        list_server_databases(&f.state, new_conn(), None)
+            .await
+            .unwrap_err(),
+        PASSWORD_REQUIRED
+    );
+    assert!(
+        list_server_databases(&f.state, new_conn(), Some("bad".into()))
+            .await
+            .is_err()
+    );
+}

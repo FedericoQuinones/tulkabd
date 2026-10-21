@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use tulka_core::{
-    AppConfig, ConnectParams, ConnectionConfig, SecretError, SecretStore, ServerInfo,
+    AppConfig, ConnectParams, ConnectionConfig, Folder, SecretError, SecretStore, ServerInfo,
 };
 
 use crate::state::AppState;
-use crate::types::{SaveConnectionResult, PASSWORD_REQUIRED};
+use crate::types::{SaveConnectionResult, CYCLE, EMPTY_NAME, NOT_FOUND, PASSWORD_REQUIRED};
 
 /// Runs blocking work (keychain, config file) off the async runtime.
 pub(crate) async fn blocking<T: Send + 'static>(
@@ -99,6 +99,211 @@ pub async fn delete_connection(state: &AppState, id: String) -> Result<(), Strin
     Ok(())
 }
 
+/// Applies `f` to a copy of the config and persists it; the in-memory config
+/// is replaced only when both succeed.
+async fn mutate<T>(
+    state: &AppState,
+    f: impl FnOnce(&mut AppConfig) -> Result<T, String>,
+) -> Result<T, String> {
+    state.ensure_writable()?;
+    let mut current = state.connections.lock().await;
+    let mut next = current.clone();
+    let out = f(&mut next)?;
+    *current = persist(state, next).await?;
+    Ok(out)
+}
+
+fn has_folder(config: &AppConfig, id: &str) -> bool {
+    config.folders.iter().any(|f| f.id == id)
+}
+
+/// Checks that `parent` (when given) is an existing folder.
+fn check_parent(config: &AppConfig, parent: &Option<String>) -> Result<(), String> {
+    match parent {
+        Some(p) if !has_folder(config, p) => Err(NOT_FOUND.into()),
+        _ => Ok(()),
+    }
+}
+
+fn clean_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        Err(EMPTY_NAME.into())
+    } else {
+        Ok(name.into())
+    }
+}
+
+/// The folders of the connections tree.
+pub async fn list_folders(state: &AppState) -> Vec<Folder> {
+    state.connections.lock().await.folders.clone()
+}
+
+/// Creates a folder under `parent_id` (the root when `None`). Fails with
+/// [`EMPTY_NAME`] or [`NOT_FOUND`] (unknown parent).
+pub async fn create_folder(
+    state: &AppState,
+    name: String,
+    parent_id: Option<String>,
+) -> Result<Folder, String> {
+    mutate(state, |config| {
+        let name = clean_name(&name)?;
+        check_parent(config, &parent_id)?;
+        let folder = Folder {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            parent_id,
+        };
+        config.folders.push(folder.clone());
+        Ok(folder)
+    })
+    .await
+}
+
+/// Renames a folder. Fails with [`EMPTY_NAME`] or [`NOT_FOUND`].
+pub async fn rename_folder(state: &AppState, id: String, name: String) -> Result<(), String> {
+    mutate(state, |config| {
+        let name = clean_name(&name)?;
+        let folder = config
+            .folders
+            .iter_mut()
+            .find(|f| f.id == id)
+            .ok_or(NOT_FOUND)?;
+        folder.name = name;
+        Ok(())
+    })
+    .await
+}
+
+/// Deletes a folder; its child folders and connections move to its parent
+/// (or the root). Fails with [`NOT_FOUND`].
+pub async fn delete_folder(state: &AppState, id: String) -> Result<(), String> {
+    mutate(state, |config| {
+        let parent = config
+            .folders
+            .iter()
+            .find(|f| f.id == id)
+            .ok_or(NOT_FOUND)?
+            .parent_id
+            .clone();
+        config.folders.retain(|f| f.id != id);
+        for f in config
+            .folders
+            .iter_mut()
+            .filter(|f| f.parent_id.as_ref() == Some(&id))
+        {
+            f.parent_id = parent.clone();
+        }
+        for c in config
+            .connections
+            .iter_mut()
+            .filter(|c| c.folder_id.as_ref() == Some(&id))
+        {
+            c.folder_id = parent.clone();
+        }
+        config.expanded.retain(|e| *e != id);
+        Ok(())
+    })
+    .await
+}
+
+/// Moves a connection into a folder (the root when `None`). Fails with
+/// [`NOT_FOUND`].
+pub async fn move_connection(
+    state: &AppState,
+    connection_id: String,
+    folder_id: Option<String>,
+) -> Result<(), String> {
+    mutate(state, |config| {
+        check_parent(config, &folder_id)?;
+        let conn = config
+            .connections
+            .iter_mut()
+            .find(|c| c.id == connection_id)
+            .ok_or(NOT_FOUND)?;
+        conn.folder_id = folder_id;
+        Ok(())
+    })
+    .await
+}
+
+/// Moves a folder under `parent_id` (the root when `None`). Fails with
+/// [`NOT_FOUND`], or [`CYCLE`] when the target is the folder itself or one of
+/// its descendants.
+pub async fn move_folder(
+    state: &AppState,
+    id: String,
+    parent_id: Option<String>,
+) -> Result<(), String> {
+    mutate(state, |config| {
+        if !has_folder(config, &id) {
+            return Err(NOT_FOUND.into());
+        }
+        check_parent(config, &parent_id)?;
+        // Walk up from the target; meeting `id` means it is a descendant.
+        let mut cursor = parent_id.clone();
+        while let Some(current) = cursor {
+            if current == id {
+                return Err(CYCLE.into());
+            }
+            cursor = config
+                .folders
+                .iter()
+                .find(|f| f.id == current)
+                .and_then(|f| f.parent_id.clone());
+        }
+        let folder = config
+            .folders
+            .iter_mut()
+            .find(|f| f.id == id)
+            .ok_or(NOT_FOUND)?;
+        folder.parent_id = parent_id;
+        Ok(())
+    })
+    .await
+}
+
+/// Stores which tree nodes are open. The ids are the UI's; duplicates are
+/// dropped.
+pub async fn set_expanded(state: &AppState, ids: Vec<String>) -> Result<(), String> {
+    mutate(state, |config| {
+        let mut seen = std::collections::HashSet::new();
+        config.expanded = ids.into_iter().filter(|i| seen.insert(i.clone())).collect();
+        Ok(())
+    })
+    .await
+}
+
+/// Connects with `conn` just to list the server's databases (for the
+/// "Selected" picker) and disconnects; no tab session is opened. Password
+/// semantics as [`test_connection`].
+pub async fn list_server_databases(
+    state: &AppState,
+    mut conn: ConnectionConfig,
+    password: Option<String>,
+) -> Result<Vec<String>, String> {
+    if password.is_none() {
+        conn.password_saved = saved_password_flag(state, &conn.id).await;
+    }
+    let password = resolve_password(state, &conn, password).await?;
+    let driver = state.driver(&conn.driver)?;
+    let mut session = driver
+        .connect(&connect_params(&conn, password, None))
+        .await
+        .map_err(|e| e.to_string())?;
+    session.list_databases().await.map_err(|e| e.to_string())
+}
+
+async fn saved_password_flag(state: &AppState, id: &str) -> bool {
+    state
+        .connections
+        .lock()
+        .await
+        .connections
+        .iter()
+        .any(|c| c.id == id && c.password_saved)
+}
+
 /// Connects with `conn`, reads the server information and disconnects.
 /// Without `password`, uses the one saved for the connection with the same
 /// id (the stored `password_saved` decides, not the one sent by the UI,
@@ -109,13 +314,7 @@ pub async fn test_connection(
     password: Option<String>,
 ) -> Result<ServerInfo, String> {
     if password.is_none() {
-        conn.password_saved = state
-            .connections
-            .lock()
-            .await
-            .connections
-            .iter()
-            .any(|c| c.id == conn.id && c.password_saved);
+        conn.password_saved = saved_password_flag(state, &conn.id).await;
     }
     let password = resolve_password(state, &conn, password).await?;
     let driver = state.driver(&conn.driver)?;

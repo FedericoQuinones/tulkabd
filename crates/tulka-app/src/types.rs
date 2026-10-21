@@ -6,6 +6,12 @@ use tulka_core::{Column, ConnectionConfig, ExecEvent, MessageKind, ServerInfo};
 
 /// Command error meaning there is no saved password and none was given.
 pub const PASSWORD_REQUIRED: &str = "password_required";
+/// Folder command error: a folder cannot move into itself or a descendant.
+pub const CYCLE: &str = "cycle";
+/// Folder command error: an unknown folder or connection id.
+pub const NOT_FOUND: &str = "not_found";
+/// Folder command error: the folder name is empty.
+pub const EMPTY_NAME: &str = "empty_name";
 /// Command error meaning the tab's connection was lost; only `open_session`
 /// gets the tab working again.
 pub const DISCONNECTED: &str = "disconnected";

@@ -12,7 +12,8 @@ pub mod secrets;
 pub mod value;
 
 pub use config::{
-    AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope, Environment, GuardLevel,
+    AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope, Environment, Folder,
+    GuardLevel,
 };
 pub use driver::{
     CancelHandle, Column, ConnectParams, Driver, ExecEvent, MessageKind, ServerInfo, Session,

@@ -4827,6 +4827,7 @@ dependencies = [
  "tokio",
  "tulka-core",
  "tulka-mssql",
+ "uuid",
 ]
 
 [[package]]

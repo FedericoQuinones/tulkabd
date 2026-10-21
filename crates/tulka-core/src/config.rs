@@ -93,6 +93,21 @@ pub struct ConnectionConfig {
     pub connect_timeout_s: u32,
     /// Whether a password for this connection is stored in the keychain.
     pub password_saved: bool,
+    /// The folder holding this connection; `None` is the root.
+    #[serde(default)]
+    pub folder_id: Option<String>,
+}
+
+/// A folder of the connections tree (nestable).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Folder {
+    /// UUID v4.
+    pub id: String,
+    pub name: String,
+    /// The containing folder; `None` is the root.
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 impl ConnectionConfig {
@@ -120,6 +135,7 @@ impl ConnectionConfig {
             trust_server_certificate: false,
             connect_timeout_s: 15,
             password_saved: false,
+            folder_id: None,
         }
     }
 }
@@ -131,6 +147,11 @@ pub struct AppConfig {
     pub version: u32,
     #[serde(default)]
     pub connections: Vec<ConnectionConfig>,
+    #[serde(default)]
+    pub folders: Vec<Folder>,
+    /// Ids of the folders and connections open in the tree.
+    #[serde(default)]
+    pub expanded: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -138,6 +159,8 @@ impl Default for AppConfig {
         Self {
             version: CONFIG_VERSION,
             connections: Vec::new(),
+            folders: Vec::new(),
+            expanded: Vec::new(),
         }
     }
 }
@@ -321,12 +344,12 @@ mod tests {
                 "user": "u", "databases": {"kind": "all"}, "environment": "test",
                 "color": "#44a282", "guard": "off", "encrypt": true,
                 "trustServerCertificate": false, "connectTimeoutS": 15,
-                "passwordSaved": false
+                "passwordSaved": false, "folderId": null
             })
         );
         assert_eq!(
             serde_json::to_value(AppConfig::default()).unwrap(),
-            json!({"version": 1, "connections": []})
+            json!({"version": 1, "connections": [], "folders": [], "expanded": []})
         );
     }
 
@@ -369,5 +392,44 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(names, vec!["config.json".to_string()]);
+    }
+
+    #[test]
+    fn plan1_file_without_folders_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r##"{"version": 1, "connections": [{
+                "id": "c1", "name": "A", "driver": "mssql", "server": "h", "port": 1433,
+                "user": "u", "databases": {"kind": "all"}, "environment": "test",
+                "color": "#44a282", "guard": "off", "encrypt": true,
+                "trustServerCertificate": false, "connectTimeoutS": 15,
+                "passwordSaved": false}]}"##,
+        )
+        .unwrap();
+        let cfg = ConfigStore::at(path).load().unwrap();
+        assert_eq!(cfg.connections.len(), 1);
+        assert_eq!(cfg.connections[0].folder_id, None);
+        assert!(cfg.folders.is_empty() && cfg.expanded.is_empty());
+    }
+
+    #[test]
+    fn folders_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::at(dir.path().join("config.json"));
+        let mut cfg = AppConfig::default();
+        cfg.folders.push(Folder {
+            id: "f1".into(),
+            name: "Cliente A".into(),
+            parent_id: None,
+        });
+        cfg.expanded.push("f1".into());
+        store.save(&cfg).unwrap();
+        assert_eq!(store.load().unwrap(), cfg);
+        assert_eq!(
+            serde_json::to_value(&cfg.folders[0]).unwrap(),
+            json!({"id": "f1", "name": "Cliente A", "parentId": null})
+        );
     }
 }
