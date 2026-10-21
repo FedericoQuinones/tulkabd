@@ -1,5 +1,5 @@
 [workspace]
-members = ["src-tauri", "crates/tulka-core", "crates/tulka-mssql", "crates/tulka-app"]
+members = ["src-tauri", "crates/tulka-core", "crates/tulka-mssql", "crates/tulka-app", "crates/tulka-store"]
 # The vendored Tiberius fork is consumed as a path dependency only. Keeping it
 # out of the workspace keeps its heavy dev-dependencies out of our lockfile and
 # its upstream integration tests out of `cargo test --workspace`.
