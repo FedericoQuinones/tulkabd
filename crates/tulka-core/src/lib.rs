@@ -2,15 +2,21 @@
 //! streamed to the UI and the driver interface every database driver
 //! implements.
 
+pub mod config;
 pub mod driver;
 pub mod error;
+pub mod secrets;
 pub mod value;
 
+pub use config::{
+    AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope, Environment, GuardLevel,
+};
 pub use driver::{
     CancelHandle, Column, ConnectParams, Driver, ExecEvent, MessageKind, ServerInfo, Session,
     APPLICATION_NAME,
 };
 pub use error::DriverError;
+pub use secrets::{KeyringStore, MemoryStore, SecretError, SecretStore, UnavailableStore};
 pub use value::Value;
 
 #[cfg(test)]
