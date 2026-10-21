@@ -20,11 +20,22 @@
 //! event. Databases open in a query tab of the connection go first, then
 //! the rest alphabetically. `refresh_metadata` adds to the queue (one
 //! database jumps to its front) and starts the task only if none is running.
-//! A database that cannot be read (`NoAccess`, or any other error, such as a
-//! database that went offline after the access check) is marked `noAccess`
-//! in the cache, so the tree shows it dimmed, and indexing goes on. Only a
-//! lost connection or `disconnect_explorer` stops it: what was saved stays,
-//! and the Explorer never reconnects on its own.
+//! A database the login cannot use (`NoAccess`) is marked `noAccess` in the
+//! cache, so the tree shows it dimmed; any other error on one database (for
+//! example one that went offline after the access check) leaves what was
+//! cached for it untouched. Either way indexing goes on. Only a lost
+//! connection or `disconnect_explorer` stops it: what was saved stays, and
+//! the Explorer never reconnects on its own.
+//!
+//! # Connecting
+//!
+//! `connect_explorer` registers its attempt before connecting;
+//! `disconnect_explorer` and `delete_connection` cancel it. Once connected
+//! it registers the Explorer (and writes the database list to the cache)
+//! under the connections lock, after checking that the connection still
+//! exists and that its attempt was not cancelled or superseded. So a delete
+//! or a disconnect that comes in while connecting always wins: the new
+//! session is dropped and nothing is cached for a deleted connection.
 //!
 //! # Locks
 //!
@@ -58,7 +69,7 @@ use crate::connections::{blocking, connect_params, resolve_password};
 use crate::state::AppState;
 use crate::types::{
     AppEvent, AppEvents, CompletionMetadata, ConnectionStatus, ExplorerInfo, NoopEvents,
-    PaletteHit, SearchResponse, DISCONNECTED, NOT_CONNECTED, NOT_FOUND,
+    PaletteHit, SearchResponse, CLOSED, DISCONNECTED, NOT_CONNECTED, NOT_FOUND,
 };
 
 /// Explorer state shared by the commands and the indexing tasks.
@@ -69,6 +80,10 @@ pub(crate) struct Explorer {
     /// `true` once the startup index was built from the cache.
     loaded: watch::Sender<bool>,
     conns: std::sync::Mutex<HashMap<String, Conn>>,
+    /// The epoch of the latest `connect_explorer` of each connection;
+    /// removed by a disconnect or a delete. Locked before `conns` when both
+    /// are needed.
+    attempts: std::sync::Mutex<HashMap<String, u64>>,
     next_epoch: AtomicU64,
 }
 
@@ -123,7 +138,8 @@ impl Slot {
                 let mut params = params.clone();
                 params.database = Some(database.to_string());
                 let session = driver.connect(&params).await.map_err(|e| match e {
-                    // The server is gone, not just this database.
+                    // The old session is already gone, so failing to reach
+                    // the server means the connection is lost, not one database.
                     DriverError::Unreachable(_) | DriverError::Disconnected(_) => {
                         LiveError::Driver(DriverError::Disconnected(e.to_string()))
                     }
@@ -149,6 +165,15 @@ impl Slot {
         self.session = None;
         self.bound = None;
         self.rebind = None;
+    }
+}
+
+/// Marks the startup index as loaded when dropped.
+struct MarkLoaded<'a>(&'a Explorer);
+
+impl Drop for MarkLoaded<'_> {
+    fn drop(&mut self) {
+        self.0.loaded.send_replace(true);
     }
 }
 
@@ -180,6 +205,9 @@ impl Explorer {
         let spawned = std::thread::Builder::new()
             .name("tulka-index-load".into())
             .spawn(move || {
+                // Set even if loading panics, or every index update would
+                // wait forever.
+                let _loaded = MarkLoaded(&loader);
                 let entries = loader
                     .cache
                     .all_objects()
@@ -192,7 +220,6 @@ impl Explorer {
                     .collect();
                 let built = SearchIndex::build(entries);
                 *loader.index.write().unwrap_or_else(PoisonError::into_inner) = built;
-                loader.loaded.send_replace(true);
             });
         if spawned.is_err() {
             // Search starts empty and fills up as connections are indexed.
@@ -208,12 +235,29 @@ impl Explorer {
             index: Arc::new(RwLock::new(SearchIndex::default())),
             loaded: watch::Sender::new(false),
             conns: std::sync::Mutex::new(HashMap::new()),
+            attempts: std::sync::Mutex::new(HashMap::new()),
             next_epoch: AtomicU64::new(1),
         })
     }
 
     fn conns(&self) -> std::sync::MutexGuard<'_, HashMap<String, Conn>> {
         self.conns.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn attempts(&self) -> std::sync::MutexGuard<'_, HashMap<String, u64>> {
+        self.attempts.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Registers a new connect attempt, superseding any earlier one.
+    fn begin_attempt(&self, connection_id: &str) -> u64 {
+        let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
+        self.attempts().insert(connection_id.to_string(), epoch);
+        epoch
+    }
+
+    /// Cancels the connect attempt in progress, if any.
+    fn cancel_attempt(&self, connection_id: &str) {
+        self.attempts().remove(connection_id);
     }
 
     fn emit(&self, ev: AppEvent) {
@@ -394,7 +438,7 @@ impl Explorer {
             .await;
     }
 
-    /// Marks a database unreadable and drops what was known of it.
+    /// Marks a database the login cannot use and drops what was known of it.
     async fn mark_no_access(&self, connection_id: &str, database: &str) {
         let (id, db) = (connection_id.to_string(), database.to_string());
         self.with_cache(move |cache| cache.mark_no_access(&id, &db))
@@ -456,10 +500,12 @@ async fn index_task(
                 explorer.lost(&connection_id, epoch, &e);
                 return;
             }
-            Err(LiveError::Driver(_)) => {
+            Err(LiveError::Driver(DriverError::NoAccess(_))) => {
                 explorer.mark_no_access(&connection_id, &database).await;
                 true
             }
+            // Keep what was cached; a later refresh may succeed.
+            Err(LiveError::Driver(_)) => false,
         };
         explorer.progress(&connection_id, &database, true, no_access);
     }
@@ -497,7 +543,10 @@ fn index_order(state: &AppState, connection_id: &str, databases: &[String]) -> V
 /// Opens the Explorer session of a saved connection and starts indexing its
 /// databases in the background. An Explorer already open for it is closed
 /// first. Password semantics as `open_session` (`"password_required"`).
-/// Emits `explorerStatus` "connecting", then "connected" or "error".
+/// Emits `explorerStatus` "connecting", then "connected" or "error". If the
+/// connection is deleted while connecting, fails with `"not_found"`; if
+/// `disconnect_explorer` (or a newer `connect_explorer`) comes in meanwhile,
+/// fails with `"closed"`. In both cases the new session is dropped.
 pub async fn connect_explorer(
     state: &AppState,
     connection_id: String,
@@ -515,6 +564,7 @@ pub async fn connect_explorer(
         .ok_or_else(|| "the connection does not exist".to_string())?;
     let password = resolve_password(state, &conn, password).await?;
     let driver = state.driver(&conn.driver)?;
+    let epoch = explorer.begin_attempt(&connection_id);
     if let Some(old) = explorer.take(&connection_id, None) {
         Explorer::stop(old).await;
     }
@@ -548,8 +598,43 @@ pub async fn connect_explorer(
         }
     };
 
-    // The cache keeps exactly the exposed databases; drop the vanished ones
-    // from the search index too.
+    let slot = Slot {
+        session: Some(session),
+        rebind: server.single_database.then_some((driver, params)),
+        bound,
+        closed: false,
+    };
+    let entry = Conn {
+        epoch,
+        slot: Arc::new(AsyncMutex::new(slot)),
+        databases: databases.clone(),
+        queue: VecDeque::new(),
+        current: None,
+        running: false,
+        task: None,
+        stop: watch::Sender::new(false),
+    };
+
+    // Register under the connections lock, so a delete either happens before
+    // (and is seen here) or after (and its cleanup sees the Explorer and the
+    // cached rows). On failure `entry` is dropped with its session.
+    let registered = {
+        let config = state.connections.lock().await;
+        if !config.connections.iter().any(|c| c.id == connection_id) {
+            Err(NOT_FOUND)
+        } else {
+            let attempts = explorer.attempts();
+            if attempts.get(&connection_id) == Some(&epoch) {
+                Ok(explorer.conns().insert(connection_id.clone(), entry))
+            } else {
+                Err(CLOSED)
+            }
+        }
+        .map(|replaced| (config, replaced))
+    };
+    let (config, replaced) = registered.map_err(String::from)?;
+    // The cache keeps exactly the exposed databases. Still under the
+    // connections lock, so a delete's cleanup comes after this write.
     let (id, names) = (connection_id.clone(), databases.clone());
     let vanished: Vec<String> = explorer
         .with_cache(move |cache| {
@@ -562,6 +647,11 @@ pub async fn connect_explorer(
                 .collect()
         })
         .await;
+    drop(config);
+    explorer.status(&connection_id, ConnectionStatus::Connected, None);
+    if let Some(replaced) = replaced {
+        Explorer::stop(replaced).await;
+    }
     if !vanished.is_empty() {
         let id = connection_id.clone();
         explorer
@@ -572,31 +662,8 @@ pub async fn connect_explorer(
             })
             .await;
     }
-
-    let slot = Slot {
-        session: Some(session),
-        rebind: server.single_database.then_some((driver, params)),
-        bound,
-        closed: false,
-    };
-    let entry = Conn {
-        epoch: explorer.next_epoch.fetch_add(1, Ordering::Relaxed),
-        slot: Arc::new(AsyncMutex::new(slot)),
-        databases: databases.clone(),
-        queue: VecDeque::new(),
-        current: None,
-        running: false,
-        task: None,
-        stop: watch::Sender::new(false),
-    };
-    explorer.status(&connection_id, ConnectionStatus::Connected, None);
-    // A concurrent connect may have won meanwhile; the last one stays.
-    let replaced = explorer.conns().insert(connection_id.clone(), entry);
-    if let Some(replaced) = replaced {
-        Explorer::stop(replaced).await;
-    }
     let order = index_order(state, &connection_id, &databases);
-    // Fails only if a disconnect came in between, which is fine.
+    // Fails only if a disconnect came in meanwhile, which is fine.
     let _ = explorer.enqueue(&connection_id, order, false);
     Ok(ExplorerInfo { server, databases })
 }
@@ -604,6 +671,7 @@ pub async fn connect_explorer(
 /// Stops the Explorer of a connection: indexing stops (what was saved
 /// stays) and its session is closed. Emits `explorerStatus` "disconnected".
 pub async fn disconnect_explorer(state: &AppState, connection_id: String) -> Result<(), String> {
+    state.explorer.cancel_attempt(&connection_id);
     if let Some(conn) = state.explorer.take(&connection_id, None) {
         Explorer::stop(conn).await;
     }
@@ -905,6 +973,7 @@ fn folder_scope<'q>(
 /// its cache and search entries.
 pub(crate) async fn forget_connection(state: &AppState, connection_id: &str) {
     let explorer = &state.explorer;
+    explorer.cancel_attempt(connection_id);
     if let Some(conn) = explorer.take(connection_id, None) {
         Explorer::stop(conn).await;
     }

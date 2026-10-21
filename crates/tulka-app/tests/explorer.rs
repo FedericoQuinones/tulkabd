@@ -52,6 +52,11 @@ struct Inner {
     wrong_database: AtomicBool,
     gate_entered: Notify,
     gate_release: Notify,
+    /// When set, `connect` signals `connect_entered` and waits for
+    /// `connect_release`.
+    gate_connect: AtomicBool,
+    connect_entered: Notify,
+    connect_release: Notify,
 }
 
 impl Inner {
@@ -82,6 +87,10 @@ impl Driver for MetaDriver {
     async fn connect(&self, p: &ConnectParams) -> Result<Box<dyn Session>, DriverError> {
         if p.password != PASSWORD {
             return Err(DriverError::AuthFailed("Login failed".into()));
+        }
+        if self.0.gate_connect.load(Ordering::SeqCst) {
+            self.0.connect_entered.notify_one();
+            self.0.connect_release.notified().await;
         }
         self.0.connects.lock().unwrap().push(p.database.clone());
         let open = self.0.open.fetch_add(1, Ordering::SeqCst) + 1;
@@ -461,20 +470,29 @@ async fn databases_without_access_are_marked_and_indexing_goes_on() {
     driver.set("b", Behavior::NoAccess);
     driver.set("c", Behavior::Fail);
     let f = indexed(driver).await;
+    // Only NoAccess marks a database; another error leaves it as it was.
     assert_eq!(
         f.events.finished("c1"),
         [
             ("a".into(), false),
             ("b".into(), true),
-            ("c".into(), true),
+            ("c".into(), false),
             ("d".into(), false)
         ]
     );
     let dbs = explorer_databases(&f.state, "c1".into()).await;
-    let flags: Vec<_> = dbs.iter().map(|d| (d.name.as_str(), d.no_access)).collect();
+    let flags: Vec<_> = dbs
+        .iter()
+        .map(|d| (d.name.as_str(), d.no_access, d.indexed_at.is_some()))
+        .collect();
     assert_eq!(
         flags,
-        [("a", false), ("b", true), ("c", true), ("d", false)]
+        [
+            ("a", false, true),
+            ("b", true, false),
+            ("c", false, false),
+            ("d", false, true)
+        ]
     );
     assert_eq!(search(&f, "pedidos").await.total_matches, 2);
     // Still connected: a database error is not a connection error.
@@ -487,6 +505,147 @@ async fn databases_without_access_are_marked_and_indexing_goes_on() {
     )
     .await
     .is_ok());
+}
+
+#[tokio::test]
+async fn other_database_errors_keep_the_cached_objects() {
+    let driver = Inner::new(&["db"]);
+    driver.set("db", Behavior::Fail);
+    let f = fx_with_cache(driver, cache_with(&["c1"]));
+    save(&f, conn("c1", "Main", None)).await;
+    search_settled(&f, "pedidos", 1).await;
+    connect_explorer(&f.state, "c1".into(), None).await.unwrap();
+    f.events.wait_idle("c1").await;
+    assert_eq!(f.events.finished("c1"), [("db".into(), false)]);
+    let dbs = explorer_databases(&f.state, "c1".into()).await;
+    assert_eq!(dbs.len(), 1);
+    assert!(!dbs[0].no_access && dbs[0].indexed_at == Some(1));
+    assert_eq!(dbs[0].tables, 2);
+    assert_eq!(
+        explorer_objects(&f.state, "c1".into(), "db".into(), ObjectKind::Table)
+            .await
+            .len(),
+        2
+    );
+    let r = search(&f, "pedidos").await;
+    assert_eq!(r.hits.len(), 1);
+    assert!(r.hits[0].connected);
+}
+
+/// Drives a future that never waits (no `.await` that can pend) to its end.
+fn poll_ready<F: std::future::Future>(f: F) -> F::Output {
+    let mut f = std::pin::pin!(f);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match f.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(v) => v,
+        std::task::Poll::Pending => panic!("the future waited"),
+    }
+}
+
+/// A fixture whose next `connect` blocks; returns once it is blocked.
+async fn connect_blocked() -> (Fx, tokio::task::JoinHandle<Result<ExplorerInfo, String>>) {
+    let f = fx(Inner::new(&["a", "b"]));
+    save(&f, conn("c1", "Main", None)).await;
+    f.driver.gate_connect.store(true, Ordering::SeqCst);
+    let state = f.state.clone();
+    let connecting = tokio::spawn(async move { connect_explorer(&state, "c1".into(), None).await });
+    tokio::time::timeout(TIMEOUT, f.driver.connect_entered.notified())
+        .await
+        .unwrap();
+    (f, connecting)
+}
+
+/// No Explorer, no session and nothing indexed is left for `c1`.
+async fn assert_nothing_left(f: &Fx) {
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(f.driver.open.load(Ordering::SeqCst), 0);
+    assert!(f.driver.snapshots().is_empty());
+    assert_eq!(
+        refresh_metadata(&f.state, "c1".into(), None)
+            .await
+            .unwrap_err(),
+        NOT_CONNECTED
+    );
+    assert!(explorer_databases(&f.state, "c1".into()).await.is_empty());
+    assert_eq!(search(f, "pedidos").await.indexing, 0);
+}
+
+#[tokio::test]
+async fn a_delete_during_connect_leaves_nothing_behind() {
+    let (f, connecting) = connect_blocked().await;
+    delete_connection(&f.state, "c1".into()).await.unwrap();
+    f.driver.connect_release.notify_one();
+    let result = tokio::time::timeout(TIMEOUT, connecting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.unwrap_err(), NOT_FOUND);
+    assert_nothing_left(&f).await;
+}
+
+#[tokio::test]
+async fn a_disconnect_during_connect_wins() {
+    let (f, connecting) = connect_blocked().await;
+    disconnect_explorer(&f.state, "c1".into()).await.unwrap();
+    f.driver.connect_release.notify_one();
+    let result = tokio::time::timeout(TIMEOUT, connecting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.unwrap_err(), CLOSED);
+    assert_eq!(
+        status_events(&f, "c1").last().unwrap(),
+        &(ConnectionStatus::Disconnected, None)
+    );
+    assert_nothing_left(&f).await;
+
+    // A later connect works normally.
+    f.driver.gate_connect.store(false, Ordering::SeqCst);
+    connect_explorer(&f.state, "c1".into(), None).await.unwrap();
+    f.events.wait_idle("c1").await;
+    assert_eq!(f.driver.snapshots(), ["a", "b"]);
+}
+
+#[tokio::test]
+async fn connected_is_reported_once_the_explorer_is_registered() {
+    #[derive(Default)]
+    struct Probe {
+        state: std::sync::OnceLock<std::sync::Weak<AppState>>,
+        seen: Mutex<Vec<bool>>,
+    }
+    impl AppEvents for Probe {
+        fn emit(&self, ev: AppEvent) {
+            if let AppEvent::ExplorerStatus {
+                status: ConnectionStatus::Connected,
+                ..
+            } = ev
+            {
+                let state = self.state.get().unwrap().upgrade().unwrap();
+                // A refresh succeeds only for a registered Explorer.
+                let registered =
+                    poll_ready(refresh_metadata(&state, "c1".into(), Some("a".into()))).is_ok();
+                self.seen.lock().unwrap().push(registered);
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let driver = Arc::new(Inner::new(&["a"]));
+    let probe = Arc::new(Probe::default());
+    let state = Arc::new(
+        AppState::new(
+            ConfigStore::at(dir.path().join("config.json")),
+            Arc::new(MemoryStore::default()),
+            vec![Arc::new(MetaDriver(driver.clone()))],
+        )
+        .unwrap()
+        .with_metadata(Arc::new(MetaCache::in_memory()), probe.clone()),
+    );
+    probe.state.set(Arc::downgrade(&state)).unwrap();
+    save_connection(&state, conn("c1", "Main", None), Some(PASSWORD.into()))
+        .await
+        .unwrap();
+    connect_explorer(&state, "c1".into(), None).await.unwrap();
+    assert_eq!(*probe.seen.lock().unwrap(), [true]);
 }
 
 #[tokio::test]
