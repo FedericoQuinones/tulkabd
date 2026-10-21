@@ -1,0 +1,19 @@
+# Local tooling and private working notes (not part of the product)
+.dev-docs/
+.superpowers/
+.taste-skill/
+.agents/
+.claude/
+skills-lock.json
+
+# Build
+node_modules/
+dist/
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
