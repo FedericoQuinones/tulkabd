@@ -32,3 +32,12 @@ export function applyEnvironment(state: EnvState, environment: Environment): Env
     guard: state.guardTouched ? state.guard : def.guard,
   };
 }
+
+/** Initial state for the dialog: touched flags are set only when the stored values differ from the environment defaults. */
+export function initialEnvState(stored?: { environment: Environment; color: string; guard: GuardLevel }): EnvState {
+  const environment = stored?.environment ?? "local";
+  const def = ENVIRONMENTS.find((e) => e.id === environment)!;
+  const color = stored?.color ?? def.color;
+  const guard = stored?.guard ?? def.guard;
+  return { environment, color, guard, colorTouched: color !== def.color, guardTouched: guard !== def.guard };
+}

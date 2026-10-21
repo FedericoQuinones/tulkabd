@@ -14,6 +14,7 @@
   let menu = $state<{ conn: ConnectionConfig; x: number; y: number } | null>(null);
   let renaming = $state<string | null>(null);
   let renameValue = $state("");
+  let renameCancelled = false;
   let deleting = $state<ConnectionConfig | null>(null);
   let actionError = $state<string | null>(null);
   let menuEl = $state<HTMLElement>();
@@ -56,6 +57,7 @@
   async function startRename(conn: ConnectionConfig) {
     closeMenu();
     renaming = conn.id;
+    renameCancelled = false;
     renameValue = conn.name;
     await tick();
     const el = document.getElementById("conn-rename") as HTMLInputElement | null;
@@ -66,6 +68,7 @@
   async function commitRename(conn: ConnectionConfig) {
     const name = renameValue.trim();
     renaming = null;
+    if (renameCancelled) return;
     if (name === "" || name === conn.name) return;
     try {
       await connections.save({ ...conn, name });
@@ -109,6 +112,7 @@
               if (e.key === "Enter") e.currentTarget.blur();
               else if (e.key === "Escape") {
                 e.stopPropagation();
+                renameCancelled = true;
                 renaming = null;
               }
             }}

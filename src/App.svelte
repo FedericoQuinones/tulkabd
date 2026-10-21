@@ -15,20 +15,34 @@
   let connectError = $state<string | null>(null);
   // Sessions are wired to tabs in a later task; the last opened one is kept here for now.
   let session = $state<SessionInfo | null>(null);
+  let sessionTab: string | null = null;
+  let connecting = false;
 
   void connections.refresh();
 
   async function connect(conn: ConnectionConfig, password?: string) {
+    if (connecting) return;
     connectError = null;
     if (!conn.passwordSaved && password === undefined) {
       prompting = conn;
       return;
     }
+    connecting = true;
     try {
-      session = await ipc.openSession(crypto.randomUUID(), conn.id, undefined, password);
+      const previous = sessionTab;
+      if (previous) {
+        sessionTab = null;
+        session = null;
+        await ipc.closeSession(previous).catch(() => {});
+      }
+      const tabId = crypto.randomUUID();
+      session = await ipc.openSession(tabId, conn.id, undefined, password);
+      sessionTab = tabId;
     } catch (e) {
       if (String(e) === "password_required") prompting = conn;
       else connectError = t("explorer.connectFailed", { error: String(e) });
+    } finally {
+      connecting = false;
     }
   }
 

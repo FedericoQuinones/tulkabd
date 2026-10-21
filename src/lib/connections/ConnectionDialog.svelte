@@ -3,7 +3,7 @@
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
   import type { ConnectionConfig, GuardLevel } from "../ipc";
-  import { applyEnvironment, ENVIRONMENTS, type EnvState } from "./env";
+  import { applyEnvironment, ENVIRONMENTS, initialEnvState, type EnvState } from "./env";
   import { connections } from "./store.svelte";
   import { validateConnection } from "./validate";
 
@@ -16,8 +16,12 @@
   // The dialog is keyed by connection in App, so the initial value is read once.
   const initial = untrack(() => initialProp);
 
-  const isEdit = initial !== undefined && connections.list.some((c) => c.id === initial.id);
-  const first = ENVIRONMENTS[3];
+  const startsEdit = initial !== undefined && connections.list.some((c) => c.id === initial.id);
+
+  // Generated once: a second Save after a first one updates the same connection.
+  const id = initial?.id ?? crypto.randomUUID();
+  let savedConn = $state<ConnectionConfig>();
+  const isEdit = $derived(startsEdit || savedConn !== undefined);
 
   let name = $state(initial?.name ?? "");
   let server = $state(initial?.server ?? "");
@@ -27,14 +31,8 @@
   let encrypt = $state(initial?.encrypt ?? true);
   let trust = $state(initial?.trustServerCertificate ?? false);
   let timeout = $state(initial?.connectTimeoutS ?? 15);
-  // Editing keeps the stored color/guard as-is; a new connection follows the environment.
-  let env = $state<EnvState>({
-    environment: initial?.environment ?? first.id,
-    color: initial?.color ?? first.color,
-    guard: initial?.guard ?? first.guard,
-    colorTouched: isEdit,
-    guardTouched: isEdit,
-  });
+  let env = $state<EnvState>(initialEnvState(initial));
+
 
   let errors = $state<Record<string, string>>({});
   let testResult = $state<{ ok: boolean; text: string } | null>(null);
@@ -47,7 +45,7 @@
 
   function build(): ConnectionConfig {
     return {
-      id: initial?.id ?? crypto.randomUUID(),
+      id,
       name: name.trim(),
       driver: initial?.driver ?? "mssql",
       server: server.trim(),
@@ -60,7 +58,7 @@
       encrypt,
       trustServerCertificate: trust,
       connectTimeoutS: timeout,
-      passwordSaved: initial?.passwordSaved ?? false,
+      passwordSaved: savedConn?.passwordSaved ?? initial?.passwordSaved ?? false,
     };
   }
 
@@ -89,6 +87,7 @@
     saveError = null;
     try {
       const result = await connections.save(build(), password || undefined);
+      savedConn = result.connection;
       if (result.keyringUnavailable) {
         // Keep the dialog open so the warning is seen; the connection itself is saved.
         keyringUnavailable = true;
@@ -170,7 +169,7 @@
               type="password"
               bind:value={password}
               autocomplete="off"
-              placeholder={isEdit && initial?.passwordSaved ? t("connection.field.passwordSaved") : ""}
+              placeholder={isEdit && (savedConn?.passwordSaved ?? initial?.passwordSaved) ? t("connection.field.passwordSaved") : ""}
             />
           </div>
         </div>
