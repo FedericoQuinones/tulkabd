@@ -119,7 +119,31 @@ fn fake_row(i: usize) -> Vec<Value> {
     ]
 }
 
+/// A row with a text and a binary cell, both over [`MAX_CELL_BYTES`].
+fn big_row() -> Vec<Value> {
+    vec![
+        Value::Text("x".repeat(MAX_CELL_BYTES + 100)),
+        Value::Bytes(vec![0xAB; MAX_CELL_BYTES + 100]),
+    ]
+}
+
 impl FakeSession {
+    /// Sends a new result of `n` rows of [`big_row`].
+    async fn big_rows(&self, index: &mut u32, n: usize, tx: &Sender<ExecEvent>) {
+        let i = *index;
+        *index += 1;
+        let columns = ["doc", "blob"]
+            .iter()
+            .map(|n| Column {
+                name: n.to_string(),
+                type_name: "fake".into(),
+            })
+            .collect();
+        let _ = tx.send(ExecEvent::ResultStart { index: i, columns }).await;
+        let rows = (0..n).map(|_| big_row()).collect();
+        let _ = tx.send(ExecEvent::Rows { index: i, rows }).await;
+    }
+
     /// Sends `n` rows of a new result in chunks of `chunk`.
     async fn rows(
         &self,
@@ -176,8 +200,8 @@ impl Session for FakeSession {
     }
 
     /// Statements separated by `;`: `rows N`, `trickle N` (one row per
-    /// event), `wait` (until cancelled), `error`, `disconnect`, `affected N`,
-    /// `panic`.
+    /// event), `big N` (rows of [`big_row`]), `wait` (until cancelled),
+    /// `error`, `disconnect`, `affected N`, `panic`.
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError> {
         self.cancel.requested.store(false, Ordering::SeqCst);
         let mut index = 0;
@@ -187,6 +211,7 @@ impl Session for FakeSession {
             match cmd {
                 "rows" => self.rows(&mut index, n, 500, &tx).await?,
                 "trickle" => self.rows(&mut index, n, 1, &tx).await?,
+                "big" => self.big_rows(&mut index, n, &tx).await,
                 "affected" => {
                     let _ = tx.send(ExecEvent::RowsAffected { count: n as u64 }).await;
                 }
@@ -851,6 +876,70 @@ async fn copy_results_in_excel_and_ai_formats() {
     )
     .await
     .is_err());
+}
+
+#[tokio::test]
+async fn large_cells_are_capped_with_one_warning_and_trimmed_for_display() {
+    let (f, _) = connected("t1").await;
+    let (result, events) = run(&f.state, "t1", "big 2; rows 1; big 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    let warnings: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, UiEvent::Message { .. }))
+        .collect();
+    assert_eq!(
+        warnings,
+        vec![&UiEvent::Message {
+            kind: MessageKind::Warning,
+            text: CELLS_CAPPED_WARNING.into(),
+            line: None,
+        }]
+    );
+
+    // The grid gets the display form.
+    let rows = fetch_rows(&f.state, "t1".into(), 0, 0, 10).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0],
+        vec![
+            Value::Text(format!("{}…", "x".repeat(DISPLAY_TEXT_CHARS))),
+            Value::Bytes(vec![0xAB; DISPLAY_BYTES + 1]),
+        ]
+    );
+    // Small values are sent as they are.
+    let rows = fetch_rows(&f.state, "t1".into(), 1, 0, 10).await.unwrap();
+    assert_eq!(rows, vec![fake_row(0)]);
+
+    // Copy uses the stored value, capped at MAX_CELL_BYTES.
+    let clipboard = Arc::new(FakeClipboard::default());
+    let doc = Selection::Cells {
+        rows: (0, 0),
+        cols: (0, 0),
+    };
+    copy_results(
+        &f.state,
+        "t1".into(),
+        0,
+        CopyMode::Excel,
+        doc,
+        clipboard.clone(),
+    )
+    .await
+    .unwrap();
+    let doc_column = Column {
+        name: "doc".into(),
+        type_name: "fake".into(),
+    };
+    let expected = to_excel_tsv(
+        &[doc_column],
+        &[vec![Value::Text("x".repeat(MAX_CELL_BYTES))]],
+        system_decimal_separator(),
+    );
+    assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+
+    // A run without large values has no warning.
+    let (_, events) = run(&f.state, "t1", "rows 3").await;
+    assert!(!events.iter().any(|e| matches!(e, UiEvent::Message { .. })));
 }
 
 #[tokio::test]

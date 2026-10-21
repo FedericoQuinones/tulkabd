@@ -17,7 +17,10 @@ pub use query::{
     cancel_query, close_session, copy_results, fetch_rows, open_session, run_query, use_database,
     MAX_FETCH_ROWS,
 };
-pub use results::{ResultBuffer, Selection, MAX_ROWS};
+pub use results::{
+    cap_cell, display_cell, ResultBuffer, Selection, CELLS_CAPPED_WARNING, DISPLAY_BYTES,
+    DISPLAY_TEXT_CHARS, MAX_CELL_BYTES, MAX_ROWS,
+};
 pub use state::{AppState, SharedBuffer, TabState};
 pub use types::{
     Clipboard, CopyMode, CopyOutcome, RunOutcome, RunSummary, SaveConnectionResult, SessionInfo,

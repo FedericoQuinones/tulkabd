@@ -119,6 +119,10 @@ export const runQuery = (tabId: string, sql: string, onEvent: (e: UiEvent) => vo
 
 export const cancelQuery = (tabId: string) => invoke<void>("cancel_query", { tabId });
 
+/**
+ * Rows in display form: text over 1000 characters arrives as its first 1000 plus "…",
+ * binary over 32 bytes as its first 33 bytes. Copying uses the full stored values.
+ */
 export const fetchRows = (tabId: string, resultIndex: number, offset: number, limit: number) =>
   invoke<Value[][]>("fetch_rows", { tabId, resultIndex, offset, limit });
 

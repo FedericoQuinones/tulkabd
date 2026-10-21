@@ -14,7 +14,7 @@ use tulka_core::{
 };
 
 use crate::connections::{blocking, connect_params, resolve_password};
-use crate::results::{ResultBuffer, Selection, MAX_ROWS};
+use crate::results::{display_cell, ResultBuffer, Selection, CELLS_CAPPED_WARNING, MAX_ROWS};
 use crate::state::{AppState, SharedBuffer, TabState, Tabs};
 use crate::types::{
     Clipboard, CopyMode, CopyOutcome, RunOutcome, RunSummary, SessionInfo, UiEvent, BUSY, CLOSED,
@@ -213,9 +213,10 @@ pub async fn cancel_query(state: &AppState, tab_id: String) -> Result<(), String
     }
 }
 
-/// Up to `limit` (at most 1000) rows of a result, from `offset`. Works while
-/// the result is still streaming: rows below the last `RowCount` total are
-/// always there.
+/// Up to `limit` (at most 1000) rows of a result, from `offset`, in display
+/// form: long text and binary cells are shortened (see [`display_cell`]).
+/// Works while the result is still streaming: rows below the last `RowCount`
+/// total are always there.
 pub async fn fetch_rows(
     state: &AppState,
     tab_id: String,
@@ -225,7 +226,11 @@ pub async fn fetch_rows(
 ) -> Result<Vec<Vec<Value>>, String> {
     let buffer = result_of(state, &tab_id, result_index)?;
     let buffer = buffer.read().await;
-    Ok(buffer.window(offset, limit.min(MAX_FETCH_ROWS)).to_vec())
+    Ok(buffer
+        .window(offset, limit.min(MAX_FETCH_ROWS))
+        .iter()
+        .map(|row| row.iter().map(display_cell).collect())
+        .collect())
 }
 
 /// Copies (part of) a result to the clipboard as Excel TSV or in the
@@ -402,6 +407,8 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
     async fn run(&self, mut rx: Receiver<ExecEvent>) -> bool {
         let mut counter = RowCounter::default();
         let mut disconnected = false;
+        // The capped-cell warning is shown once per run.
+        let mut warned_capped = false;
         loop {
             let next = match counter.deadline() {
                 Some(deadline) => tokio::select! {
@@ -417,8 +424,16 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
             match ev {
                 ExecEvent::Rows { index, rows } => {
                     let received = rows.len();
-                    if let Some((total, truncated)) = self.push_rows(index, rows).await {
+                    if let Some((total, truncated, capped)) = self.push_rows(index, rows).await {
                         counter.rows(index, received, total, truncated, self.emit);
+                        if capped && !warned_capped {
+                            warned_capped = true;
+                            (self.emit)(UiEvent::Message {
+                                kind: MessageKind::Warning,
+                                text: CELLS_CAPPED_WARNING.into(),
+                                line: None,
+                            });
+                        }
                     }
                 }
                 ExecEvent::ResultStart { index, columns } => {
@@ -464,13 +479,14 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
         self.buffer(index, Some(columns));
     }
 
-    /// Appends rows to result `index`; returns its row count and truncated
-    /// flag, or `None` if the tab was closed or replaced.
-    async fn push_rows(&self, index: u32, rows: Vec<Vec<Value>>) -> Option<(usize, bool)> {
+    /// Appends rows to result `index`; returns its row count, its truncated
+    /// flag and whether a cell of these rows was capped, or `None` if the tab
+    /// was closed or replaced.
+    async fn push_rows(&self, index: u32, rows: Vec<Vec<Value>>) -> Option<(usize, bool, bool)> {
         let buffer = self.buffer(index, None)?;
         let mut buffer = buffer.write().await;
-        buffer.push_rows(rows);
-        Some((buffer.rows.len(), buffer.truncated))
+        let capped = buffer.push_rows(rows);
+        Some((buffer.rows.len(), buffer.truncated, capped))
     }
 }
 
