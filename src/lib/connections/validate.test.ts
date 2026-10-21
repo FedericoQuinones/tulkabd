@@ -1,6 +1,6 @@
 import { isNamedInstance, validateConnection, type ConnectionForm } from "./validate";
 
-const valid: ConnectionForm = { name: "Docker local", server: "127.0.0.1", port: 14333 };
+const valid: ConnectionForm = { name: "Docker local", server: "127.0.0.1", port: 14333, timeout: 15 };
 
 describe("validateConnection", () => {
   it("accepts a valid form", () => {
@@ -32,5 +32,14 @@ describe("validateConnection", () => {
   it("tells named instances apart", () => {
     expect(isNamedInstance("db01\\SQLEXPRESS")).toBe(true);
     expect(isNamedInstance("db01")).toBe(false);
+  });
+  it("requires a connect timeout of 1-600 whole seconds", () => {
+    for (const timeout of [null, 0, -1, 601, 2.5]) {
+      expect(validateConnection({ ...valid, timeout })).toEqual({
+        timeout: "connection.errors.timeoutRange",
+      });
+    }
+    expect(validateConnection({ ...valid, timeout: 1 })).toEqual({});
+    expect(validateConnection({ ...valid, timeout: 600 })).toEqual({});
   });
 });

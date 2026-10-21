@@ -30,7 +30,9 @@
   let password = $state("");
   let encrypt = $state(initial?.encrypt ?? true);
   let trust = $state(initial?.trustServerCertificate ?? false);
-  let timeout = $state(initial?.connectTimeoutS ?? 15);
+  // `null` while the number field is empty.
+  let timeout = $state<number | null>(initial?.connectTimeoutS ?? 15);
+  let advancedOpen = $state(false);
   let env = $state<EnvState>(initialEnvState(initial));
 
 
@@ -57,13 +59,16 @@
       guard: env.guard,
       encrypt,
       trustServerCertificate: trust,
-      connectTimeoutS: timeout,
+      // Only called after validate(), which rejects an empty timeout.
+      connectTimeoutS: timeout ?? 15,
       passwordSaved: savedConn?.passwordSaved ?? initial?.passwordSaved ?? false,
     };
   }
 
   function validate(): boolean {
-    errors = validateConnection({ name, server, port });
+    errors = validateConnection({ name, server, port, timeout });
+    // The timeout field sits in the collapsed Advanced section.
+    if (errors.timeout) advancedOpen = true;
     return Object.keys(errors).length === 0;
   }
 
@@ -223,13 +228,22 @@
           </div>
         </div>
         <div class="hint">{t("connection.guard.hint")}</div>
-        <details class="adv">
+        <details class="adv" bind:open={advancedOpen}>
           <summary>{t("connection.advanced")}</summary>
           <label class="chk"><input type="checkbox" bind:checked={encrypt} />{t("connection.field.encrypt")}</label>
           <label class="chk"><input type="checkbox" bind:checked={trust} />{t("connection.field.trust")}</label>
           <div class="fl">
             <label for="c-timeout">{t("connection.field.timeout")}</label>
-            <input id="c-timeout" class="m" type="number" min="1" bind:value={timeout} />
+            <input
+              id="c-timeout"
+              class="m"
+              type="number"
+              min="1"
+              max="600"
+              bind:value={timeout}
+              aria-invalid={!!errors.timeout}
+            />
+            {#if errors.timeout}<div class="err">{t(errors.timeout)}</div>{/if}
           </div>
         </details>
         {#if keyringUnavailable}

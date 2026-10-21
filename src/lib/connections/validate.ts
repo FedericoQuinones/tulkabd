@@ -2,6 +2,8 @@ export interface ConnectionForm {
   name: string;
   server: string;
   port: number;
+  /** Seconds; `null` when the field was cleared. */
+  timeout: number | null;
 }
 
 /** Maps each invalid field to the i18n key of its error. An empty map means valid. */
@@ -12,6 +14,10 @@ export function validateConnection(form: ConnectionForm): Record<string, string>
   else if (!validServer(form.server)) errors.server = "connection.errors.serverInstance";
   if (!Number.isInteger(form.port) || form.port < 1 || form.port > 65535) {
     errors.port = "connection.errors.portRange";
+  }
+  const timeout = form.timeout;
+  if (timeout === null || !Number.isInteger(timeout) || timeout < 1 || timeout > 600) {
+    errors.timeout = "connection.errors.timeoutRange";
   }
   return errors;
 }

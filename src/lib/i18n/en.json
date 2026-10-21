@@ -63,6 +63,7 @@
   "connection.errors.nameRequired": "Enter a name.",
   "connection.errors.portRange": "Port must be between 1 and 65535.",
   "connection.errors.serverRequired": "Enter a server.",
+  "connection.errors.timeoutRange": "Timeout must be a whole number of seconds from 1 to 600.",
   "connection.errors.serverInstance": "Use host or host\\instance, for example db01\\SQLEXPRESS.",
   "connection.instanceHint": "Named instance: with port 1433, its port is looked up through SQL Server Browser (UDP 1434). Any other port is used directly.",
   "connection.errors.saveFailed": "Could not save: {error}",
