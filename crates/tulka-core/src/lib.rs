@@ -5,6 +5,8 @@
 pub mod config;
 pub mod driver;
 pub mod error;
+pub mod export;
+pub mod locale;
 pub mod secrets;
 pub mod value;
 
@@ -16,6 +18,8 @@ pub use driver::{
     APPLICATION_NAME,
 };
 pub use error::DriverError;
+pub use export::{estimate_tokens, to_ai, to_excel_tsv};
+pub use locale::{decimal_separator_for, system_decimal_separator};
 pub use secrets::{KeyringStore, MemoryStore, SecretError, SecretStore, UnavailableStore};
 pub use value::Value;
 
