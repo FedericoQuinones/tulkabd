@@ -62,6 +62,8 @@
       // Only called after validate(), which rejects an empty timeout.
       connectTimeoutS: timeout ?? 15,
       passwordSaved: savedConn?.passwordSaved ?? initial?.passwordSaved ?? false,
+      // The backend keeps the stored folder on edit; this only matters for a new connection.
+      folderId: initial?.folderId ?? null,
     };
   }
 

@@ -13,7 +13,7 @@ import * as ipc from "../ipc";
 import { pane } from "./pane.svelte";
 
 const conn = { id: "c1", name: "Local", passwordSaved: true } as ConnectionConfig;
-const info = { server: { version: "2022", user: "sa" }, databases: ["master", "Sales"], currentDatabase: "master" };
+const info = { server: { version: "2022", user: "sa", singleDatabase: false }, databases: ["master", "Sales"], currentDatabase: "master" };
 const ok: RunSummary = { elapsedMs: 1, finishedAt: "", outcome: "ok" };
 
 function deferred<T>() {
