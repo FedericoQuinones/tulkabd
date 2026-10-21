@@ -142,6 +142,7 @@ mod tests {
     // exercises the same shared loader + per-cert `Certificate::from_der`
     // conversion the connect path uses, without needing a live server.
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn multi_cert_ca_file_loads_all_certs() {
         let ders = certs::trust_anchors(&ExtraCa::File(PathBuf::from(
             "docker/certs/server-full.crt",
@@ -154,6 +155,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn multi_cert_ca_bundle_loads_all_certs() {
         let bytes = std::fs::read("docker/certs/server-full.crt").unwrap();
         let ders = certs::trust_anchors(&ExtraCa::Bundle(bytes)).expect("multi-cert bundle loads");
@@ -192,6 +194,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn multi_cert_extra_cas_load_all_via_helper() {
         // The helper loads every cert from a multi-cert file through the
         // real connect-path code, converting each to a native-tls Certificate.

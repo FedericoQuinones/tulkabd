@@ -394,3 +394,150 @@ async fn cancel_stops_execute_and_client_survives() {
     );
     assert_eq!(select_one(&mut client).await, 1);
 }
+
+/// Many rows of ~250 bytes, produced slowly enough (a SHA-256 over 36 KB per
+/// row) that the client catches up with the server and waits for packets, so
+/// a stream dropped while suspended is almost always in the middle of a row
+/// token: packets are filled without regard to token boundaries.
+const SLOW_ROWS: &str = "SELECT TOP 1000000 a.object_id, b.object_id, REPLICATE('x', 200) AS pad, \
+                         HASHBYTES('SHA2_256', REPLICATE(CONVERT(varchar(max), NEWID()), 1000)) AS h \
+                         FROM sys.all_objects a CROSS JOIN sys.all_objects b";
+
+/// How a row stream is left when it is dropped.
+enum Suspended {
+    /// The stream was dropped while suspended inside a token decode (waiting
+    /// for the next packet). With rows of ~220 bytes and packets of 4 KiB this
+    /// is almost always in the middle of a token.
+    InsideDecode,
+    /// The stream already ended with `Error::Cancelled` before the drop.
+    AlreadyCancelled,
+    /// The stream ran to its end without ever being suspended.
+    Completed,
+}
+
+/// Polls `stream` without waiting until it is suspended inside the stream
+/// (the server has not sent the next packet yet), then returns, so the caller
+/// drops it in that state. Dropping the stream between items would instead
+/// leave the connection at a token boundary.
+fn poll_until_suspended(stream: &mut tiberius::QueryStream<'_>, rows: &mut usize) -> Suspended {
+    use futures_util::FutureExt;
+
+    loop {
+        match stream.try_next().now_or_never() {
+            None => return Suspended::InsideDecode,
+            Some(Ok(Some(QueryItem::Row(_)))) => *rows += 1,
+            Some(Ok(Some(_))) => (),
+            Some(Ok(None)) => return Suspended::Completed,
+            Some(Err(Error::Cancelled)) => return Suspended::AlreadyCancelled,
+            Some(Err(e)) => panic!("unexpected {e:?} after {rows} rows"),
+        }
+    }
+}
+
+async fn read_rows(stream: &mut tiberius::QueryStream<'_>, n: usize) {
+    let mut rows = 0;
+    while rows < n {
+        if let Some(QueryItem::Row(_)) = stream.try_next().await.expect("row") {
+            rows += 1;
+        }
+    }
+}
+
+async fn assert_usable_quickly(client: &mut TestClient) {
+    let started = Instant::now();
+    assert_eq!(select_one(client).await, 1);
+    assert_eq!(select_one(client).await, 1);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+/// Cancel requested but not sent yet (the stream is not polled after the
+/// cancel), then the row stream is dropped mid-token. The next request sends
+/// the Attention, drains the cancelled response and runs normally.
+#[tokio::test]
+async fn cancel_requested_then_dropped_row_stream_keeps_client_usable() {
+    let Some(mut client) =
+        connect("cancel_requested_then_dropped_row_stream_keeps_client_usable").await
+    else {
+        return;
+    };
+
+    let mut inside_decode = 0;
+    for warmup in [3, 50, 777, 0, 10] {
+        let handle = client.cancel_handle();
+        {
+            let mut stream = client.simple_query(SLOW_ROWS).await.expect("big query");
+            read_rows(&mut stream, warmup).await;
+            let mut rows = 0;
+            if let Suspended::InsideDecode = poll_until_suspended(&mut stream, &mut rows) {
+                inside_decode += 1;
+            }
+            handle.cancel().await.unwrap();
+        }
+        assert_usable_quickly(&mut client).await;
+    }
+    assert!(
+        inside_decode > 0,
+        "no round dropped the stream inside a decode"
+    );
+}
+
+/// Cancel sent (the stream is polled after the cancel, so the Attention goes
+/// out), then the row stream is dropped mid-token before the acknowledgement
+/// was read. The next request finds the acknowledgement and runs normally.
+#[tokio::test]
+async fn cancel_sent_then_dropped_row_stream_keeps_client_usable() {
+    let Some(mut client) = connect("cancel_sent_then_dropped_row_stream_keeps_client_usable").await
+    else {
+        return;
+    };
+
+    let mut inside_decode = 0;
+    for warmup in [3, 50, 777, 0, 10] {
+        let handle = client.cancel_handle();
+        {
+            let mut stream = client.simple_query(SLOW_ROWS).await.expect("big query");
+            read_rows(&mut stream, warmup).await;
+            handle.cancel().await.unwrap();
+            let mut rows = 0;
+            if let Suspended::InsideDecode = poll_until_suspended(&mut stream, &mut rows) {
+                inside_decode += 1;
+            }
+        }
+        assert_usable_quickly(&mut client).await;
+    }
+    assert!(
+        inside_decode > 0,
+        "no round dropped the stream inside a decode"
+    );
+}
+
+/// `Client::cancel_query` after dropping a row stream mid-token.
+#[tokio::test]
+async fn cancel_query_after_dropped_row_stream_keeps_client_usable() {
+    let Some(mut client) =
+        connect("cancel_query_after_dropped_row_stream_keeps_client_usable").await
+    else {
+        return;
+    };
+
+    for warmup in [3, 200, 0] {
+        {
+            let mut stream = client.simple_query(SLOW_ROWS).await.expect("big query");
+            read_rows(&mut stream, warmup).await;
+            let mut rows = 0;
+            assert!(matches!(
+                poll_until_suspended(&mut stream, &mut rows),
+                Suspended::InsideDecode
+            ));
+        }
+
+        let started = Instant::now();
+        client.cancel_query().await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_usable_quickly(&mut client).await;
+    }
+}

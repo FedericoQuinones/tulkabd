@@ -89,13 +89,19 @@ impl CancelHandle {
     /// [`Error::Cancelled`] (items received before that are still yielded) and
     /// the client can be used again.
     ///
-    /// If the result stream was dropped instead, the Attention is sent by the
-    /// next request on the client before it runs, so that request does not
-    /// wait for the abandoned one to finish.
+    /// If the result stream is dropped after cancelling (whether or not the
+    /// Attention was already sent), the next request on the client sends the
+    /// Attention if needed and first discards the rest of the cancelled
+    /// response up to the acknowledgement. It waits only for the server to
+    /// stop and for the data already in flight, not for the abandoned request
+    /// to finish. When the dropped stream stopped in the middle of a token
+    /// (the usual case for rows), the acknowledgement is located at the packet
+    /// level.
     ///
     /// Calling this while no request is in flight, or after the whole response
     /// has already arrived, is a no-op: sending a new request clears any
-    /// pending cancellation.
+    /// pending cancellation. So is a cancel issued before the request has been
+    /// written to the wire: it is discarded when the request is sent.
     ///
     /// # Errors
     ///
@@ -136,6 +142,9 @@ pub(crate) struct AttentionState {
     /// not fully decoded (a result stream was dropped mid-token). The token
     /// stream cannot resume from such a position.
     pub(crate) mid_token: bool,
+    /// The last bytes consumed from the read buffer since the Attention was
+    /// sent, for the packet-level search of the acknowledgement.
+    pub(crate) consumed_tail: Vec<u8>,
 }
 
 impl AttentionState {
@@ -164,5 +173,16 @@ impl AttentionState {
     /// already finished.
     pub(crate) fn clear_request(&self) {
         self.signal.requested.store(false, Ordering::Release);
+    }
+
+    /// Appends consumed bytes to `consumed_tail`, keeping only the last
+    /// `CONSUMED_TAIL_LEN` (at least the size of a DONE token).
+    pub(crate) fn record_consumed(&mut self, bytes: &[u8]) {
+        const CONSUMED_TAIL_LEN: usize = 16;
+
+        let bytes = &bytes[bytes.len().saturating_sub(CONSUMED_TAIL_LEN)..];
+        self.consumed_tail.extend_from_slice(bytes);
+        let excess = self.consumed_tail.len().saturating_sub(CONSUMED_TAIL_LEN);
+        self.consumed_tail.drain(..excess);
     }
 }

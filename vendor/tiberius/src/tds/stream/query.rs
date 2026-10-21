@@ -357,12 +357,13 @@ pub enum QueryItem {
     /// `PRINT`, `RAISERROR` with severity 10 or lower, `SET STATISTICS`
     /// output, ...), in the order the server sent it.
     Info(InfoMessage),
-    /// tulka patch: a statement finished (a DONE, DONEINPROC or DONEPROC
-    /// token). Emitted once per statement, in order, so the items can be
-    /// matched to the statements of the batch; `rows_affected` is `None` for
-    /// statements without a row count. Not emitted for the closing DONEPROC
-    /// of the `sp_executesql` call behind [`Client::query`], nor for the
-    /// DONE that acknowledges a cancel.
+    /// tulka patch: one item per DONE, DONEINPROC or DONEPROC token the
+    /// server sends, in order; `rows_affected` is `None` when the token has no
+    /// row count. This is not a strict one-item-per-statement mapping: nested
+    /// procedures, triggers and dynamic SQL add their own items,
+    /// `SET NOCOUNT ON` suppresses some, and statements such as `DECLARE` emit
+    /// none. Not emitted for the closing DONEPROC of the `sp_executesql` call
+    /// behind [`Client::query`], nor for the DONE that acknowledges a cancel.
     ///
     /// [`Client::query`]: crate::Client::query
     Done(DoneInfo),

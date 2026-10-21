@@ -1082,6 +1082,84 @@ mod tests {
         // DONE without the DONE_COUNT bit carries no row count.
         assert_eq!(counts, vec![None, Some(2)]);
     }
+
+    // A packet that does not end the message.
+    fn mid_packet_bytes(payload: &[u8]) -> Vec<u8> {
+        let mut header = PacketHeader::batch(1);
+        header.set_status(PacketStatus::NormalMessage);
+        let packet = Packet::new(header, BytesMut::from(payload));
+
+        let mut buf = BytesMut::new();
+        packet.encode(&mut buf).unwrap();
+        buf.to_vec()
+    }
+
+    #[tokio::test]
+    async fn requested_cancel_after_mid_token_drop_drains_by_packets() {
+        // The first message is not parseable from the current position (a
+        // dropped stream left the buffer mid-token); the second carries the
+        // DONE_ATTN.
+        let mut first = vec![0x42u8; 50];
+        first.extend_from_slice(&done_token(DONE_ERROR, 0, 0));
+        let mut conn = two_messages(&first, &done_token(DONE_ATTN, 0, 0));
+
+        conn.cancel_handle().cancel().await.unwrap();
+        conn.set_mid_token(true);
+
+        conn.flush_stream()
+            .await
+            .expect("the DONE_ATTN must be found at packet level");
+        assert!(conn.is_eof());
+        assert!(!conn.awaiting_attention_ack());
+        conn.ensure_not_poisoned()
+            .expect("connection must stay usable");
+    }
+
+    #[tokio::test]
+    async fn packet_drain_finds_done_attn_split_and_partly_consumed() {
+        use futures_util::io::AsyncReadExt;
+
+        // One message: 30 bytes of row data, then the DONE_ATTN split across
+        // two packets. The dropped stream had consumed the row data and the
+        // first 5 bytes of the DONE_ATTN.
+        let attn = done_token(DONE_ATTN, 0, 0);
+        let mut first = vec![0x42u8; 30];
+        first.extend_from_slice(&attn[..5]);
+        let mut wire = mid_packet_bytes(&first);
+        wire.extend_from_slice(&packet_bytes(&attn[5..]));
+        let mut conn = Connection::test_over(MockStream::new(wire), false);
+
+        // The cancel is sent on the first packet read.
+        conn.cancel_handle().cancel().await.unwrap();
+        let mut consumed = vec![0u8; 35];
+        conn.read_exact(&mut consumed).await.unwrap();
+        assert!(conn.awaiting_attention_ack());
+        conn.set_mid_token(true);
+
+        conn.cancel_request()
+            .await
+            .expect("the split DONE_ATTN must be recognised");
+        assert!(conn.is_eof());
+        assert!(!conn.awaiting_attention_ack());
+    }
+
+    #[tokio::test]
+    async fn packet_drain_skips_messages_without_done_attn() {
+        // A message ending with a plain DONE is not the acknowledgement.
+        let mut first = vec![0x42u8; 20];
+        first.extend_from_slice(&done_token(DONE_MORE | DONE_COUNT, 0, 7));
+        let mut wire = packet_bytes(&first);
+        wire.extend_from_slice(&packet_bytes(&done_token(DONE_ERROR, 0, 0)));
+        wire.extend_from_slice(&packet_bytes(&done_token(DONE_ATTN, 0, 0)));
+        let mut conn = Connection::test_over(MockStream::new(wire), false);
+
+        conn.cancel_handle().cancel().await.unwrap();
+        conn.set_mid_token(true);
+        conn.flush_stream().await.unwrap();
+
+        assert!(conn.is_eof());
+        assert!(!conn.awaiting_attention_ack());
+    }
 }
 
 // Server-free tests for the `RoundTripTimeout` stream combinator that backs

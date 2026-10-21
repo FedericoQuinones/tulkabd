@@ -707,10 +707,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
     /// been dropped — typically from a separate task holding the client, or
     /// after a cancelled/timed-out future has released its borrow.
     ///
-    /// If the whole response of the dropped request had already arrived there
-    /// is nothing to cancel and this returns `Ok(())` without contacting the
-    /// server. To cancel *while* a result stream is still borrowing the
-    /// client, use a [`CancelHandle`] from [`cancel_handle`] instead.
+    /// The rest of the cancelled response is discarded up to the
+    /// acknowledgement, so this waits only for the server to stop and for the
+    /// data already in flight. If the dropped stream stopped in the middle of
+    /// a token (the usual case for a stream of rows), the acknowledgement is
+    /// located at the packet level. If the whole response of the dropped
+    /// request had already arrived there is nothing to cancel and this
+    /// returns `Ok(())` without contacting the server. To cancel *while* a
+    /// result stream is still borrowing the client, use a [`CancelHandle`]
+    /// from [`cancel_handle`] instead.
     ///
     /// [`query`]: #method.query
     /// [`execute`]: #method.execute

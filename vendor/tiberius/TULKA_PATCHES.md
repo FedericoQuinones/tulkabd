@@ -88,12 +88,13 @@ pub struct DoneInfo {
 }
 ```
 
-It is produced by every DONE, DONEINPROC and DONEPROC token, with
-`rows_affected: Some(n)` when the `DONE_COUNT` status bit is set and `None`
-otherwise (DDL, `SET`, `PRINT`, `USE`, everything under `SET NOCOUNT ON`).
-Because a statement without a count still yields a `Done`, callers can match
-items to the statements of a batch by position. Two DONE tokens are not
-statements and yield nothing:
+There is one item per DONE / DONEPROC / DONEINPROC token the server sends, in
+order, with `rows_affected: Some(n)` when the `DONE_COUNT` status bit is set
+and `None` otherwise (DDL, `SET`, `PRINT`, `USE`, everything under
+`SET NOCOUNT ON`). This is not a strict one-item-per-statement mapping: nested
+procedures, triggers and dynamic SQL add their own items, `SET NOCOUNT ON`
+suppresses some, and statements such as `DECLARE` emit none. Two DONE tokens
+yield nothing:
 - the DONE carrying `DONE_ATTN` (the acknowledgement of a cancel, patch 3);
 - for RPC requests only (`Client::query` and `Query::query`, which run
   `sp_executesql`), the closing DONEPROC without `DONE_MORE`, which ends the
@@ -141,9 +142,14 @@ first error of the response, at the end of the stream.
   is in sync afterwards. `Client::execute` ends with `Error::Cancelled` the
   same way (tested); `Command::exec` reads through the same token stream and
   should too (not tested).
-- If the stream was dropped instead, the next request on the client sends the
-  pending Attention and reads up to its acknowledgement before running, so it
-  does not wait for the abandoned request to finish.
+- If the stream is dropped after the cancel (whether or not the Attention was
+  already sent), the next request on the client (or `cancel_query`) sends the
+  Attention if needed and discards the rest of the cancelled response up to
+  its acknowledgement before running. It waits only for the server to stop
+  and for the data already in flight, not for the abandoned request to
+  finish.
+- A cancel issued before the request has been written to the wire is
+  discarded when the request is sent.
 - A cancel while no request is in flight, or after the whole response has
   already arrived, is a no-op: sending a request clears any pending cancel.
 - The existing `Client::cancel_query()` is fixed (see below).
@@ -184,12 +190,23 @@ continues with the next message. When it decodes a DONE / DONEPROC / DONEINPROC
 with `DONE_ATTN`, it clears the state and, at the end of that message, ends the
 stream with `Error::Cancelled`. `QueryStream` does not yield the ack itself.
 
-The token stream also records whether it is in the middle of a token (bytes
-consumed, token not complete). If a stream is dropped mid-token while an ack is
-still expected, the rest of the cancelled response cannot be parsed reliably,
-so the connection is poisoned with a clear `Protocol` error (open a new one)
-instead of guessing. This needs a stream dropped while it was suspended inside
-a token split across packets, after the Attention was sent.
+**Dropped streams.** The token stream also records whether it is in the
+middle of a token (bytes consumed, token not complete). A dropped row stream
+is usually in that state: it was suspended waiting for a packet, and SQL
+Server fills packets without regard to token boundaries. When the
+acknowledgement is still expected from that state (from `flush_stream` or
+`cancel_query`), token parsing cannot resume, so the acknowledgement is located
+at the packet level instead (`drain_attention_ack_by_packets`). Every server
+message ends with a fixed-size DONE-family token (13 bytes from TDS 7.2), and
+`DONE_ATTN` is always the final token of its message, so at each
+end-of-message the last 13 bytes are checked for a DONE / DONEPROC /
+DONEINPROC token (`0xFD`..`0xFF`) with the `DONE_ATTN` bit. Otherwise the
+next message is read. While an Attention is unacknowledged, `poll_read` keeps
+the last 16 consumed bytes, so a `DONE_ATTN` split across packets and partly
+read by the dropped stream is still recognised. When the buffer is at a
+token boundary (for example a stream dropped during a `WAITFOR`, or between
+items), the token-level drain is used as before. The connection is poisoned
+only if the transport fails or closes during the drain.
 
 `flush_stream`'s plain packet drain now reads the transport directly (not
 through `poll_next`), so a concurrent cancel cannot send an Attention in the
@@ -210,12 +227,15 @@ cancel.
 
 **Files.**
 - `src/client/cancel.rs` (new): `CancelSignal`, `CancelHandle`,
-  `AttentionState`.
+  `AttentionState` (with `consumed_tail` / `record_consumed`).
 - `src/client/connection.rs`: `attention` field (all constructors),
   `send` clears a stale cancel, `cancel_request`, `write_attention`,
-  `drain_attention_ack`, `cancel_handle`, `awaiting_attention_ack`,
-  `attention_acknowledged`, `continue_with_next_message`, `set_mid_token`,
-  `poll_attention`, `flush_stream`, `poll_next`.
+  `drain_attention_ack`, `drain_attention_ack_by_packets` with the helpers
+  `keep_last` and `is_done_attention`, `cancel_handle`,
+  `awaiting_attention_ack`, `attention_acknowledged`,
+  `continue_with_next_message`, `set_mid_token`, `poll_attention`,
+  `flush_stream`, `poll_next`, `poll_read` (records consumed bytes while an
+  Attention is unacknowledged).
 - `src/tds/stream/token.rs`: `TokenStream::cancelled`, `try_unfold` reads past
   end-of-message while awaiting the ack, tracks mid-token, detects the ack and
   ends with `Error::Cancelled`; server-free unit tests at the end of the
@@ -237,3 +257,19 @@ stay.
   need `TULKA_MSSQL_TEST` (`server=...;port=...;user=...;password=...`) and
   return early, passing, when it is unset.
 - `tests/query.rs`: two `_ => {}` match arms for the new `QueryItem` variants.
+
+## 5. Removed files
+
+- `docker/` (upstream's SQL Server test containers and certificates) is
+  deleted. It held test TLS private keys (`certs/customCA.key`,
+  `certs/server.key`, `certs/server.pem`, `certs/passphrase.txt`) that secret
+  scanners and GitHub push protection flag, and nothing in the build or in the
+  tests used here needs it (upstream's `docker-compose.yml` and
+  `tests/custom-cert.rs` reference it, but those are not run). Do not restore
+  it when updating the vendored copy.
+- The upstream unit tests that read those fixtures are marked
+  `#[ignore = "tulka patch: needs the removed docker/certs fixtures ..."]`:
+  10 in `src/client/tls_stream/certs.rs`, 9 in `rustls_tls_stream.rs`, and 3
+  each in `native_tls_stream.rs` and `opentls_tls_stream.rs`. They exercise
+  certificate and key file parsing only; `cargo test --lib` reports them as
+  ignored (19 with `rustls`, 13 with the default `native-tls`).

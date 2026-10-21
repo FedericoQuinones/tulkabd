@@ -491,6 +491,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         self.flush_sink().await?;
         self.poisoned = false;
         self.attention.awaiting_ack = true;
+        self.attention.consumed_tail.clear();
 
         Ok(())
     }
@@ -499,18 +500,75 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     /// end-of-message boundaries, until the `DONE_ATTN` acknowledgement.
     async fn drain_attention_ack(&mut self) -> crate::Result<()> {
         if self.attention.mid_token {
-            // A result stream was dropped in the middle of a token: the rest
-            // of that token cannot be parsed, so the acknowledgement could be
-            // missed. Refuse rather than guess.
-            self.poisoned = true;
-            return Err(crate::Error::Protocol(
-                "connection was left in an inconsistent state: a cancelled result stream was dropped in the middle of a token, so the Attention acknowledgement cannot be located; open a new connection"
-                    .into(),
-            ));
+            // A result stream was dropped in the middle of a token (the usual
+            // case for a dropped row stream: the server fills packets without
+            // regard to token boundaries), so the token stream cannot resume.
+            // Find the acknowledgement at the packet level instead.
+            return self.drain_attention_ack_by_packets().await;
         }
 
         TokenStream::new(self).flush_done_attention().await?;
         Ok(())
+    }
+
+    /// tulka patch: packet-level search for the `DONE_ATTN` acknowledgement,
+    /// used when the read buffer is not at a token boundary.
+    ///
+    /// Every server message ends with a DONE-family token of fixed size
+    /// (13 bytes from TDS 7.2), and the acknowledgement is always the final
+    /// token of its message. So at each end-of-message it is enough to check
+    /// whether the last bytes of the message are a DONE / DONEPROC /
+    /// DONEINPROC token with the `DONE_ATTN` status bit; otherwise the next
+    /// message is read. The bytes of the current message that the dropped
+    /// stream already consumed are kept in `AttentionState::consumed_tail`,
+    /// in case the acknowledgement was split across packets and partly read.
+    async fn drain_attention_ack_by_packets(&mut self) -> crate::Result<()> {
+        let done_len = 5 + self.context.version().done_row_count_bytes() as usize;
+
+        let mut tail = std::mem::take(&mut self.attention.consumed_tail);
+        tail.extend_from_slice(&self.buf.split());
+        keep_last(&mut tail, done_len);
+
+        loop {
+            if self.flushed {
+                // End of a message: `tail` holds its last bytes.
+                if is_done_attention(&tail, done_len) {
+                    event!(
+                        Level::DEBUG,
+                        "Found the Attention acknowledgement at packet level"
+                    );
+                    self.attention_acknowledged();
+                    self.attention.mid_token = false;
+                    return Ok(());
+                }
+
+                tail.clear();
+                self.flushed = false;
+            }
+
+            // Read the transport directly: no Attention may be sent from here.
+            match self.transport.try_next().await {
+                Ok(Some(packet)) => {
+                    self.flushed = packet.is_last();
+                    let (_, payload) = packet.into_parts();
+                    tail.extend_from_slice(&payload);
+                    keep_last(&mut tail, done_len);
+                }
+                Ok(None) => {
+                    self.poisoned = true;
+                    return Err(crate::Error::Io {
+                        kind: io::ErrorKind::UnexpectedEof,
+                        message:
+                            "the connection closed before the server acknowledged the Attention"
+                                .into(),
+                    });
+                }
+                Err(e) => {
+                    self.poisoned = true;
+                    return Err(e);
+                }
+            }
+        }
     }
 
     /// tulka patch: a handle that cancels the request in flight on this
@@ -530,6 +588,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     pub(crate) fn attention_acknowledged(&mut self) {
         self.attention.awaiting_ack = false;
         self.attention.flush_pending = false;
+        self.attention.consumed_tail.clear();
     }
 
     /// tulka patch: lets the token stream continue with the next server
@@ -570,6 +629,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                         self.transport.start_send_unpin(packet)?;
                         self.attention.flush_pending = true;
                         self.attention.awaiting_ack = true;
+                        self.attention.consumed_tail.clear();
                     }
                 }
                 Poll::Ready(Err(e)) => return Err(e),
@@ -1160,6 +1220,24 @@ where
     }
 }
 
+/// tulka patch: keeps only the last `len` bytes of `bytes`.
+fn keep_last(bytes: &mut Vec<u8>, len: usize) {
+    if bytes.len() > len {
+        bytes.drain(..bytes.len() - len);
+    }
+}
+
+/// tulka patch: whether `tail` (the last bytes of a server message) is a
+/// DONE, DONEPROC or DONEINPROC token of `done_len` bytes with the
+/// `DONE_ATTN` status bit (MS-TDS 2.2.7.6-8).
+fn is_done_attention(tail: &[u8], done_len: usize) -> bool {
+    const DONE_ATTN: u16 = 0x0020;
+
+    tail.len() == done_len
+        && matches!(tail[0], 0xFD..=0xFF)
+        && u16::from_le_bytes([tail[1], tail[2]]) & DONE_ATTN != 0
+}
+
 /// Frame a login message into one or more login packets, each no larger than
 /// `packet_size` payload bytes, ready to write to the wire.
 ///
@@ -1414,7 +1492,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> futures_util::io::AsyncRead for C
             }
         }
 
-        buf.copy_from_slice(this.buf.split_to(size).as_ref());
+        let chunk = this.buf.split_to(size);
+        // tulka patch: while an Attention is unacknowledged, remember the last
+        // consumed bytes for `drain_attention_ack_by_packets`.
+        if this.attention.awaiting_ack {
+            this.attention.record_consumed(&chunk);
+        }
+        buf.copy_from_slice(chunk.as_ref());
         Poll::Ready(Ok(size))
     }
 }

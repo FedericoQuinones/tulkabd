@@ -166,12 +166,14 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn certs_from_file_reads_single_pem() {
         let chain = certs_from_file(Path::new("docker/certs/server.crt")).unwrap();
         assert_eq!(chain.len(), 1);
     }
 
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn certs_from_file_reads_multi_pem_chain() {
         // Multi-cert files must load ALL certs, never truncate.
         let chain = certs_from_file(Path::new("docker/certs/server-full.crt")).unwrap();
@@ -199,12 +201,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn certs_from_file_unsupported_extension_errors() {
         let err = certs_from_file(Path::new("docker/certs/README.md")).unwrap_err();
         assert!(format!("{err:?}").contains("unsupported file-extension"));
     }
 
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn certs_from_file_reads_der() {
         // Derive a DER from the PEM CA and round-trip it through the der branch.
         let der = certs_from_file(Path::new("docker/certs/customCA.crt"))
@@ -236,6 +240,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn certs_from_bundle_sniffs_pem_and_reads_all() {
         // A PEM bundle sniffed by `-----BEGIN`, all blocks parsed.
         let bytes = std::fs::read("docker/certs/server-full.crt").unwrap();
@@ -249,6 +254,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn certs_from_bundle_sniffs_der() {
         // No `-----BEGIN` marker => treated as a single DER certificate.
         let der = certs_from_file(Path::new("docker/certs/customCA.crt"))
@@ -303,6 +309,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn trust_anchors_bundle_multi_pem() {
         let bytes = std::fs::read("docker/certs/server-full.crt").unwrap();
         let certs = trust_anchors(&ExtraCa::Bundle(bytes)).unwrap();
@@ -310,6 +317,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn trust_anchors_file_loads_all() {
         let certs = trust_anchors(&ExtraCa::File(PathBuf::from(
             "docker/certs/server-full.crt",
@@ -349,6 +357,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn bom_prefixed_pem_still_parses() {
         // A UTF-8 BOM glued to the first `-----BEGIN` marker must not defeat
         // parsing. Use a MULTI-cert fixture so both assertions are load-bearing:
@@ -378,6 +387,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "tulka patch: needs the removed docker/certs fixtures (TULKA_PATCHES.md)"]
     fn der_with_embedded_begin_marker_is_treated_as_der() {
         // A raw DER cert whose body merely *contains* the `-----BEGIN` byte
         // sequence (not at a line start) must be sniffed as DER, not PEM — so a
