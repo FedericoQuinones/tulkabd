@@ -10,5 +10,7 @@ resolver = "2"
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
+# No `panic = "abort"`: tulka-app's run guard (`Checkout` in
+# crates/tulka-app/src/query.rs) needs unwinding to turn a panicking driver
+# into a "disconnected" tab instead of killing the app.
 strip = true
