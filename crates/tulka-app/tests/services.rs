@@ -1442,3 +1442,65 @@ async fn folders_list_server_databases_connects_and_lists() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn folders_move_survives_a_corrupt_parent_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"connections":[],"folders":[
+            {"id":"a","name":"A","parentId":null},
+            {"id":"x","name":"X","parentId":"y"},
+            {"id":"y","name":"Y","parentId":"x"}]}"#,
+    )
+    .unwrap();
+    let state = AppState::new(
+        ConfigStore::at(&path),
+        Arc::new(MemoryStore::default()),
+        vec![],
+    )
+    .unwrap();
+    let r = tokio::time::timeout(TIMEOUT, move_folder(&state, "a".into(), Some("x".into())))
+        .await
+        .expect("move_folder hung");
+    assert_eq!(r.unwrap_err(), "cycle");
+}
+
+#[tokio::test]
+async fn folders_editing_a_connection_keeps_its_folder() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let a = create_folder(&f.state, "A".into(), None).await.unwrap();
+    let mut conn = new_conn();
+    conn.folder_id = Some(a.id.clone());
+    let saved = save_connection(&f.state, conn, None)
+        .await
+        .unwrap()
+        .connection;
+    assert_eq!(saved.folder_id.as_deref(), Some(a.id.as_str()));
+
+    let mut edit = saved.clone();
+    edit.name = "Renamed".into();
+    edit.folder_id = None; // a UI that does not send folderId
+    let out = save_connection(&f.state, edit, None)
+        .await
+        .unwrap()
+        .connection;
+    assert_eq!(out.folder_id.as_deref(), Some(a.id.as_str()));
+    let listed = list_connections(&f.state).await;
+    assert_eq!(listed[0].name, "Renamed");
+    assert_eq!(listed[0].folder_id.as_deref(), Some(a.id.as_str()));
+}
+
+#[tokio::test]
+async fn folders_new_connection_with_unknown_folder_goes_to_root() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let mut conn = new_conn();
+    conn.folder_id = Some("ghost".into());
+    let saved = save_connection(&f.state, conn, None)
+        .await
+        .unwrap()
+        .connection;
+    assert_eq!(saved.folder_id, None);
+    assert_eq!(list_connections(&f.state).await[0].folder_id, None);
+}

@@ -70,6 +70,13 @@ pub async fn save_connection(
         }
     }
 
+    // The folder is changed only by `move_connection`: an edit keeps the
+    // stored one, and a new connection must name an existing folder.
+    conn.folder_id = match existing {
+        Some(i) => current.connections[i].folder_id.clone(),
+        None => conn.folder_id.take().filter(|f| has_folder(&current, f)),
+    };
+
     let mut next = current.clone();
     match existing {
         Some(i) => next.connections[i] = conn.clone(),
@@ -241,9 +248,12 @@ pub async fn move_folder(
         }
         check_parent(config, &parent_id)?;
         // Walk up from the target; meeting `id` means it is a descendant.
+        // Bounded by the folder count so a corrupt parent loop cannot spin.
         let mut cursor = parent_id.clone();
+        let mut steps = 0;
         while let Some(current) = cursor {
-            if current == id {
+            steps += 1;
+            if current == id || steps > config.folders.len() {
                 return Err(CYCLE.into());
             }
             cursor = config
