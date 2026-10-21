@@ -1,5 +1,6 @@
 //! A SQL Server session over the vendored Tiberius fork.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -8,18 +9,21 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use tiberius::error::Error as TdsError;
-use tiberius::{AuthMethod, ColumnType, Config, EncryptionLevel, QueryItem, Row, SqlBrowser};
+use tiberius::{
+    AuthMethod, ColumnType, Config, EncryptionLevel, QueryItem, Row, SqlBrowser, ToSql,
+};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tulka_core::{
-    CancelHandle, Column, ConnectParams, DatabaseSnapshot, DriverError, ExecEvent, MessageKind,
-    ServerInfo, Session, TableStructure, Value,
+    quote_ident, CancelHandle, Column, ColumnInfo, ConnectParams, DatabaseSnapshot, DriverError,
+    ExecEvent, MessageKind, ServerInfo, Session, TableStructure, Value,
 };
 
 use crate::batches::{split_batches, Batch};
 use crate::convert::{to_value, type_name};
+use crate::meta;
 
 type Client = tiberius::Client<Compat<TcpStream>>;
 
@@ -44,6 +48,9 @@ pub struct MssqlSession {
     /// Set by [`MssqlCancel`] and cleared when `execute` starts; stops the
     /// remaining batches of a script.
     cancel_requested: Arc<AtomicBool>,
+    /// Whether the server hosts a single database (Azure SQL Database),
+    /// learned on first use.
+    single_database: Option<bool>,
 }
 
 /// The default SQL Server port. With a named instance it means "ask SQL
@@ -121,6 +128,7 @@ pub async fn connect(p: &ConnectParams) -> Result<MssqlSession, DriverError> {
         client: Some(client),
         cancel,
         cancel_requested: Arc::new(AtomicBool::new(false)),
+        single_database: None,
     })
 }
 
@@ -247,17 +255,57 @@ fn closed() -> DriverError {
     DriverError::Disconnected("the connection is closed".into())
 }
 
-/// Quotes a name as a bracketed identifier.
-fn quote_ident(name: &str) -> String {
-    format!("[{}]", name.replace(']', "]]"))
-}
-
 impl MssqlSession {
     /// Runs a statement and returns the rows of its first result set.
     async fn query_rows(&mut self, sql: &str) -> Result<Vec<Row>, DriverError> {
         let client = self.client.as_mut().ok_or_else(closed)?;
         let result = async { client.simple_query(sql).await?.into_first_result().await }.await;
         result.map_err(|e| self.fail(request_error(e, |_| None)))
+    }
+
+    /// Runs a statement with `@P1`, `@P2`... parameters and returns the rows of
+    /// its first result set.
+    async fn query_params(
+        &mut self,
+        sql: &str,
+        params: &[&dyn ToSql],
+    ) -> Result<Vec<Row>, DriverError> {
+        let client = self.client.as_mut().ok_or_else(closed)?;
+        let result = async { client.query(sql, params).await?.into_first_result().await }.await;
+        result.map_err(|e| self.fail(request_error(e, |_| None)))
+    }
+
+    /// Whether the server hosts a single database (`EngineEdition` 5).
+    async fn is_single_database(&mut self) -> Result<bool, DriverError> {
+        if let Some(single) = self.single_database {
+            return Ok(single);
+        }
+        let rows = self
+            .query_rows("SELECT CAST(SERVERPROPERTY('EngineEdition') AS int)")
+            .await?;
+        let single = rows.first().and_then(|r| r.get::<i32, _>(0)) == Some(5);
+        self.single_database = Some(single);
+        Ok(single)
+    }
+
+    /// Checks that `database` can be read and returns the prefix of its
+    /// catalog views. On a single-database server the current database is
+    /// the only one, and `database` is ignored.
+    async fn catalog(&mut self, database: &str) -> Result<(String, String), DriverError> {
+        let single = self.is_single_database().await?;
+        let database = if single {
+            self.query_string("SELECT DB_NAME()").await?
+        } else {
+            database.to_string()
+        };
+        let rows = self.query_params(meta::ACCESS_SQL, &[&database]).await?;
+        let row = rows.first();
+        let access = row.and_then(|r| r.get::<i32, _>(0));
+        let status = row.and_then(|r| r.get::<&str, _>(1));
+        if let Some(e) = meta::access_error(&database, access, status) {
+            return Err(e);
+        }
+        Ok((meta::catalog_prefix(&database, single), database))
     }
 
     /// Runs a statement that returns one non-null string.
@@ -281,6 +329,7 @@ impl MssqlSession {
 #[async_trait]
 impl Session for MssqlSession {
     async fn server_info(&mut self) -> Result<ServerInfo, DriverError> {
+        let single_database = self.is_single_database().await?;
         let rows = self.query_rows("SELECT @@VERSION, SUSER_SNAME()").await?;
         let row = rows
             .first()
@@ -298,30 +347,90 @@ impl Session for MssqlSession {
         Ok(ServerInfo {
             version,
             user,
-            single_database: false,
+            single_database,
         })
     }
 
-    async fn snapshot(&mut self, _database: &str) -> Result<DatabaseSnapshot, DriverError> {
-        Err(DriverError::Other("not implemented".into()))
+    async fn snapshot(&mut self, database: &str) -> Result<DatabaseSnapshot, DriverError> {
+        let (prefix, _) = self.catalog(database).await?;
+        let objects: Vec<_> = self
+            .query_rows(&meta::objects_sql(&prefix))
+            .await?
+            .iter()
+            .filter_map(meta::object_from_row)
+            .collect();
+        let index_of: HashMap<(&str, &str), usize> = objects
+            .iter()
+            .enumerate()
+            .map(|(i, o)| ((o.schema.as_str(), o.name.as_str()), i))
+            .collect();
+
+        let mut columns: Vec<(usize, Vec<ColumnInfo>)> = Vec::new();
+        for row in self.query_rows(&meta::columns_sql(&prefix, false)).await? {
+            let Some(((schema, name), column)) = meta::column_from_row(&row) else {
+                continue;
+            };
+            let Some(&index) = index_of.get(&(schema.as_str(), name.as_str())) else {
+                continue;
+            };
+            // Rows arrive grouped by object.
+            match columns.last_mut().filter(|(i, _)| *i == index) {
+                Some((_, list)) => list.push(column),
+                None => columns.push((index, vec![column])),
+            }
+        }
+        Ok(DatabaseSnapshot { objects, columns })
     }
 
     async fn structure(
         &mut self,
-        _database: &str,
-        _schema: &str,
-        _name: &str,
+        database: &str,
+        schema: &str,
+        name: &str,
     ) -> Result<TableStructure, DriverError> {
-        Err(DriverError::Other("not implemented".into()))
+        let (prefix, _) = self.catalog(database).await?;
+        let params: [&dyn ToSql; 2] = [&name, &schema];
+        let columns = self
+            .query_params(&meta::columns_sql(&prefix, true), &params)
+            .await?
+            .iter()
+            .filter_map(|row| meta::column_from_row(row).map(|(_, c)| c))
+            .collect();
+        let foreign_keys = self
+            .query_params(&meta::foreign_keys_sql(&prefix), &params)
+            .await?;
+        let indexes = self
+            .query_params(&meta::indexes_sql(&prefix), &params)
+            .await?;
+        Ok(TableStructure {
+            columns,
+            foreign_keys: meta::foreign_keys_from_rows(&foreign_keys),
+            indexes: meta::indexes_from_rows(&indexes),
+        })
     }
 
     async fn definition(
         &mut self,
-        _database: &str,
-        _schema: &str,
-        _name: &str,
+        database: &str,
+        schema: &str,
+        name: &str,
     ) -> Result<String, DriverError> {
-        Err(DriverError::Other("not implemented".into()))
+        let (prefix, database) = self.catalog(database).await?;
+        let rows = self
+            .query_params(&meta::definition_sql(&prefix), &[&name, &schema])
+            .await?;
+        let Some(row) = rows.first() else {
+            return Err(DriverError::Other(format!(
+                "`{schema}`.`{name}` has no definition in `{database}`"
+            )));
+        };
+        match row.get::<&str, _>(0) {
+            Some(text) => Ok(text.to_string()),
+            // The server hides the text from logins without VIEW DEFINITION.
+            None => Err(DriverError::NoAccess(format!(
+                "no permission to view the definition of `{schema}`.`{name}` in `{database}`"
+            ))),
+        }
     }
 
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError> {
