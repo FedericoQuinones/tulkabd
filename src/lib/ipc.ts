@@ -4,7 +4,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 export type Value =
   | { kind: "null" }
   | { kind: "bool"; value: boolean }
-  | { kind: "int"; value: number }
+  | { kind: "int"; value: string }
   | { kind: "float"; value: number }
   | { kind: "decimal"; value: string }
   | { kind: "text"; value: string }

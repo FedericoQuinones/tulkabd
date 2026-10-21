@@ -37,7 +37,7 @@ mod tests {
     #[test]
     fn value_json_shape() {
         assert_eq!(to_json(&Value::Null), json!({"kind": "null"}));
-        assert_eq!(to_json(&Value::Int(7)), json!({"kind": "int", "value": 7}));
+        assert_eq!(to_json(&Value::Int(7)), json!({"kind": "int", "value": "7"}));
         assert_eq!(
             to_json(&Value::Decimal("8912450.50".into())),
             json!({"kind": "decimal", "value": "8912450.50"})
@@ -57,6 +57,17 @@ mod tests {
         let v = Value::Decimal("12.5000".into());
         let back: Value = serde_json::from_value(to_json(&v)).unwrap();
         assert_eq!(back, v);
+    }
+
+    #[test]
+    fn int_round_trips_as_string_at_64_bit_limits() {
+        for n in [i64::MAX, i64::MIN, 0, -1] {
+            let json = to_json(&Value::Int(n));
+            assert_eq!(json, json!({"kind": "int", "value": n.to_string()}));
+            let back: Value = serde_json::from_value(json).unwrap();
+            assert_eq!(back, Value::Int(n));
+        }
+        assert!(serde_json::from_value::<Value>(json!({"kind": "int", "value": 7})).is_err());
     }
 
     #[test]
