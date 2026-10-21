@@ -22,3 +22,7 @@ test("plain inputs keep their keys, the code editor does not", () => {
   const cm = { tagName: "DIV", isContentEditable: true, closest: (s: string) => (s === ".cm-editor" ? {} : null) } as unknown as HTMLElement;
   expect(shortcutAction(ev("w", { ctrlKey: true }, cm), false)).toBe("close");
 });
+test("held keys and handled events are ignored", () => {
+  expect(shortcutAction(ev("t", { ctrlKey: true, repeat: true }), false)).toBeNull();
+  expect(shortcutAction(ev("t", { ctrlKey: true, defaultPrevented: true }), false)).toBeNull();
+});

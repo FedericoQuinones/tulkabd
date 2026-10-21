@@ -150,3 +150,12 @@ test("closing a tab while it connects does not leak the session", async () => {
   await flush();
   expect(ipc.closeSession).toHaveBeenCalledWith(id);
 });
+
+test("cancelling the password prompt drops the pending run", async () => {
+  const id = tabs.open({ kind: "query", connectionId: "c2", sql: "SELECT 1", run: true });
+  await flush();
+  tabs.cancelPassword();
+  await tabs.connectTab(id, nopw, "pw");
+  await flush();
+  expect(ipc.runQuery).not.toHaveBeenCalled();
+});

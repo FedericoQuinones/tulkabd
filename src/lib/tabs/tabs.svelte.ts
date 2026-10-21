@@ -156,6 +156,8 @@ class TabsStore {
   }
 
   cancelPassword() {
+    // A later reconnect must not fire the run that was waiting for this password.
+    if (this.passwordRequest) this.pending.delete(this.passwordRequest.tabId);
     this.passwordRequest = null;
   }
 
