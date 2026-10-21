@@ -289,6 +289,11 @@ pub async fn move_folder(
     .await
 }
 
+/// The tree nodes left open, as stored by [`set_expanded`].
+pub async fn list_expanded(state: &AppState) -> Vec<String> {
+    state.connections.lock().await.expanded.clone()
+}
+
 /// Stores which tree nodes are open. The ids are the UI's; duplicates are
 /// dropped.
 pub async fn set_expanded(state: &AppState, ids: Vec<String>) -> Result<(), String> {

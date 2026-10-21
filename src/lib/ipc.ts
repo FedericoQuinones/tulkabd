@@ -240,7 +240,9 @@ export const moveConnection = (connectionId: string, folderId: string | null) =>
   invoke<void>("move_connection", { connectionId, folderId });
 export const moveFolder = (id: string, parentId: string | null) =>
   invoke<void>("move_folder", { id, parentId });
-/** Replaces the set of expanded folder ids. */
+/** Ids of the tree nodes left open (folders and connections). */
+export const listExpanded = () => invoke<string[]>("list_expanded");
+/** Replaces the set of expanded folder and connection ids. */
 export const setExpanded = (ids: string[]) => invoke<void>("set_expanded", { ids });
 export const listServerDatabases = (conn: ConnectionConfig, password?: string) =>
   invoke<string[]>("list_server_databases", { conn, password: password ?? null });

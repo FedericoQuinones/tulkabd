@@ -47,6 +47,7 @@ pub fn run() {
             conn::delete_folder,
             conn::move_connection,
             conn::move_folder,
+            conn::list_expanded,
             conn::set_expanded,
             conn::list_server_databases,
             ex::connect_explorer,

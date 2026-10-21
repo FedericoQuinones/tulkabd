@@ -1383,6 +1383,10 @@ async fn folders_move_connection_and_expanded_persist() {
             .expanded,
         vec![a.id.clone(), conn.id.clone()]
     );
+    assert_eq!(
+        list_expanded(&reopened).await,
+        vec![a.id.clone(), conn.id.clone()]
+    );
 }
 
 #[tokio::test]

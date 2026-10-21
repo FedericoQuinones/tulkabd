@@ -16,7 +16,7 @@ pub mod state;
 pub mod types;
 
 pub use connections::{
-    create_folder, delete_connection, delete_folder, list_connections, list_folders,
+    create_folder, delete_connection, delete_folder, list_connections, list_expanded, list_folders,
     list_server_databases, move_connection, move_folder, rename_folder, save_connection,
     set_expanded, test_connection,
 };

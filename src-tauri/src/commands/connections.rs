@@ -83,6 +83,11 @@ pub async fn move_folder(
 }
 
 #[tauri::command]
+pub async fn list_expanded(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(tulka_app::list_expanded(&state).await)
+}
+
+#[tauri::command]
 pub async fn set_expanded(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
     tulka_app::set_expanded(&state, ids).await
 }
