@@ -4,7 +4,7 @@
   import { t } from "./lib/i18n/t";
   import Rail from "./lib/shell/Rail.svelte";
   import StatusBar from "./lib/shell/StatusBar.svelte";
-    import type { ConnectionConfig } from "./lib/ipc";
+  import type { ConnectionConfig } from "./lib/ipc";
   import ConnectionDialog from "./lib/connections/ConnectionDialog.svelte";
   import ConnectionList from "./lib/connections/ConnectionList.svelte";
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";

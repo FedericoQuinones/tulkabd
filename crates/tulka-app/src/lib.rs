@@ -4,7 +4,7 @@
 //!
 //! Every command of the UI is a plain async function taking [`AppState`];
 //! the Tauri layer only wraps them. Errors are plain strings, with the
-//! sentinels [`PASSWORD_REQUIRED`] and [`DISCONNECTED`].
+//! sentinels [`PASSWORD_REQUIRED`], [`DISCONNECTED`], [`BUSY`] and [`CLOSED`].
 
 pub mod connections;
 pub mod query;
