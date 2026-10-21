@@ -13,8 +13,10 @@
     tabId: string;
     resultIndex: number;
     result: PaneResult;
+    /** False while rows may still be streaming in. */
+    final: boolean;
   }
-  let { tabId, resultIndex, result }: Props = $props();
+  let { tabId, resultIndex, result, final }: Props = $props();
 
   const ROW_HEIGHT = 34;
   const HEADER_HEIGHT = 36;
@@ -97,7 +99,7 @@
     <span>{t("results.fetchFailed", { error: fetchError })}</span>
     <button type="button" onclick={() => cache.retry()}>{t("results.retry")}</button>
   </div>
-{:else if total === 0}
+{:else if total === 0 && final}
   <div class="notice muted">{t("results.empty")}</div>
 {/if}
 <div

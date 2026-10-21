@@ -98,7 +98,9 @@
       <MessagesView messages={pane.messages} {onjump} />
     {:else}
       {#key `${pane.runCount}:${active}`}
-        <ResultGrid bind:this={grid} tabId={pane.tabId} resultIndex={active} {result} />
+        <ResultGrid bind:this={grid} tabId={pane.tabId} resultIndex={active} {result}
+          final={pane.status !== "running" || pane.results.length > active + 1}
+        />
       {/key}
     {/if}
     {#if toast}<CopyToast text={toast.text} error={toast.error} />{/if}
