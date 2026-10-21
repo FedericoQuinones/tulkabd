@@ -9,7 +9,7 @@ A lightweight, cross-platform desktop client for Microsoft SQL Server, built wit
 - [pnpm](https://pnpm.io)
 - Docker (only for integration tests)
 - Tauri system dependencies for your OS:
-  - **Fedora:** `sudo dnf install webkit2gtk4.1-devel libsoup3-devel javascriptcoregtk4.1-devel libappindicator-gtk3-devel librsvg2-devel openssl-devel curl wget file gcc gcc-c++`
+  - **Fedora:** `sudo dnf install webkit2gtk4.1-devel libsoup3-devel javascriptcoregtk4.1-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel openssl-devel curl wget file gcc gcc-c++`
   - **Debian/Ubuntu:** `sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev build-essential curl wget file`
   - **macOS:** Xcode Command Line Tools (`xcode-select --install`)
   - **Windows:** Microsoft Edge WebView2 runtime and the MSVC C++ build tools (Visual Studio Build Tools)
@@ -20,7 +20,10 @@ See the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for det
 
 ```bash
 pnpm install
-pnpm tauri dev
+pnpm tauri dev      # run the desktop app
+pnpm vitest run      # frontend tests
+pnpm check           # svelte-check
+cargo test           # Rust tests (whole workspace)
 ```
 
 ## Integration tests

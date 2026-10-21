@@ -1,0 +1,16 @@
+{
+  "app.name": "tulkabd",
+  "rail.explorer": "Explorer",
+  "rail.search": "Search objects",
+  "rail.saved": "Saved queries",
+  "rail.log": "Run log",
+  "rail.drivers": "Drivers",
+  "rail.settings": "Settings",
+  "rail.label": "Main navigation",
+  "explorer.title": "Connections",
+  "explorer.empty": "No connections yet",
+  "explorer.new": "New connection",
+  "status.ready": "Ready",
+  "status.noConnection": "No connection",
+  "results.rowsShown": "{shown} of {total} rows"
+}
