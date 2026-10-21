@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import { t } from "./lib/i18n/t";
   import Rail from "./lib/shell/Rail.svelte";
   import StatusBar from "./lib/shell/StatusBar.svelte";
@@ -16,6 +18,11 @@
   let connectError = $state<string | null>(null);
   // Remembers the database to restore when a password prompt was opened by Reconnect.
   let promptDatabase: string | undefined;
+
+  // Tells the backend the first frame is painted (it only prints with TULKA_STARTUP_PROBE=1).
+  onMount(() => {
+    requestAnimationFrame(() => void invoke("startup_probe").catch(() => {}));
+  });
 
   void connections.refresh();
   void connections.loadStartupError();
