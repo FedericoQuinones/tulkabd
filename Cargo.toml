@@ -1,0 +1,16 @@
+[workspace]
+members = ["src-tauri", "crates/tulka-core", "crates/tulka-mssql", "crates/tulka-app"]
+# The vendored Tiberius fork is consumed as a path dependency only. Keeping it
+# out of the workspace keeps its heavy dev-dependencies out of our lockfile and
+# its upstream integration tests out of `cargo test --workspace`.
+exclude = ["vendor/tiberius"]
+resolver = "2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+# No `panic = "abort"`: tulka-app's run guard (`Checkout` in
+# crates/tulka-app/src/query.rs) needs unwinding to turn a panicking driver
+# into a "disconnected" tab instead of killing the app.
+strip = true

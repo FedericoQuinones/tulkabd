@@ -1,0 +1,23 @@
+[package]
+name = "tulkabd"
+version = "0.1.0"
+description = "A lightweight, cross-platform desktop client for Microsoft SQL Server"
+authors = ["tulkabd contributors"]
+license = "MIT OR Apache-2.0"
+edition = "2024"
+# Edition 2024 plus let chains (src/lib.rs).
+rust-version = "1.88"
+
+[lib]
+# The `_lib` suffix is necessary to keep the lib name unique from the bin name
+# (see https://github.com/rust-lang/cargo/issues/8519, a Windows-only issue).
+name = "tulkabd_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-clipboard-manager = "2"
+tulka-app = { path = "../crates/tulka-app" }
