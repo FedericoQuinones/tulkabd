@@ -43,6 +43,8 @@ class PaneState {
   results = $state<PaneResult[]>([]);
   messages = $state<PaneMessage[]>([]);
   summary = $state<RunSummary | null>(null);
+  /** Increments on every run start; the results view uses it to drop its row cache. */
+  runCount = $state(0);
   session = $state<SessionInfo | null>(null);
   /** Editor cursor, shown in the status bar. */
   cursor = $state({ line: 1, col: 1 });
@@ -109,6 +111,7 @@ class PaneState {
     if (this.status !== "idle" || !this.session) return;
     this.status = "running";
     const id = ++this.runId;
+    this.runCount++;
     this.results = [];
     this.messages = [];
     this.summary = null;

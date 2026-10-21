@@ -3,6 +3,7 @@
   import { connections } from "../connections/store.svelte";
   import { ENVIRONMENTS } from "../connections/env";
   import SqlEditor from "../editor/SqlEditor.svelte";
+  import ResultsPanel from "../results/ResultsPanel.svelte";
   import PaneToolbar from "./PaneToolbar.svelte";
   import { pane } from "./pane.svelte";
 
@@ -40,17 +41,13 @@
     ondatabase={(db) => pane.changeDatabase(db)}
   />
   <div class="ed"><SqlEditor bind:this={editor} onrun={run} oncursor={(p) => (pane.cursor = p)} /></div>
-  <div class="msgs" aria-label={t("pane.messages")} role="log">
-    {#each pane.messages as m, i (i)}
-      <p class={m.kind}>{m.text}</p>
-    {/each}
-  </div>
+  <div class="res"><ResultsPanel onjump={(line) => editor.jumpToLine(line)} /></div>
 </section>
 
 <style>
   .pane {
     display: grid;
-    grid-template-rows: 36px 48px minmax(120px, 1fr) minmax(0, auto);
+    grid-template-rows: 36px 48px minmax(120px, 1fr) minmax(160px, 1fr);
     position: relative;
     min-width: 0;
     min-height: 0;
@@ -99,23 +96,7 @@
     border-bottom: 1px solid var(--border);
     padding-left: 2px;
   }
-  .msgs {
-    max-height: 160px;
-    overflow: auto;
-    padding: 0 16px;
-  }
-  .msgs p {
-    margin: 6px 0;
-    font-family: var(--mono);
-    font-size: 12px;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: var(--soft);
-  }
-  .msgs p.error {
-    color: var(--negative);
-  }
-  .msgs p.warning {
-    color: var(--warning);
+  .res {
+    min-height: 0;
   }
 </style>
