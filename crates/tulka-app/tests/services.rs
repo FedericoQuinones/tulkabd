@@ -13,8 +13,9 @@ use tokio::sync::Notify;
 use tulka_app::*;
 use tulka_core::{
     estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, CancelHandle, Column,
-    ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, Driver, DriverError, Environment,
-    ExecEvent, MemoryStore, MessageKind, SecretStore, ServerInfo, Session, UnavailableStore, Value,
+    ColumnInfo, ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, DatabaseSnapshot,
+    DbObject, Driver, DriverError, Environment, ExecEvent, MemoryStore, MessageKind, ObjectKind,
+    SecretStore, ServerInfo, Session, TableStructure, UnavailableStore, Value,
 };
 
 const PASSWORD: &str = "s3cret-pw";
@@ -171,13 +172,57 @@ impl FakeSession {
     }
 }
 
+fn fake_column() -> ColumnInfo {
+    ColumnInfo {
+        name: "id".into(),
+        type_name: "int".into(),
+        nullable: false,
+        primary_key: true,
+        default: None,
+    }
+}
+
 #[async_trait]
 impl Session for FakeSession {
     async fn server_info(&mut self) -> Result<ServerInfo, DriverError> {
         Ok(ServerInfo {
             version: "Fake SQL 1".into(),
             user: self.user.clone(),
+            single_database: false,
         })
+    }
+
+    async fn snapshot(&mut self, _database: &str) -> Result<DatabaseSnapshot, DriverError> {
+        Ok(DatabaseSnapshot {
+            objects: vec![DbObject {
+                schema: "dbo".into(),
+                name: "Pedidos".into(),
+                kind: ObjectKind::Table,
+            }],
+            columns: vec![(0, vec![fake_column()])],
+        })
+    }
+
+    async fn structure(
+        &mut self,
+        _database: &str,
+        _schema: &str,
+        _name: &str,
+    ) -> Result<TableStructure, DriverError> {
+        Ok(TableStructure {
+            columns: vec![fake_column()],
+            foreign_keys: vec![],
+            indexes: vec![],
+        })
+    }
+
+    async fn definition(
+        &mut self,
+        _database: &str,
+        _schema: &str,
+        _name: &str,
+    ) -> Result<String, DriverError> {
+        Ok("CREATE VIEW dbo.V AS SELECT 1".into())
     }
 
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError> {

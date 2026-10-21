@@ -249,6 +249,7 @@ mod tests {
             server: ServerInfo {
                 version: "Microsoft SQL Server 2022".into(),
                 user: "sa".into(),
+                single_database: false,
             },
             databases: vec!["master".into()],
             current_database: "master".into(),
@@ -256,7 +257,7 @@ mod tests {
         assert_eq!(
             to_json(&s),
             json!({
-                "server": {"version": "Microsoft SQL Server 2022", "user": "sa"},
+                "server": {"version": "Microsoft SQL Server 2022", "user": "sa", "singleDatabase": false},
                 "databases": ["master"],
                 "currentDatabase": "master"
             })

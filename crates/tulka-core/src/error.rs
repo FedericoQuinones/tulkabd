@@ -28,6 +28,9 @@ pub enum DriverError {
     /// The connection was lost; the session cannot be used any more.
     #[error("disconnected: {0}")]
     Disconnected(String),
+    /// The login cannot use a database (no permission, or not ONLINE).
+    #[error("no access: {0}")]
+    NoAccess(String),
     #[error("{0}")]
     Other(String),
 }

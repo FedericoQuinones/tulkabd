@@ -14,8 +14,8 @@ use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tulka_core::{
-    CancelHandle, Column, ConnectParams, DriverError, ExecEvent, MessageKind, ServerInfo, Session,
-    Value,
+    CancelHandle, Column, ConnectParams, DatabaseSnapshot, DriverError, ExecEvent, MessageKind,
+    ServerInfo, Session, TableStructure, Value,
 };
 
 use crate::batches::{split_batches, Batch};
@@ -295,7 +295,33 @@ impl Session for MssqlSession {
             .trim()
             .to_string();
         let user = row.get::<&str, _>(1).unwrap_or_default().to_string();
-        Ok(ServerInfo { version, user })
+        Ok(ServerInfo {
+            version,
+            user,
+            single_database: false,
+        })
+    }
+
+    async fn snapshot(&mut self, _database: &str) -> Result<DatabaseSnapshot, DriverError> {
+        Err(DriverError::Other("not implemented".into()))
+    }
+
+    async fn structure(
+        &mut self,
+        _database: &str,
+        _schema: &str,
+        _name: &str,
+    ) -> Result<TableStructure, DriverError> {
+        Err(DriverError::Other("not implemented".into()))
+    }
+
+    async fn definition(
+        &mut self,
+        _database: &str,
+        _schema: &str,
+        _name: &str,
+    ) -> Result<String, DriverError> {
+        Err(DriverError::Other("not implemented".into()))
     }
 
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError> {
