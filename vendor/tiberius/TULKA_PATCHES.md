@@ -79,8 +79,9 @@ consumes (and so drops) the tokens it skips while peeking for metadata.
 
 ## 2. Per-statement completion: `QueryItem::Done`
 
-**What.** `QueryStream` yields `QueryItem::Done(DoneInfo)` once per statement,
-in order, interleaved with the metadata, rows and messages of that statement:
+**What.** `QueryStream` yields one `QueryItem::Done(DoneInfo)` per DONE /
+DONEPROC / DONEINPROC token, in order, interleaved with the metadata, rows and
+messages around it:
 
 ```rust
 pub struct DoneInfo {
@@ -252,7 +253,7 @@ stay.
 ## 4. Build plumbing
 
 - `Cargo.toml`: a `[[test]]` entry for `tests/tulka_patches.rs` (the published
-  manifest sets `autotests = false`).
+  manifest sets `autotests = false`); the `custom-cert` entry is removed (§5).
 - `tests/tulka_patches.rs` (new): integration tests for patches 1 to 3. They
   need `TULKA_MSSQL_TEST` (`server=...;port=...;user=...;password=...`) and
   return early, passing, when it is unset.
@@ -264,9 +265,16 @@ stay.
   deleted. It held test TLS private keys (`certs/customCA.key`,
   `certs/server.key`, `certs/server.pem`, `certs/passphrase.txt`) that secret
   scanners and GitHub push protection flag, and nothing in the build or in the
-  tests used here needs it (upstream's `docker-compose.yml` and
-  `tests/custom-cert.rs` reference it, but those are not run). Do not restore
-  it when updating the vendored copy.
+  tests used here needs it. Do not restore it when updating the vendored copy.
+- Dead references to `docker/` are removed with it:
+  - `.gitleaks.toml` (its only content beyond the default rule set was the
+    `docker/certs/` allowlist);
+  - `docker-compose.yml` (its build contexts point at `docker/`);
+  - `tests/custom-cert.rs` and its `[[test]]` entry in `Cargo.toml` (it reads
+    `docker/certs/customCA.crt`).
+  The vendored `.github/workflows/` still mention `.gitleaks.toml` and
+  `docker-compose.yml`; they are inert here (GitHub only runs workflows from
+  the repository root).
 - The upstream unit tests that read those fixtures are marked
   `#[ignore = "tulka patch: needs the removed docker/certs fixtures ..."]`:
   10 in `src/client/tls_stream/certs.rs`, 9 in `rustls_tls_stream.rs`, and 3

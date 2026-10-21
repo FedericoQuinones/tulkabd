@@ -131,10 +131,6 @@ name = "command"
 path = "tests/command.rs"
 
 [[test]]
-name = "custom-cert"
-path = "tests/custom-cert.rs"
-
-[[test]]
 name = "deadlocks"
 path = "tests/deadlocks.rs"
 
