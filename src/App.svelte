@@ -2,48 +2,43 @@
   import { t } from "./lib/i18n/t";
   import Rail from "./lib/shell/Rail.svelte";
   import StatusBar from "./lib/shell/StatusBar.svelte";
-  import * as ipc from "./lib/ipc";
-  import type { ConnectionConfig, SessionInfo } from "./lib/ipc";
+    import type { ConnectionConfig } from "./lib/ipc";
   import ConnectionDialog from "./lib/connections/ConnectionDialog.svelte";
   import ConnectionList from "./lib/connections/ConnectionList.svelte";
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
   import { connections } from "./lib/connections/store.svelte";
+  import QueryPane from "./lib/pane/QueryPane.svelte";
+  import { pane } from "./lib/pane/pane.svelte";
 
   // `undefined` = closed, `null` = new connection, otherwise edit/duplicate this one.
   let dialog = $state<ConnectionConfig | null | undefined>(undefined);
   let prompting = $state<ConnectionConfig | null>(null);
   let connectError = $state<string | null>(null);
-  // Sessions are wired to tabs in a later task; the last opened one is kept here for now.
-  let session = $state<SessionInfo | null>(null);
-  let sessionTab: string | null = null;
-  let connecting = false;
+  // Remembers the database to restore when a password prompt was opened by Reconnect.
+  let promptDatabase: string | undefined;
 
   void connections.refresh();
 
-  async function connect(conn: ConnectionConfig, password?: string) {
-    if (connecting) return;
+  async function connect(conn: ConnectionConfig, password?: string, database?: string) {
+    if (pane.status === "connecting" || pane.status === "running") return;
     connectError = null;
     if (!conn.passwordSaved && password === undefined) {
+      promptDatabase = database;
       prompting = conn;
       return;
     }
-    connecting = true;
-    try {
-      const previous = sessionTab;
-      if (previous) {
-        sessionTab = null;
-        session = null;
-        await ipc.closeSession(previous).catch(() => {});
-      }
-      const tabId = crypto.randomUUID();
-      session = await ipc.openSession(tabId, conn.id, undefined, password);
-      sessionTab = tabId;
-    } catch (e) {
-      if (String(e) === "password_required") prompting = conn;
-      else connectError = t("explorer.connectFailed", { error: String(e) });
-    } finally {
-      connecting = false;
+    const result = await pane.open(conn, password, database);
+    if (result.kind === "passwordRequired") {
+      promptDatabase = database;
+      prompting = conn;
+    } else if (result.kind === "error") {
+      connectError = t("explorer.connectFailed", { error: result.error });
     }
+  }
+
+  function reconnect() {
+    const conn = connections.list.find((c) => c.id === pane.connectionId);
+    if (conn) void connect(conn, undefined, pane.database ?? undefined);
   }
 
   function duplicate(conn: ConnectionConfig) {
@@ -77,9 +72,9 @@
         </div>
       {/if}
     </aside>
-    <main class="workspace"></main>
+    <main class="workspace"><QueryPane onreconnect={reconnect} /></main>
   </div>
-  <StatusBar />
+  <StatusBar status={pane.status} session={pane.session} cursor={pane.cursor} onreconnect={reconnect} />
 </div>
 
 {#if dialog !== undefined}
@@ -94,7 +89,7 @@
     onsubmit={(pw) => {
       const c = prompting!;
       prompting = null;
-      void connect(c, pw);
+      void connect(c, pw, promptDatabase);
     }}
   />
 {/if}
@@ -162,5 +157,7 @@
   }
   .workspace {
     background: var(--ground);
+    min-width: 0;
+    min-height: 0;
   }
 </style>
