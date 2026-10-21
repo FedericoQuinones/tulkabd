@@ -6,6 +6,8 @@ use tulka_core::{
     AppConfig, ConnectParams, ConnectionConfig, Folder, SecretError, SecretStore, ServerInfo,
 };
 
+use crate::explorer;
+use crate::query::close_session;
 use crate::state::AppState;
 use crate::types::{SaveConnectionResult, CYCLE, EMPTY_NAME, NOT_FOUND, PASSWORD_REQUIRED};
 
@@ -90,19 +92,33 @@ pub async fn save_connection(
 }
 
 /// Deletes a connection and its stored password. A missing keychain does
-/// not prevent the deletion.
+/// not prevent the deletion. Then closes its query tabs and its Explorer and
+/// forgets its cached metadata.
 pub async fn delete_connection(state: &AppState, id: String) -> Result<(), String> {
     state.ensure_writable()?;
-    let mut current = state.connections.lock().await;
-    let secrets = state.secrets.clone();
-    let key = id.clone();
-    match blocking(move || secrets.delete(&key)).await? {
-        Ok(()) | Err(SecretError::Unavailable(_)) => {}
-        Err(e) => return Err(format!("could not delete the password: {e}")),
+    {
+        let mut current = state.connections.lock().await;
+        let secrets = state.secrets.clone();
+        let key = id.clone();
+        match blocking(move || secrets.delete(&key)).await? {
+            Ok(()) | Err(SecretError::Unavailable(_)) => {}
+            Err(e) => return Err(format!("could not delete the password: {e}")),
+        }
+        let mut next = current.clone();
+        next.connections.retain(|c| c.id != id);
+        *current = persist(state, next).await?;
     }
-    let mut next = current.clone();
-    next.connections.retain(|c| c.id != id);
-    *current = persist(state, next).await?;
+    let tabs: Vec<String> = state
+        .tabs()
+        .open
+        .iter()
+        .filter(|(_, t)| t.connection_id == id)
+        .map(|(tab_id, _)| tab_id.clone())
+        .collect();
+    for tab_id in tabs {
+        close_session(state, tab_id).await?;
+    }
+    explorer::forget_connection(state, &id).await;
     Ok(())
 }
 

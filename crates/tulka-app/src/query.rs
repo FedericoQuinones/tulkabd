@@ -86,6 +86,7 @@ pub async fn open_session(
     let tab = TabState {
         generation,
         connection_id,
+        database: current_database.clone(),
         session: Some(session),
         cancel: None,
         results: Vec::new(),
@@ -128,11 +129,22 @@ pub async fn use_database(
     database: String,
 ) -> Result<(), String> {
     let (checkout, mut session) = Checkout::take(state, &tab_id, false)?;
+    let generation = checkout.generation;
     let result = session.use_database(&database).await;
     let lost = matches!(result, Err(DriverError::Disconnected(_)));
     checkout.checkin(session, lost);
     match result {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            if let Some(tab) = state
+                .tabs()
+                .open
+                .get_mut(&tab_id)
+                .filter(|t| t.generation == generation)
+            {
+                tab.database = database;
+            }
+            Ok(())
+        }
         Err(DriverError::Disconnected(_)) => Err(DISCONNECTED.into()),
         Err(e) => Err(e.to_string()),
     }

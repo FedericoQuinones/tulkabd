@@ -1,8 +1,10 @@
 //! Values returned or streamed to the UI. Their JSON shapes mirror
 //! `src/lib/ipc.ts`.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
-use tulka_core::{Column, ConnectionConfig, ExecEvent, MessageKind, ServerInfo};
+use tulka_core::{Column, ConnectionConfig, DbObject, ExecEvent, MessageKind, ServerInfo};
 
 /// Command error meaning there is no saved password and none was given.
 pub const PASSWORD_REQUIRED: &str = "password_required";
@@ -21,6 +23,124 @@ pub const BUSY: &str = "busy";
 /// Command error of an `open_session` whose tab was closed (or opened again)
 /// while it was connecting; its new session was closed.
 pub const CLOSED: &str = "closed";
+/// Command error of a live Explorer command (`table_structure`,
+/// `object_definition`, `refresh_metadata`) on a connection whose Explorer
+/// is not connected; `connect_explorer` first.
+pub const NOT_CONNECTED: &str = "not_connected";
+
+/// State of a connection's Explorer session: `"connecting"`,
+/// `"connected"`, `"disconnected"` or `"error"`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectionStatus {
+    Connecting,
+    Connected,
+    Disconnected,
+    Error,
+}
+
+/// Events pushed to the UI outside of any command (the Explorer and its
+/// background indexing).
+///
+/// Serialized internally tagged:
+/// `{"kind": "explorerStatus", "connectionId": "..", "status": "error", "message": ".."}`,
+/// `{"kind": "indexProgress", "connectionId": "..", "database": "..", "done": true, "noAccess": false}`,
+/// `{"kind": "indexIdle", "connectionId": ".."}`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum AppEvent {
+    /// The Explorer session changed state; `message` is the error of
+    /// `"error"` (never containing a password).
+    ExplorerStatus {
+        connection_id: String,
+        status: ConnectionStatus,
+        message: Option<String>,
+    },
+    /// Indexing of one database started (`done: false`) or ended
+    /// (`done: true`). `no_access` is set on an end when the database could
+    /// not be read: it is marked in the cache and indexing goes on.
+    IndexProgress {
+        connection_id: String,
+        database: String,
+        done: bool,
+        no_access: bool,
+    },
+    /// The connection's indexing queue is empty. Not sent after an error.
+    IndexIdle { connection_id: String },
+}
+
+/// Where [`AppEvent`]s go. The Tauri layer emits them to the window; tests
+/// record them. Called from background tasks: must not block.
+pub trait AppEvents: Send + Sync {
+    fn emit(&self, ev: AppEvent);
+}
+
+/// Drops every event.
+pub struct NoopEvents;
+
+impl AppEvents for NoopEvents {
+    fn emit(&self, _ev: AppEvent) {}
+}
+
+/// Returned by `connect_explorer`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplorerInfo {
+    pub server: ServerInfo,
+    /// Databases the connection exposes (all, or only the selected ones),
+    /// in server order.
+    pub databases: Vec<String>,
+}
+
+/// One result of `search_objects`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PaletteHit {
+    pub connection_id: String,
+    pub connection_name: String,
+    /// Folder names from the root down to the connection's folder; empty at
+    /// the root.
+    pub folder_path: Vec<String>,
+    /// The connection's Explorer is connected right now.
+    pub connected: bool,
+    pub database: String,
+    pub object: DbObject,
+    /// Positions to highlight in `"{schema}.{name}"`, counted in Unicode
+    /// characters (code points), not UTF-16 units: the UI must index
+    /// `Array.from(text)`, not the string.
+    pub indices: Vec<u32>,
+}
+
+/// Returned by `search_objects`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResponse {
+    /// The best hits, at most the requested limit.
+    pub hits: Vec<PaletteHit>,
+    /// Every match in scope, beyond the limit too.
+    pub total_matches: usize,
+    pub databases_matched: usize,
+    /// Databases of connected Explorers not indexed yet (queued or in
+    /// progress); at least 1 while the startup index is still loading.
+    pub indexing: usize,
+}
+
+/// Returned by `completion_metadata`, read from the cache.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionMetadata {
+    /// Distinct schemas of the objects, sorted.
+    pub schemas: Vec<String>,
+    /// Tables, views and procedures.
+    pub objects: Vec<DbObject>,
+    /// Column names of each table and view in ordinal order, keyed by the
+    /// unquoted `"schema.name"`.
+    pub columns: HashMap<String, Vec<String>>,
+}
 
 /// Events streamed by `run_query`: [`ExecEvent`] with `Rows` replaced by
 /// `RowCount`, because rows stay in the Rust-side buffers.
@@ -283,6 +403,117 @@ mod tests {
             json!({"connection": to_json(&c), "keyringUnavailable": true})
         );
         assert_eq!(to_json(&r)["connection"]["passwordSaved"], json!(false));
+    }
+
+    #[test]
+    fn app_event_json_shape() {
+        let cases = [
+            (
+                AppEvent::ExplorerStatus {
+                    connection_id: "c1".into(),
+                    status: ConnectionStatus::Error,
+                    message: Some("gone".into()),
+                },
+                json!({"kind": "explorerStatus", "connectionId": "c1", "status": "error", "message": "gone"}),
+            ),
+            (
+                AppEvent::ExplorerStatus {
+                    connection_id: "c1".into(),
+                    status: ConnectionStatus::Connecting,
+                    message: None,
+                },
+                json!({"kind": "explorerStatus", "connectionId": "c1", "status": "connecting", "message": null}),
+            ),
+            (
+                AppEvent::IndexProgress {
+                    connection_id: "c1".into(),
+                    database: "db".into(),
+                    done: true,
+                    no_access: false,
+                },
+                json!({"kind": "indexProgress", "connectionId": "c1", "database": "db", "done": true, "noAccess": false}),
+            ),
+            (
+                AppEvent::IndexIdle {
+                    connection_id: "c1".into(),
+                },
+                json!({"kind": "indexIdle", "connectionId": "c1"}),
+            ),
+        ];
+        for (ev, expected) in cases {
+            assert_eq!(to_json(&ev), expected);
+        }
+        for (s, text) in [
+            (ConnectionStatus::Connected, "connected"),
+            (ConnectionStatus::Disconnected, "disconnected"),
+        ] {
+            assert_eq!(to_json(&s), json!(text));
+        }
+    }
+
+    #[test]
+    fn explorer_types_json_shape() {
+        let object = DbObject {
+            schema: "dbo".into(),
+            name: "Pedidos".into(),
+            kind: tulka_core::ObjectKind::Table,
+        };
+        let info = ExplorerInfo {
+            server: ServerInfo {
+                version: "v".into(),
+                user: "sa".into(),
+                single_database: false,
+            },
+            databases: vec!["a".into()],
+        };
+        assert_eq!(
+            to_json(&info),
+            json!({"server": {"version": "v", "user": "sa", "singleDatabase": false}, "databases": ["a"]})
+        );
+        let r = SearchResponse {
+            hits: vec![PaletteHit {
+                connection_id: "c1".into(),
+                connection_name: "Main".into(),
+                folder_path: vec!["Cliente A".into()],
+                connected: true,
+                database: "db".into(),
+                object: object.clone(),
+                indices: vec![4, 5],
+            }],
+            total_matches: 3,
+            databases_matched: 2,
+            indexing: 1,
+        };
+        assert_eq!(
+            to_json(&r),
+            json!({
+                "hits": [{
+                    "connectionId": "c1",
+                    "connectionName": "Main",
+                    "folderPath": ["Cliente A"],
+                    "connected": true,
+                    "database": "db",
+                    "object": {"schema": "dbo", "name": "Pedidos", "kind": "table"},
+                    "indices": [4, 5]
+                }],
+                "totalMatches": 3,
+                "databasesMatched": 2,
+                "indexing": 1
+            })
+        );
+        let m = CompletionMetadata {
+            schemas: vec!["dbo".into()],
+            objects: vec![object],
+            columns: HashMap::from([("dbo.Pedidos".to_string(), vec!["id".to_string()])]),
+        };
+        assert_eq!(
+            to_json(&m),
+            json!({
+                "schemas": ["dbo"],
+                "objects": [{"schema": "dbo", "name": "Pedidos", "kind": "table"}],
+                "columns": {"dbo.Pedidos": ["id"]}
+            })
+        );
     }
 
     #[test]

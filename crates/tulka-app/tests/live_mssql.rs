@@ -188,3 +188,138 @@ async fn wrong_password_is_a_clear_error() {
         .unwrap_err();
     assert!(err.starts_with("authentication failed:"), "{err}");
 }
+
+#[derive(Default)]
+struct Recorder(Mutex<Vec<AppEvent>>);
+
+impl AppEvents for Recorder {
+    fn emit(&self, ev: AppEvent) {
+        self.0.lock().unwrap().push(ev);
+    }
+}
+
+const EXPLORER_SETUP: &str = "
+IF DB_ID('tulka_explorer') IS NOT NULL
+BEGIN
+  ALTER DATABASE tulka_explorer SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+  DROP DATABASE tulka_explorer;
+END
+GO
+CREATE DATABASE tulka_explorer
+GO
+USE tulka_explorer
+GO
+CREATE TABLE dbo.Pedidos(Id int NOT NULL PRIMARY KEY, Cliente nvarchar(50) NULL)
+GO
+CREATE VIEW dbo.vPedidos AS SELECT Id, Cliente FROM dbo.Pedidos
+GO
+USE master
+";
+
+#[tokio::test]
+async fn connect_explorer_indexes_the_server_and_search_finds_it() {
+    let Some(l) = live().await else { return };
+    let (summary, events) = {
+        open_session(&l.state, "setup".into(), l.conn.id.clone(), None, None)
+            .await
+            .unwrap();
+        let r = run(&l.state, "setup", EXPLORER_SETUP).await;
+        close_session(&l.state, "setup".into()).await.unwrap();
+        r
+    };
+    assert_eq!(summary.outcome, RunOutcome::Ok, "{events:?}");
+
+    // A state over a fresh cache that records the Explorer events.
+    let dir = tempfile::tempdir().unwrap();
+    let recorder = Arc::new(Recorder::default());
+    let state = AppState::new(
+        ConfigStore::at(dir.path().join("config.json")),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(MssqlDriver)],
+    )
+    .unwrap()
+    .with_metadata(
+        Arc::new(tulka_store::MetaCache::in_memory()),
+        recorder.clone(),
+    );
+    let conn = save_connection(&state, l.conn.clone(), Some(l.password.clone()))
+        .await
+        .unwrap()
+        .connection;
+
+    let info = connect_explorer(&state, conn.id.clone(), None)
+        .await
+        .unwrap();
+    assert!(info.databases.iter().any(|d| d == "tulka_explorer"));
+    let idle = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let done = recorder
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, AppEvent::IndexIdle { .. }));
+            if done {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        idle.is_ok(),
+        "indexing never finished: {:?}",
+        recorder.0.lock().unwrap()
+    );
+
+    let dbs = explorer_databases(&state, conn.id.clone()).await;
+    let db = dbs.iter().find(|d| d.name == "tulka_explorer").unwrap();
+    assert!(db.indexed_at.is_some() && !db.no_access);
+    assert_eq!((db.tables, db.views), (1, 1));
+
+    let r = search_objects(&state, "pedidos".into(), 20).await;
+    assert_eq!(r.indexing, 0);
+    let hit = r
+        .hits
+        .iter()
+        .find(|h| h.database == "tulka_explorer" && h.object.name == "Pedidos")
+        .unwrap_or_else(|| panic!("{r:?}"));
+    assert!(hit.connected);
+
+    let structure = table_structure(
+        &state,
+        conn.id.clone(),
+        "tulka_explorer".into(),
+        "dbo".into(),
+        "Pedidos".into(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(structure.columns.len(), 2);
+    let def = object_definition(
+        &state,
+        conn.id.clone(),
+        "tulka_explorer".into(),
+        "dbo".into(),
+        "vPedidos".into(),
+    )
+    .await
+    .unwrap();
+    assert!(def.contains("CREATE VIEW"), "{def}");
+    let m = completion_metadata(&state, conn.id.clone(), "tulka_explorer".into()).await;
+    assert_eq!(m.columns["dbo.Pedidos"], ["Id", "Cliente"]);
+
+    disconnect_explorer(&state, conn.id.clone()).await.unwrap();
+    assert_eq!(
+        table_structure(
+            &state,
+            conn.id,
+            "tulka_explorer".into(),
+            "dbo".into(),
+            "Pedidos".into()
+        )
+        .await
+        .unwrap_err(),
+        NOT_CONNECTED
+    );
+}

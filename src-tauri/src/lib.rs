@@ -1,9 +1,9 @@
 mod commands;
 
 use commands::{connections as conn, query};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
-use tulka_app::AppState;
+use tulka_app::{AppState, NoopEvents};
 
 static STARTED: OnceLock<Instant> = OnceLock::new();
 
@@ -23,7 +23,7 @@ pub fn run() {
     let _ = STARTED.set(Instant::now());
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(AppState::open_default())
+        .manage(AppState::open_default(Arc::new(NoopEvents)))
         .invoke_handler(tauri::generate_handler![
             startup_probe,
             conn::startup_error,

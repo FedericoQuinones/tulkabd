@@ -40,6 +40,9 @@
 //! config-file writes of `save_connection` / `delete_connection`, so those
 //! read-modify-write cycles are serialized. Keychain and file I/O run on
 //! `spawn_blocking`. The two mutexes are never held together.
+//!
+//! The Explorer (sessions, background indexing, metadata cache and search
+//! index) has its own state and locks; see [`crate::explorer`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,8 +53,11 @@ use tulka_core::{
     AppConfig, CancelHandle, ConfigStore, Driver, KeyringStore, SecretStore, Session,
 };
 use tulka_mssql::MssqlDriver;
+use tulka_store::MetaCache;
 
+use crate::explorer::Explorer;
 use crate::results::ResultBuffer;
+use crate::types::AppEvents;
 
 /// State behind every command.
 pub struct AppState {
@@ -65,6 +71,9 @@ pub struct AppState {
     startup_error: Option<String>,
     tabs: std::sync::Mutex<Tabs>,
     next_generation: AtomicU64,
+    /// Explorer sessions, the metadata cache, the search index and the
+    /// event sink; shared with the background indexing tasks.
+    pub(crate) explorer: Arc<Explorer>,
 }
 
 /// A result buffer shared between the run that fills it and the commands
@@ -84,6 +93,9 @@ pub struct TabState {
     /// Unique per `open_session`; see the module docs.
     pub generation: u64,
     pub connection_id: String,
+    /// The database selected by `open_session` / `use_database` (a `USE` in
+    /// a script is not tracked). Indexing starts with these databases.
+    pub database: String,
     /// `None` while checked out by a running command, or after a disconnect.
     pub session: Option<Box<dyn Session>>,
     /// The running query's cancel handle; `Some` only during `run_query`.
@@ -96,7 +108,9 @@ pub struct TabState {
 }
 
 impl AppState {
-    /// State over `config`, loading the saved connections now.
+    /// State over `config`, loading the saved connections now. The
+    /// metadata cache is in memory and events are dropped until
+    /// [`AppState::with_metadata`].
     pub fn new(
         config: ConfigStore,
         secrets: Arc<dyn SecretStore>,
@@ -111,6 +125,7 @@ impl AppState {
             startup_error: None,
             tabs: std::sync::Mutex::new(Tabs::default()),
             next_generation: AtomicU64::new(1),
+            explorer: Explorer::empty(),
         })
     }
 
@@ -131,7 +146,20 @@ impl AppState {
             startup_error: Some(error),
             tabs: std::sync::Mutex::new(Tabs::default()),
             next_generation: AtomicU64::new(1),
+            explorer: Explorer::empty(),
         }
+    }
+
+    /// Uses `cache` for the Explorer metadata and sends [`AppEvent`]s to
+    /// `events`. Call it right after construction, before any Explorer
+    /// command. The search index is built from the cache on a background
+    /// thread: this returns at once and `search_objects` reports
+    /// `indexing > 0` until it is ready.
+    ///
+    /// [`AppEvent`]: crate::types::AppEvent
+    pub fn with_metadata(mut self, cache: Arc<MetaCache>, events: Arc<dyn AppEvents>) -> Self {
+        self.explorer = Explorer::start(cache, events);
+        self
     }
 
     /// Why the config file could not be read at startup, if it could not.
@@ -152,15 +180,19 @@ impl AppState {
         }
     }
 
-    /// The production state: the per-user config file, the OS keychain and
-    /// the SQL Server driver. Never fails.
-    pub fn open_default() -> Self {
+    /// The production state: the per-user config file, the OS keychain, the
+    /// SQL Server driver and the per-user metadata cache (see
+    /// [`MetaCache::open_default`]), with events sent to `events`. Never
+    /// fails, and does not wait for the search index (see
+    /// [`AppState::with_metadata`]).
+    pub fn open_default(events: Arc<dyn AppEvents>) -> Self {
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore::new());
         let drivers: Vec<Arc<dyn Driver>> = vec![Arc::new(MssqlDriver)];
-        match ConfigStore::open_default() {
+        let state = match ConfigStore::open_default() {
             Ok(config) => Self::open(config, secrets, drivers),
             Err(e) => Self::new_read_only(e.to_string(), secrets, drivers),
-        }
+        };
+        state.with_metadata(Arc::new(MetaCache::open_default()), events)
     }
 
     /// Fails when the state is read-only.
