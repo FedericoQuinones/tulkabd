@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection};
+use serde::Serialize;
 use tulka_core::{ColumnInfo, DatabaseSnapshot, DbObject, ObjectKind};
 
 /// Bump when the table layout changes; a mismatching file is discarded and
@@ -37,10 +38,15 @@ CREATE TABLE columns (
 );
 ";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A database of a connection as cached. Serialized camelCase:
+/// `{"name", "noAccess", "indexedAt", "tables", "views", "procedures"}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CachedDatabase {
     pub name: String,
     pub no_access: bool,
+    /// When it was last indexed, as given to `replace_database` (tulka-app
+    /// writes Unix milliseconds); `None` until then or when `no_access`.
     pub indexed_at: Option<i64>,
     pub tables: u32,
     pub views: u32,
@@ -357,6 +363,37 @@ impl MetaCache {
         q().unwrap_or_default()
     }
 
+    /// Column names of every table and view of one database, as
+    /// `(schema, name, columns)` ordered by schema and name, columns in
+    /// ordinal order. One query, for autocompletion.
+    pub fn column_names(
+        &self,
+        connection_id: &str,
+        database: &str,
+    ) -> Vec<(String, String, Vec<String>)> {
+        let conn = self.lock();
+        let q = || -> rusqlite::Result<Vec<(String, String, Vec<String>)>> {
+            let mut st = conn.prepare(
+                "SELECT o.schema, o.name, c.name
+                 FROM columns c JOIN objects o ON o.id = c.object_id
+                 WHERE o.connection_id = ?1 AND o.database = ?2
+                 ORDER BY o.schema, o.name, o.id, c.ordinal",
+            )?;
+            let mut rows = st.query(params![connection_id, database])?;
+            let mut out: Vec<(String, String, Vec<String>)> = Vec::new();
+            while let Some(r) = rows.next()? {
+                let (schema, name, column): (String, String, String) =
+                    (r.get(0)?, r.get(1)?, r.get(2)?);
+                match out.last_mut() {
+                    Some(last) if last.0 == schema && last.1 == name => last.2.push(column),
+                    _ => out.push((schema, name, vec![column])),
+                }
+            }
+            Ok(out)
+        };
+        q().unwrap_or_default()
+    }
+
     /// Every cached object as `(connection_id, database, object)`, to build
     /// the search index. Insertion order (rowid scan, no sort).
     pub fn all_objects(&self) -> Vec<(String, String, DbObject)> {
@@ -552,6 +589,45 @@ mod tests {
         assert_eq!(c.columns("c2", "db", "dbo", "Users").len(), 2);
         c.clear();
         assert!(c.all_objects().is_empty() && c.databases("c2").is_empty());
+    }
+
+    #[test]
+    fn column_names_of_a_database() {
+        let c = MetaCache::in_memory();
+        c.replace_database("c1", "db", &snap(), 1).unwrap();
+        c.replace_database("c1", "other", &snap(), 1).unwrap();
+        assert_eq!(
+            c.column_names("c1", "db"),
+            vec![
+                (
+                    "dbo".to_string(),
+                    "ActiveUsers".to_string(),
+                    vec!["Id".to_string()]
+                ),
+                (
+                    "dbo".to_string(),
+                    "Users".to_string(),
+                    vec!["Id".to_string(), "Age".to_string()]
+                ),
+            ]
+        );
+        assert!(c.column_names("c2", "db").is_empty());
+    }
+
+    #[test]
+    fn cached_database_json_shape() {
+        let d = CachedDatabase {
+            name: "db".into(),
+            no_access: true,
+            indexed_at: None,
+            tables: 1,
+            views: 2,
+            procedures: 3,
+        };
+        assert_eq!(
+            serde_json::to_value(&d).unwrap(),
+            serde_json::json!({"name": "db", "noAccess": true, "indexedAt": null, "tables": 1, "views": 2, "procedures": 3})
+        );
     }
 
     #[test]
