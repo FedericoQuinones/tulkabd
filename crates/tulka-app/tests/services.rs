@@ -1,0 +1,798 @@
+//! Command logic against a scripted fake driver.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use tempfile::TempDir;
+use tokio::sync::mpsc::{self, Sender, UnboundedReceiver};
+use tulka_app::*;
+use tulka_core::{
+    estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, CancelHandle, Column,
+    ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, Driver, DriverError, Environment,
+    ExecEvent, MemoryStore, MessageKind, SecretStore, ServerInfo, Session, UnavailableStore, Value,
+};
+
+const PASSWORD: &str = "s3cret-pw";
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+// ---------------------------------------------------------------- fake driver
+
+struct FakeDriver;
+
+#[async_trait]
+impl Driver for FakeDriver {
+    fn id(&self) -> &'static str {
+        "fake"
+    }
+
+    async fn connect(&self, p: &ConnectParams) -> Result<Box<dyn Session>, DriverError> {
+        if p.password != PASSWORD {
+            return Err(DriverError::AuthFailed(format!(
+                "Login failed for user '{}'.",
+                p.user
+            )));
+        }
+        Ok(Box::new(FakeSession {
+            user: p.user.clone(),
+            database: p.database.clone().unwrap_or_else(|| "master".into()),
+            cancel: Arc::new(FakeCancel::default()),
+        }))
+    }
+}
+
+struct FakeSession {
+    user: String,
+    database: String,
+    cancel: Arc<FakeCancel>,
+}
+
+#[derive(Default)]
+struct FakeCancel {
+    requested: AtomicBool,
+}
+
+#[async_trait]
+impl CancelHandle for FakeCancel {
+    async fn cancel(&self) -> Result<(), DriverError> {
+        self.requested.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn fake_columns() -> Vec<Column> {
+    ["id", "amount", "name"]
+        .iter()
+        .map(|n| Column {
+            name: n.to_string(),
+            type_name: "fake".into(),
+        })
+        .collect()
+}
+
+fn fake_row(i: usize) -> Vec<Value> {
+    vec![
+        Value::Int(i as i64),
+        Value::Decimal(format!("{i}.50")),
+        Value::Text(format!("row\t{i}")),
+    ]
+}
+
+impl FakeSession {
+    /// Sends `n` rows of a new result in chunks of `chunk`.
+    async fn rows(
+        &self,
+        index: &mut u32,
+        n: usize,
+        chunk: usize,
+        tx: &Sender<ExecEvent>,
+    ) -> Result<(), DriverError> {
+        let i = *index;
+        *index += 1;
+        let _ = tx
+            .send(ExecEvent::ResultStart {
+                index: i,
+                columns: fake_columns(),
+            })
+            .await;
+        let mut sent = 0;
+        while sent < n {
+            let end = (sent + chunk).min(n);
+            let rows = (sent..end).map(fake_row).collect();
+            let _ = tx.send(ExecEvent::Rows { index: i, rows }).await;
+            sent = end;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Session for FakeSession {
+    async fn server_info(&mut self) -> Result<ServerInfo, DriverError> {
+        Ok(ServerInfo {
+            version: "Fake SQL 1".into(),
+            user: self.user.clone(),
+        })
+    }
+
+    async fn list_databases(&mut self) -> Result<Vec<String>, DriverError> {
+        Ok(["a", "b", "c", "master"].map(String::from).to_vec())
+    }
+
+    async fn use_database(&mut self, name: &str) -> Result<(), DriverError> {
+        if name == "missing" {
+            return Err(DriverError::Query {
+                message: format!("Database '{name}' does not exist."),
+                line: None,
+            });
+        }
+        self.database = name.into();
+        Ok(())
+    }
+
+    async fn current_database(&mut self) -> Result<String, DriverError> {
+        Ok(self.database.clone())
+    }
+
+    /// Statements separated by `;`: `rows N`, `trickle N` (one row per
+    /// event), `wait` (until cancelled), `error`, `disconnect`, `affected N`.
+    async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError> {
+        self.cancel.requested.store(false, Ordering::SeqCst);
+        let mut index = 0;
+        for stmt in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            let (cmd, arg) = stmt.split_once(' ').unwrap_or((stmt, "0"));
+            let n: usize = arg.parse().unwrap();
+            match cmd {
+                "rows" => self.rows(&mut index, n, 500, &tx).await?,
+                "trickle" => self.rows(&mut index, n, 1, &tx).await?,
+                "affected" => {
+                    let _ = tx.send(ExecEvent::RowsAffected { count: n as u64 }).await;
+                }
+                "wait" => loop {
+                    if self.cancel.requested.load(Ordering::SeqCst) {
+                        return Err(DriverError::Cancelled);
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                },
+                "error" => {
+                    let _ = tx
+                        .send(ExecEvent::Message {
+                            kind: MessageKind::Error,
+                            text: "Divide by zero error encountered.".into(),
+                            line: Some(1),
+                        })
+                        .await;
+                    return Err(DriverError::Query {
+                        message: "Divide by zero error encountered.".into(),
+                        line: Some(1),
+                    });
+                }
+                "disconnect" => {
+                    let reason = "connection reset by peer".to_string();
+                    let _ = tx
+                        .send(ExecEvent::Disconnected {
+                            reason: reason.clone(),
+                        })
+                        .await;
+                    return Err(DriverError::Disconnected(reason));
+                }
+                other => panic!("unknown fake statement {other}"),
+            }
+        }
+        let _ = tx.send(ExecEvent::BatchDone { batch: 0 }).await;
+        Ok(())
+    }
+
+    fn cancel_handle(&self) -> Box<dyn CancelHandle> {
+        Box::new(CancelRef(self.cancel.clone()))
+    }
+}
+
+struct CancelRef(Arc<FakeCancel>);
+
+#[async_trait]
+impl CancelHandle for CancelRef {
+    async fn cancel(&self) -> Result<(), DriverError> {
+        self.0.cancel().await
+    }
+}
+
+#[derive(Default)]
+struct FakeClipboard {
+    texts: Mutex<Vec<String>>,
+}
+
+impl Clipboard for FakeClipboard {
+    fn write_text(&self, text: String) -> Result<(), String> {
+        self.texts.lock().unwrap().push(text);
+        Ok(())
+    }
+}
+
+// ------------------------------------------------------------------- helpers
+
+struct Fixture {
+    state: Arc<AppState>,
+    secrets: Arc<dyn SecretStore>,
+    _dir: TempDir,
+}
+
+fn fixture(secrets: Arc<dyn SecretStore>) -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let config = ConfigStore::at(dir.path().join("config.json"));
+    let state = AppState::new(config, secrets.clone(), vec![Arc::new(FakeDriver)]).unwrap();
+    Fixture {
+        state: Arc::new(state),
+        secrets,
+        _dir: dir,
+    }
+}
+
+fn new_conn() -> ConnectionConfig {
+    let mut c = ConnectionConfig::new("Fake", "fake-host", 1433, "sa", Environment::Local);
+    c.driver = "fake".into();
+    c
+}
+
+/// A fixture with one connection whose password is saved in a MemoryStore.
+async fn connected(tab: &str) -> (Fixture, ConnectionConfig) {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    open_session(&f.state, tab.into(), saved.id.clone(), None, None)
+        .await
+        .unwrap();
+    (f, saved)
+}
+
+type Events = Arc<Mutex<Vec<UiEvent>>>;
+
+fn recorder() -> (impl Fn(UiEvent) + Send + Sync + 'static, Events) {
+    let events: Events = Arc::default();
+    let sink = events.clone();
+    (move |e| sink.lock().unwrap().push(e), events)
+}
+
+fn streamer() -> (
+    impl Fn(UiEvent) + Send + Sync + 'static,
+    UnboundedReceiver<UiEvent>,
+) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    (
+        move |e| {
+            let _ = tx.send(e);
+        },
+        rx,
+    )
+}
+
+async fn run(state: &AppState, tab: &str, sql: &str) -> (Result<RunSummary, String>, Vec<UiEvent>) {
+    let (sink, events) = recorder();
+    let result = tokio::time::timeout(TIMEOUT, run_query(state, tab.into(), sql.into(), sink))
+        .await
+        .expect("run_query did not finish");
+    let events = events.lock().unwrap().clone();
+    (result, events)
+}
+
+/// (total, truncated) of every RowCount of result `index`, in order.
+fn row_counts(events: &[UiEvent], index: u32) -> Vec<(usize, bool)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            UiEvent::RowCount {
+                index: i,
+                total,
+                truncated,
+            } if *i == index => Some((*total, *truncated)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Waits for a RowCount of result 0 with `total` rows.
+async fn wait_for_total(rx: &mut UnboundedReceiver<UiEvent>, total: usize) {
+    tokio::time::timeout(TIMEOUT, async {
+        while let Some(e) = rx.recv().await {
+            if matches!(e, UiEvent::RowCount { index: 0, total: t, .. } if t == total) {
+                return;
+            }
+        }
+        panic!("event stream ended");
+    })
+    .await
+    .expect("rows never arrived");
+}
+
+// --------------------------------------------------------------- connections
+
+#[tokio::test]
+async fn unavailable_keyring_saves_without_password_then_requires_it() {
+    let f = fixture(Arc::new(UnavailableStore));
+    let result = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap();
+    assert!(result.keyring_unavailable);
+    assert!(!result.connection.password_saved);
+    let listed = list_connections(&f.state).await;
+    assert_eq!(listed, vec![result.connection.clone()]);
+    assert!(!listed[0].password_saved);
+
+    let err = open_session(&f.state, "t1".into(), result.connection.id, None, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err, PASSWORD_REQUIRED);
+}
+
+#[tokio::test]
+async fn saving_without_password_keeps_the_saved_one() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let first = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap();
+    assert!(first.connection.password_saved && !first.keyring_unavailable);
+
+    // Rename without retyping; the UI may send a stale passwordSaved.
+    let mut renamed = first.connection.clone();
+    renamed.name = "Renamed".into();
+    renamed.password_saved = false;
+    let second = save_connection(&f.state, renamed, None).await.unwrap();
+    assert!(second.connection.password_saved);
+    assert_eq!(second.connection.name, "Renamed");
+    assert_eq!(
+        f.secrets.get(&first.connection.id).unwrap().as_deref(),
+        Some(PASSWORD)
+    );
+    let listed = list_connections(&f.state).await;
+    assert_eq!(listed, vec![second.connection.clone()]);
+
+    // It is persisted: a fresh state over the same file sees it.
+    let reloaded = AppState::new(
+        ConfigStore::at(f._dir.path().join("config.json")),
+        f.secrets.clone(),
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(list_connections(&reloaded).await, listed);
+
+    // A new connection saved without a password has none.
+    let mut fresh = new_conn();
+    fresh.password_saved = true;
+    let third = save_connection(&f.state, fresh, None).await.unwrap();
+    assert!(!third.connection.password_saved);
+}
+
+#[tokio::test]
+async fn delete_connection_removes_it_and_its_secret() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    delete_connection(&f.state, saved.id.clone()).await.unwrap();
+    assert!(list_connections(&f.state).await.is_empty());
+    assert_eq!(f.secrets.get(&saved.id).unwrap(), None);
+}
+
+#[tokio::test]
+async fn test_connection_uses_given_or_saved_password() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let info = test_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap();
+    assert_eq!(info.version, "Fake SQL 1");
+    assert_eq!(
+        test_connection(&f.state, new_conn(), None)
+            .await
+            .unwrap_err(),
+        PASSWORD_REQUIRED
+    );
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    assert!(test_connection(&f.state, saved, None).await.is_ok());
+
+    let err = test_connection(&f.state, new_conn(), Some("wrong-pw".into()))
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("authentication failed"), "{err}");
+    assert!(!err.contains("wrong-pw"));
+}
+
+// ------------------------------------------------------------------ sessions
+
+#[tokio::test]
+async fn open_session_reports_server_and_databases() {
+    let (f, saved) = connected("t1").await;
+    let info = open_session(&f.state, "t1".into(), saved.id.clone(), None, None)
+        .await
+        .unwrap();
+    assert_eq!(info.server.user, "sa");
+    assert_eq!(info.databases, ["a", "b", "c", "master"]);
+    assert_eq!(info.current_database, "master");
+
+    let info = open_session(&f.state, "t1".into(), saved.id, Some("c".into()), None)
+        .await
+        .unwrap();
+    assert_eq!(info.current_database, "c");
+}
+
+#[tokio::test]
+async fn selected_databases_are_filtered_and_the_first_is_used() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let mut conn = new_conn();
+    conn.databases = DatabaseScope::Selected {
+        names: vec!["c".into(), "b".into(), "gone".into()],
+    };
+    let saved = save_connection(&f.state, conn, None)
+        .await
+        .unwrap()
+        .connection;
+    let info = open_session(&f.state, "t1".into(), saved.id, None, Some(PASSWORD.into()))
+        .await
+        .unwrap();
+    assert_eq!(info.databases, ["b", "c"]);
+    assert_eq!(info.current_database, "b");
+}
+
+#[tokio::test]
+async fn wrong_password_is_a_clear_error() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), None)
+        .await
+        .unwrap()
+        .connection;
+    let err = open_session(
+        &f.state,
+        "t1".into(),
+        saved.id,
+        None,
+        Some("nope-pw".into()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err, "authentication failed: Login failed for user 'sa'.");
+}
+
+#[tokio::test]
+async fn use_database_switches_and_reports_errors() {
+    let (f, _) = connected("t1").await;
+    use_database(&f.state, "t1".into(), "b".into())
+        .await
+        .unwrap();
+    let err = use_database(&f.state, "t1".into(), "missing".into())
+        .await
+        .unwrap_err();
+    assert_eq!(err, "Database 'missing' does not exist.");
+    // The session is still usable.
+    let (result, _) = run(&f.state, "t1", "affected 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    assert_eq!(
+        use_database(&f.state, "nope".into(), "b".into())
+            .await
+            .unwrap_err(),
+        "no session is open on this tab"
+    );
+}
+
+// ------------------------------------------------------------------- queries
+
+#[tokio::test]
+async fn run_query_counts_rows_and_fills_buffers() {
+    let (f, _) = connected("t1").await;
+    let (result, events) = run(&f.state, "t1", "rows 1234; affected 7").await;
+    let summary = result.unwrap();
+    assert_eq!(summary.outcome, RunOutcome::Ok);
+    assert!(
+        summary.finished_at.ends_with('Z'),
+        "{}",
+        summary.finished_at
+    );
+    chrono::DateTime::parse_from_rfc3339(&summary.finished_at).unwrap();
+
+    assert_eq!(
+        events[0],
+        UiEvent::ResultStart {
+            index: 0,
+            columns: fake_columns()
+        }
+    );
+    let counts = row_counts(&events, 0);
+    assert_eq!(counts.last(), Some(&(1234, false)));
+    assert!(counts.len() <= 3, "{counts:?}");
+    assert!(counts.windows(2).all(|w| w[0].0 < w[1].0));
+    // The final count comes before later events.
+    let last_count = events
+        .iter()
+        .rposition(|e| matches!(e, UiEvent::RowCount { .. }))
+        .unwrap();
+    let affected = events
+        .iter()
+        .position(|e| *e == UiEvent::RowsAffected { count: 7 })
+        .unwrap();
+    assert!(last_count < affected);
+    assert_eq!(events.last(), Some(&UiEvent::BatchDone { batch: 0 }));
+    assert!(!events.iter().any(|e| matches!(e, UiEvent::Message { .. })));
+
+    let rows = fetch_rows(&f.state, "t1".into(), 0, 0, 5000).await.unwrap();
+    assert_eq!(rows.len(), MAX_FETCH_ROWS);
+    assert_eq!(rows[999], fake_row(999));
+    let rows = fetch_rows(&f.state, "t1".into(), 0, 1000, 1000)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 234);
+    assert_eq!(rows[233], fake_row(1233));
+    assert!(fetch_rows(&f.state, "t1".into(), 0, 5000, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        fetch_rows(&f.state, "t1".into(), 1, 0, 10)
+            .await
+            .unwrap_err(),
+        "result 1 does not exist"
+    );
+}
+
+#[tokio::test]
+async fn row_counts_are_throttled() {
+    let (f, _) = connected("t1").await;
+    let (result, events) = run(&f.state, "t1", "trickle 3000").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    let counts = row_counts(&events, 0);
+    assert_eq!(counts.last(), Some(&(3000, false)));
+    // One per 500 rows at most, plus time-based ones on a slow machine.
+    assert!(counts.len() < 60, "{} RowCount events", counts.len());
+}
+
+#[tokio::test]
+async fn every_result_gets_a_final_count_and_runs_clear_buffers() {
+    let (f, _) = connected("t1").await;
+    let (_, events) = run(&f.state, "t1", "rows 5; rows 0; rows 3").await;
+    assert_eq!(row_counts(&events, 0).last(), Some(&(5, false)));
+    assert_eq!(row_counts(&events, 1), vec![(0, false)]);
+    assert_eq!(row_counts(&events, 2).last(), Some(&(3, false)));
+    assert_eq!(
+        fetch_rows(&f.state, "t1".into(), 2, 0, 10)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let (_, _) = run(&f.state, "t1", "rows 2").await;
+    assert_eq!(
+        fetch_rows(&f.state, "t1".into(), 0, 0, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(fetch_rows(&f.state, "t1".into(), 2, 0, 10).await.is_err());
+}
+
+#[tokio::test]
+async fn results_over_the_cap_are_truncated_and_drained() {
+    let (f, _) = connected("t1").await;
+    let (result, events) = run(&f.state, "t1", "rows 120000; affected 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    let counts = row_counts(&events, 0);
+    assert_eq!(counts.last(), Some(&(MAX_ROWS, true)));
+    // Draining past the cap does not repeat the same count.
+    assert_eq!(counts.iter().filter(|c| c.1).count(), 1);
+    // The stream was read to its end.
+    assert!(events.contains(&UiEvent::RowsAffected { count: 1 }));
+    let tail = fetch_rows(&f.state, "t1".into(), 0, MAX_ROWS - 1, 10)
+        .await
+        .unwrap();
+    assert_eq!(tail, vec![fake_row(MAX_ROWS - 1)]);
+}
+
+#[tokio::test]
+async fn query_errors_end_with_outcome_error() {
+    let (f, _) = connected("t1").await;
+    let (result, events) = run(&f.state, "t1", "rows 1; error").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Error);
+    assert!(events.contains(&UiEvent::Message {
+        kind: MessageKind::Error,
+        text: "Divide by zero error encountered.".into(),
+        line: Some(1),
+    }));
+    let (result, _) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+}
+
+#[tokio::test]
+async fn disconnect_blocks_the_tab_until_open_session() {
+    let (f, saved) = connected("t1").await;
+    let (result, events) = run(&f.state, "t1", "rows 3; disconnect").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Disconnected);
+    assert!(events.contains(&UiEvent::Disconnected {
+        reason: "connection reset by peer".into()
+    }));
+
+    let (result, events) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap_err(), DISCONNECTED);
+    assert!(events.is_empty());
+    assert_eq!(
+        use_database(&f.state, "t1".into(), "b".into())
+            .await
+            .unwrap_err(),
+        DISCONNECTED
+    );
+    // The rows received before the disconnect can still be read.
+    assert_eq!(
+        fetch_rows(&f.state, "t1".into(), 0, 0, 10)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+
+    open_session(&f.state, "t1".into(), saved.id, None, None)
+        .await
+        .unwrap();
+    let (result, _) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+}
+
+#[tokio::test]
+async fn cancel_stops_a_run_that_streams_rows_meanwhile() {
+    let (f, _) = connected("t1").await;
+    let (sink, mut rx) = streamer();
+    let state = f.state.clone();
+    // Spawned: the run_query future must be Send for the Tauri layer.
+    let running =
+        tokio::spawn(
+            async move { run_query(&state, "t1".into(), "rows 700; wait".into(), sink).await },
+        );
+    wait_for_total(&mut rx, 700).await;
+
+    // Rows are readable while the query is still running...
+    let rows = fetch_rows(&f.state, "t1".into(), 0, 0, 1000).await.unwrap();
+    assert_eq!(rows.len(), 700);
+    // ...and a second run on the same tab is refused, not queued.
+    let (busy, _) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(busy.unwrap_err(), "a query is already running on this tab");
+
+    cancel_query(&f.state, "t1".into()).await.unwrap();
+    let summary = tokio::time::timeout(TIMEOUT, running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.outcome, RunOutcome::Cancelled);
+
+    // The session is back and works; cancelling while idle is a no-op.
+    cancel_query(&f.state, "t1".into()).await.unwrap();
+    let (result, _) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+}
+
+#[tokio::test]
+async fn close_session_cancels_a_running_query() {
+    let (f, _) = connected("t1").await;
+    let (sink, mut rx) = streamer();
+    let state = f.state.clone();
+    let running =
+        tokio::spawn(
+            async move { run_query(&state, "t1".into(), "rows 1; wait".into(), sink).await },
+        );
+    wait_for_total(&mut rx, 1).await;
+
+    close_session(&f.state, "t1".into()).await.unwrap();
+    let summary = tokio::time::timeout(TIMEOUT, running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.outcome, RunOutcome::Cancelled);
+    assert!(fetch_rows(&f.state, "t1".into(), 0, 0, 10).await.is_err());
+    let (result, _) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap_err(), "no session is open on this tab");
+    close_session(&f.state, "t1".into()).await.unwrap();
+}
+
+#[tokio::test]
+async fn reopening_a_running_tab_does_not_mix_runs() {
+    let (f, saved) = connected("t1").await;
+    let (sink, mut rx) = streamer();
+    let state = f.state.clone();
+    let running =
+        tokio::spawn(
+            async move { run_query(&state, "t1".into(), "rows 4; wait".into(), sink).await },
+        );
+    wait_for_total(&mut rx, 4).await;
+
+    open_session(&f.state, "t1".into(), saved.id, None, None)
+        .await
+        .unwrap();
+    let summary = tokio::time::timeout(TIMEOUT, running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.outcome, RunOutcome::Cancelled);
+    // The new session is idle and has no results of the old run.
+    assert!(fetch_rows(&f.state, "t1".into(), 0, 0, 10).await.is_err());
+    let (result, _) = run(&f.state, "t1", "rows 2").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+}
+
+// ---------------------------------------------------------------------- copy
+
+#[tokio::test]
+async fn copy_results_in_excel_and_ai_formats() {
+    let (f, _) = connected("t1").await;
+    let (result, _) = run(&f.state, "t1", "rows 4").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    let all_rows: Vec<_> = (0..4).map(fake_row).collect();
+    let clipboard = FakeClipboard::default();
+
+    let out = copy_results(
+        &f.state,
+        "t1".into(),
+        0,
+        CopyMode::Excel,
+        Selection::All,
+        &clipboard,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, CopyOutcome { rows: 4, tokens: 0 });
+    let expected = to_excel_tsv(&fake_columns(), &all_rows, system_decimal_separator());
+    assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+
+    let out = copy_results(
+        &f.state,
+        "t1".into(),
+        0,
+        CopyMode::Ai,
+        Selection::Rows { from: 1, to: 2 },
+        &clipboard,
+    )
+    .await
+    .unwrap();
+    let expected = to_ai(&fake_columns(), &all_rows[1..=2]);
+    assert_eq!(
+        out,
+        CopyOutcome {
+            rows: 2,
+            tokens: estimate_tokens(&expected)
+        }
+    );
+    assert!(out.tokens > 0);
+    assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+
+    let out = copy_results(
+        &f.state,
+        "t1".into(),
+        0,
+        CopyMode::Ai,
+        Selection::Cells {
+            rows: (3, 3),
+            cols: (0, 1),
+        },
+        &clipboard,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.rows, 1);
+    let expected = to_ai(&fake_columns()[0..2], &[all_rows[3][0..2].to_vec()]);
+    assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+
+    assert!(copy_results(
+        &f.state,
+        "t1".into(),
+        5,
+        CopyMode::Excel,
+        Selection::All,
+        &clipboard
+    )
+    .await
+    .is_err());
+}

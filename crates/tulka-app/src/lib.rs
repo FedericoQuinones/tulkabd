@@ -1,0 +1,29 @@
+//! Application services of tulkabd, independent of Tauri: saved connections,
+//! one database session per query tab, script execution with streamed
+//! events, Rust-side result buffers and copying results.
+//!
+//! Every command of the UI is a plain async function taking [`AppState`];
+//! the Tauri layer only wraps them. Errors are plain strings, with the
+//! sentinels [`PASSWORD_REQUIRED`] and [`DISCONNECTED`].
+
+pub mod connections;
+pub mod query;
+pub mod results;
+pub mod state;
+pub mod types;
+
+pub use connections::{delete_connection, list_connections, save_connection, test_connection};
+pub use query::{
+    cancel_query, close_session, copy_results, fetch_rows, open_session, run_query, use_database,
+    MAX_FETCH_ROWS,
+};
+pub use results::{ResultBuffer, Selection, MAX_ROWS};
+pub use state::{AppState, TabState};
+pub use types::{
+    Clipboard, CopyMode, CopyOutcome, RunOutcome, RunSummary, SaveConnectionResult, SessionInfo,
+    UiEvent, DISCONNECTED, PASSWORD_REQUIRED,
+};
+
+/// The core types used in the command signatures (`ConnectionConfig`,
+/// `ServerInfo`, `Value`, ...).
+pub use tulka_core;

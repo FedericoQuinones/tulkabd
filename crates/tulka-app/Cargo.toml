@@ -1,0 +1,19 @@
+[package]
+name = "tulka-app"
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+description = "Tauri-free application services of tulkabd: connections, sessions, query execution and result buffers"
+
+[dependencies]
+tulka-core = { path = "../tulka-core" }
+tulka-mssql = { path = "../tulka-mssql" }
+chrono = { version = "0.4", default-features = false, features = ["now"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+
+[dev-dependencies]
+async-trait = "0.1"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
