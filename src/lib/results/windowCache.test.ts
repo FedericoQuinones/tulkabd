@@ -64,3 +64,39 @@ test("failed fetch sets the error and retry fetches again", async () => {
   expect(c.error).toBeNull();
   expect(c.get(9)).toEqual(row(9));
 });
+
+test("a short window with unchanged total is fetched once, not in a loop", async () => {
+  const fetch = vi.fn(async (o: number) => rowsOf(o, 3));
+  const c = new WindowCache(fetch);
+  c.ensure(0, 10, 10);
+  await flush();
+  await flush();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  const empty = vi.fn(async () => [] as Value[][]);
+  const c2 = new WindowCache(empty);
+  c2.ensure(0, 10, 10);
+  await flush();
+  await flush();
+  expect(empty).toHaveBeenCalledTimes(1);
+});
+
+test("error stays while another window is failed, and clears after retry succeeds", async () => {
+  let failA = true;
+  const fetch = vi.fn(async (o: number, l: number) => {
+    if (o === 0 && failA) throw "boom";
+    return rowsOf(o, l);
+  });
+  const c = new WindowCache(fetch);
+  c.ensure(0, 10, 400);
+  await flush();
+  expect(c.error).toBe("boom");
+  c.ensure(200, 210, 400); // window B succeeds
+  await flush();
+  expect(c.get(200)).toEqual(row(200));
+  expect(c.error).toBe("boom");
+  failA = false;
+  c.retry();
+  await flush();
+  expect(c.get(0)).toEqual(row(0));
+  expect(c.error).toBeNull();
+});

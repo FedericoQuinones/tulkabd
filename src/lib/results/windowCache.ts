@@ -40,9 +40,11 @@ export class WindowCache {
 
   /** Clears the error and requests the failed windows again. */
   retry(): void {
+    const again = [...this.failed];
     this.failed.clear();
     this.error = null;
     this.onChange();
+    for (const o of again) void this.load(o);
     this.ensure(this.range.start, this.range.end, this.total);
   }
 
@@ -60,11 +62,14 @@ export class WindowCache {
   private async load(offset: number): Promise<void> {
     if (this.destroyed || this.inflight.has(offset) || !this.incomplete(offset)) return;
     this.inflight.add(offset);
+    const totalAtRequest = this.total;
     try {
       const rows = await this.fetch(offset, this.size);
       if (this.destroyed) return;
       rows.forEach((r, i) => this.rows.set(offset + i, r));
-      this.error = null;
+      this.failed.delete(offset);
+      // The notice stays while any other window is still failed.
+      if (this.failed.size === 0) this.error = null;
       this.onChange();
     } catch (e) {
       if (this.destroyed) return;
@@ -75,7 +80,8 @@ export class WindowCache {
     } finally {
       this.inflight.delete(offset);
     }
-    // `total` may have grown while this request was in flight.
-    void this.load(offset);
+    // Only a `total` that grew during the request can make another fetch useful;
+    // otherwise a short or empty answer would loop forever.
+    if (this.total !== totalAtRequest) void this.load(offset);
   }
 }
