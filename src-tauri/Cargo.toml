@@ -5,6 +5,8 @@ description = "A lightweight, cross-platform desktop client for Microsoft SQL Se
 authors = ["tulkabd contributors"]
 license = "MIT OR Apache-2.0"
 edition = "2024"
+# Edition 2024 plus let chains (src/lib.rs).
+rust-version = "1.88"
 
 [lib]
 # The `_lib` suffix is necessary to keep the lib name unique from the bin name

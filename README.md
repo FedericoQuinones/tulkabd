@@ -4,13 +4,13 @@ A lightweight, cross-platform desktop client for Microsoft SQL Server, built wit
 
 ## Requirements
 
-- [Rust](https://rustup.rs) (stable toolchain)
+- [Rust](https://rustup.rs) 1.88 or newer (stable toolchain)
 - [Node.js](https://nodejs.org) 22
 - [pnpm](https://pnpm.io)
 - Docker (only for integration tests)
 - Tauri system dependencies for your OS:
   - **Fedora:** `sudo dnf install webkit2gtk4.1-devel libsoup3-devel javascriptcoregtk4.1-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel openssl-devel curl wget file gcc gcc-c++`
-  - **Debian/Ubuntu:** `sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev build-essential curl wget file`
+  - **Debian/Ubuntu:** `sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev build-essential curl wget file`
   - **macOS:** Xcode Command Line Tools (`xcode-select --install`)
   - **Windows:** Microsoft Edge WebView2 runtime and the MSVC C++ build tools (Visual Studio Build Tools)
 
