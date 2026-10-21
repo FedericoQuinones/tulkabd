@@ -19,7 +19,7 @@
   );
 
   function run(target = editor.target()) {
-    if (target.sql.trim() === "" || pane.status !== "idle" || !connection) return;
+    if (target.sql.trim() === "" || pane.status !== "idle" || pane.switching || !connection) return;
     void pane.run(target.sql, target.lineOffset);
   }
 </script>
@@ -33,6 +33,7 @@
     database={pane.database}
     databases={pane.session?.databases ?? []}
     status={pane.status}
+    switching={pane.switching}
     onrun={() => run()}
     onstop={() => pane.stop()}
     {onreconnect}

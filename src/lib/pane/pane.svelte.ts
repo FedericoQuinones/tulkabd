@@ -47,7 +47,13 @@ class PaneState {
   /** Editor cursor, shown in the status bar. */
   cursor = $state({ line: 1, col: 1 });
 
+  /** True while a use_database call is in flight (Run and the database select are disabled). */
+  switching = $state(false);
+
   private hasSession = false;
+  // Run token: every run() takes a new id and open() bumps it, so a run that is still pending
+  // (e.g. after a mid-run "disconnected") is stale once a reconnect starts and must not touch state.
+  private runId = 0;
 
   /**
    * Binds the tab to a connection: closes the previous session (if any) and opens a new one.
@@ -56,6 +62,7 @@ class PaneState {
   async open(conn: ConnectionConfig, password?: string, database?: string): Promise<OpenResult> {
     if (this.status === "connecting" || this.status === "running") return { kind: "busy" };
     const before = this.status;
+    this.runId++;
     this.status = "connecting";
     try {
       if (this.hasSession) {
@@ -81,8 +88,16 @@ class PaneState {
         this.database = null;
         this.status = "idle";
       }
+      if (before === "disconnected" && String(e) !== "password_required") {
+        this.messages.push({ kind: "error", text: t("pane.reconnectFailed", { error: String(e) }), line: null });
+      }
       return String(e) === "password_required" ? { kind: "passwordRequired" } : { kind: "error", error: String(e) };
     }
+  }
+
+  // A method call, so TS does not narrow `status` across awaits (events can change it mid-run).
+  private isDisconnected(): boolean {
+    return this.status === "disconnected";
   }
 
   private markDisconnected() {
@@ -93,6 +108,7 @@ class PaneState {
   async run(sql: string, lineOffset: number): Promise<void> {
     if (this.status !== "idle" || !this.session) return;
     this.status = "running";
+    const id = ++this.runId;
     this.results = [];
     this.messages = [];
     this.summary = null;
@@ -111,25 +127,34 @@ class PaneState {
         if (v) pane.status = "disconnected";
       },
     };
+    const cancelledLine = () => this.messages.push({ kind: "info", text: t("pane.cancelled"), line: null });
     try {
-      this.summary = await ipc.runQuery(this.tabId, sql, (e) => reduceEvent(body, e, lineOffset));
-      if ((this.status as PaneStatus) === "disconnected") return;
-      if (this.summary.outcome === "disconnected") this.markDisconnected();
+      const summary = await ipc.runQuery(this.tabId, sql, (e) => {
+        if (id === this.runId) reduceEvent(body, e, lineOffset);
+      });
+      if (id !== this.runId) return;
+      this.summary = summary;
+      if (this.isDisconnected()) return;
+      if (summary.outcome === "disconnected") this.markDisconnected();
       else {
-        if (this.summary.outcome === "cancelled") this.messages.push({ kind: "info", text: t("pane.cancelled"), line: null });
+        if (summary.outcome === "cancelled") cancelledLine();
         this.status = "idle";
       }
     } catch (e) {
+      if (id !== this.runId) return;
       const err = classify(e);
       if (err.kind === "disconnected") {
         this.markDisconnected();
-      } else if (err.kind === "cancelled") {
-        this.messages.push({ kind: "info", text: t("pane.cancelled"), line: null });
-        this.status = "idle";
+        return;
+      }
+      // Never downgrade a status already set to "disconnected" by an event.
+      const alive = !this.isDisconnected();
+      if (err.kind === "cancelled") {
+        if (alive) cancelledLine();
       } else {
         this.messages.push({ kind: "error", text: err.text, line: err.line === null ? null : err.line + lineOffset });
-        this.status = "idle";
       }
+      if (alive) this.status = "idle";
     }
   }
 
@@ -139,8 +164,10 @@ class PaneState {
     await ipc.cancelQuery(this.tabId).catch(() => {});
   }
 
+  /** Returns when done; on failure the error is in `messages` and `database` is unchanged. */
   async changeDatabase(database: string): Promise<void> {
-    if (this.status !== "idle" || !this.session || database === this.database) return;
+    if (this.status !== "idle" || this.switching || !this.session || database === this.database) return;
+    this.switching = true;
     try {
       await ipc.useDatabase(this.tabId, database);
       this.database = database;
@@ -148,6 +175,8 @@ class PaneState {
       const err = classify(e);
       if (err.kind === "disconnected") this.markDisconnected();
       else this.messages.push({ kind: "error", text: t("pane.useDatabaseFailed", { error: err.text }), line: null });
+    } finally {
+      this.switching = false;
     }
   }
 }

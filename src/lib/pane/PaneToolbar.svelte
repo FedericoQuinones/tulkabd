@@ -12,13 +12,18 @@
     onrun: () => void;
     onstop: () => void;
     onreconnect: () => void;
-    ondatabase: (name: string) => void;
+    /** True while a database switch is in flight. */
+    switching?: boolean;
+    ondatabase: (name: string) => Promise<void>;
   }
-  let { connection, database, databases, status, onrun, onstop, onreconnect, ondatabase }: Props = $props();
+  let { connection, database, databases, status, switching = false, onrun, onstop, onreconnect, ondatabase }: Props = $props();
+
+  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  const runKey = t(isMac ? "pane.runKey.mac" : "pane.runKey.other");
 
   const envShort = $derived(connection ? t(`env.short.${connection.environment}`) : "");
   const envColor = $derived(connection ? ENVIRONMENTS.find((e) => e.id === connection.environment)!.color : "var(--muted)");
-  const canRun = $derived(status === "idle" && connection !== null);
+  const canRun = $derived(status === "idle" && !switching && connection !== null);
 </script>
 
 <div class="bar">
@@ -30,8 +35,12 @@
       <select
         aria-label={t("pane.database")}
         value={database ?? ""}
-        disabled={status !== "idle"}
-        onchange={(e) => ondatabase(e.currentTarget.value)}
+        disabled={status !== "idle" || switching}
+        onchange={async (e) => {
+          const select = e.currentTarget;
+          await ondatabase(select.value);
+          select.value = database ?? "";
+        }}
       >
         {#each databases as db (db)}<option value={db}>{db}</option>{/each}
       </select>
@@ -54,7 +63,7 @@
   </button>
   <button class="run" disabled={!canRun} onclick={onrun}>
     <svg class="i" viewBox="0 0 16 16"><path d="M5 3l8 5-8 5z" fill="currentColor" /></svg>{t("pane.run")}
-    <span class="k">Ctrl ↵</span>
+    <span class="k">{runKey}</span>
   </button>
 </div>
 

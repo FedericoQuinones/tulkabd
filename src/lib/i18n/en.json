@@ -74,6 +74,8 @@
   "env.short.local": "LOCAL",
   "pane.tab": "untitled-1",
   "pane.run": "Run",
+  "pane.runKey.other": "Ctrl ↵",
+  "pane.runKey.mac": "⌘ ↵",
   "pane.stop": "Stop",
   "pane.database": "Database",
   "pane.connecting": "Connecting...",
