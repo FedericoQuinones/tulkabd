@@ -99,8 +99,11 @@ fn scaled(value: i128, scale: u8) -> String {
 }
 
 /// `money` has four decimals; the driver hands it over as `value / 10^4` in
-/// an `f64`. Scaling back and rounding recovers the exact wire integer for
-/// every amount up to 2^53 / 10^4 (about 900 billion).
+/// an `f64` (the wire integer converted to `f64`, then divided). Scaling back
+/// and rounding recovers the exact wire integer only while the two roundings
+/// stay under half a unit, about 2^51 / 10^4 (some 225 billion). Larger
+/// amounts can be off in the last decimal. Decoding money as an exact integer
+/// needs a patch to the Tiberius fork (later).
 fn money(v: f64) -> String {
     scaled((v * 1e4).round() as i128, 4)
 }
