@@ -1043,3 +1043,38 @@ async fn test_connection_uses_the_stored_password_flag() {
         PASSWORD_REQUIRED
     );
 }
+
+#[tokio::test]
+async fn unreadable_config_opens_read_only_and_is_never_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let original = "{ not json";
+    std::fs::write(&path, original).unwrap();
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
+    let state = AppState::open(
+        ConfigStore::at(&path),
+        secrets.clone(),
+        vec![Arc::new(FakeDriver)],
+    );
+    assert!(state.startup_error().unwrap().contains("not valid"));
+    assert!(list_connections(&state).await.is_empty());
+
+    let conn = new_conn();
+    let err = save_connection(&state, conn.clone(), Some(PASSWORD.into()))
+        .await
+        .unwrap_err();
+    assert!(err.contains("read-only"), "{err}");
+    let err = delete_connection(&state, conn.id.clone())
+        .await
+        .unwrap_err();
+    assert!(err.contains("read-only"), "{err}");
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    // Nothing reached the keychain either.
+    assert!(secrets.get(&conn.id).unwrap().is_none());
+
+    // A healthy file has no startup error.
+    let ok = fixture(Arc::new(MemoryStore::default()));
+    assert!(ok.state.startup_error().is_none());
+}

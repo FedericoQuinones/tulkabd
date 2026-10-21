@@ -59,6 +59,10 @@ pub struct AppState {
     pub(crate) connections: Mutex<AppConfig>,
     pub(crate) secrets: Arc<dyn SecretStore>,
     pub(crate) drivers: HashMap<&'static str, Arc<dyn Driver>>,
+    /// Set when the config file could not be read at startup: the state is
+    /// read-only (nothing is ever written to the file) and this is shown to
+    /// the user.
+    startup_error: Option<String>,
     tabs: std::sync::Mutex<Tabs>,
     next_generation: AtomicU64,
 }
@@ -104,20 +108,67 @@ impl AppState {
             connections: Mutex::new(loaded),
             secrets,
             drivers: drivers.into_iter().map(|d| (d.id(), d)).collect(),
+            startup_error: None,
             tabs: std::sync::Mutex::new(Tabs::default()),
             next_generation: AtomicU64::new(1),
         })
     }
 
+    /// State with an empty in-memory config that never touches the config
+    /// file: `save_connection` / `delete_connection` fail with
+    /// "connections file is read-only: {error}". Used when the file cannot
+    /// be read, so the app still opens and the file is never overwritten.
+    pub fn new_read_only(
+        error: String,
+        secrets: Arc<dyn SecretStore>,
+        drivers: Vec<Arc<dyn Driver>>,
+    ) -> Self {
+        Self {
+            config: ConfigStore::at(""),
+            connections: Mutex::new(AppConfig::default()),
+            secrets,
+            drivers: drivers.into_iter().map(|d| (d.id(), d)).collect(),
+            startup_error: Some(error),
+            tabs: std::sync::Mutex::new(Tabs::default()),
+            next_generation: AtomicU64::new(1),
+        }
+    }
+
+    /// Why the config file could not be read at startup, if it could not.
+    pub fn startup_error(&self) -> Option<String> {
+        self.startup_error.clone()
+    }
+
+    /// State over `config`; an unreadable file gives a read-only state
+    /// (see [`AppState::new_read_only`]) instead of an error.
+    pub fn open(
+        config: ConfigStore,
+        secrets: Arc<dyn SecretStore>,
+        drivers: Vec<Arc<dyn Driver>>,
+    ) -> Self {
+        match Self::new(config, secrets.clone(), drivers.clone()) {
+            Ok(state) => state,
+            Err(e) => Self::new_read_only(e, secrets, drivers),
+        }
+    }
+
     /// The production state: the per-user config file, the OS keychain and
-    /// the SQL Server driver.
-    pub fn open_default() -> Result<Self, String> {
-        let config = ConfigStore::open_default().map_err(|e| e.to_string())?;
-        Self::new(
-            config,
-            Arc::new(KeyringStore::new()),
-            vec![Arc::new(MssqlDriver)],
-        )
+    /// the SQL Server driver. Never fails.
+    pub fn open_default() -> Self {
+        let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore::new());
+        let drivers: Vec<Arc<dyn Driver>> = vec![Arc::new(MssqlDriver)];
+        match ConfigStore::open_default() {
+            Ok(config) => Self::open(config, secrets, drivers),
+            Err(e) => Self::new_read_only(e.to_string(), secrets, drivers),
+        }
+    }
+
+    /// Fails when the state is read-only.
+    pub(crate) fn ensure_writable(&self) -> Result<(), String> {
+        match &self.startup_error {
+            Some(e) => Err(format!("the connections file is read-only: {e}")),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn driver(&self, id: &str) -> Result<Arc<dyn Driver>, String> {

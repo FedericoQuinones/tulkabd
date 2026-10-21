@@ -44,6 +44,7 @@ pub async fn save_connection(
     mut conn: ConnectionConfig,
     password: Option<String>,
 ) -> Result<SaveConnectionResult, String> {
+    state.ensure_writable()?;
     if conn.id.trim().is_empty() {
         return Err("the connection has no id".into());
     }
@@ -84,6 +85,7 @@ pub async fn save_connection(
 /// Deletes a connection and its stored password. A missing keychain does
 /// not prevent the deletion.
 pub async fn delete_connection(state: &AppState, id: String) -> Result<(), String> {
+    state.ensure_writable()?;
     let mut current = state.connections.lock().await;
     let secrets = state.secrets.clone();
     let key = id.clone();
