@@ -9,6 +9,12 @@ pub const PASSWORD_REQUIRED: &str = "password_required";
 /// Command error meaning the tab's connection was lost; only `open_session`
 /// gets the tab working again.
 pub const DISCONNECTED: &str = "disconnected";
+/// Command error meaning another command (a run or a database switch) is
+/// using the tab's session right now.
+pub const BUSY: &str = "busy";
+/// Command error of an `open_session` whose tab was closed (or opened again)
+/// while it was connecting; its new session was closed.
+pub const CLOSED: &str = "closed";
 
 /// Events streamed by `run_query`: [`ExecEvent`] with `Rows` replaced by
 /// `RowCount`, because rows stay in the Rust-side buffers.

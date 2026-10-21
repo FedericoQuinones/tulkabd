@@ -89,7 +89,7 @@ export interface CopyOutcome {
   tokens: number;
 }
 
-/** Command errors arrive as plain strings; `"password_required"` and `"disconnected"` are sentinels. */
+/** Command errors arrive as plain strings; `"password_required"`, `"disconnected"`, `"busy"` (the tab's session is in use) and `"closed"` (tab closed while `open_session` connected) are sentinels. */
 export const listConnections = () => invoke<ConnectionConfig[]>("list_connections");
 
 export const saveConnection = (conn: ConnectionConfig, password?: string) =>

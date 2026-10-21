@@ -65,18 +65,25 @@ impl ResultBuffer {
 
     /// The columns and rows covered by `sel`, cloned.
     pub fn select(&self, sel: &Selection) -> (Vec<Column>, Vec<Vec<Value>>) {
+        self.with_selection(sel, |columns, rows| (columns.to_vec(), rows.to_vec()))
+    }
+
+    /// Calls `f` with the columns and rows covered by `sel`. Whole rows are
+    /// borrowed; only a cell selection copies its part of each row.
+    pub fn with_selection<R>(
+        &self,
+        sel: &Selection,
+        f: impl FnOnce(&[Column], &[Vec<Value>]) -> R,
+    ) -> R {
         match sel {
-            Selection::All => (self.columns.clone(), self.rows.clone()),
-            Selection::Rows { from, to } => {
-                (self.columns.clone(), clamp(&self.rows, *from, *to).to_vec())
-            }
+            Selection::All => f(&self.columns, &self.rows),
+            Selection::Rows { from, to } => f(&self.columns, clamp(&self.rows, *from, *to)),
             Selection::Cells { rows, cols } => {
-                let columns = clamp(&self.columns, cols.0, cols.1).to_vec();
-                let rows = clamp(&self.rows, rows.0, rows.1)
+                let cells: Vec<Vec<Value>> = clamp(&self.rows, rows.0, rows.1)
                     .iter()
                     .map(|row| clamp(row, cols.0, cols.1).to_vec())
                     .collect();
-                (columns, rows)
+                f(clamp(&self.columns, cols.0, cols.1), &cells)
             }
         }
     }

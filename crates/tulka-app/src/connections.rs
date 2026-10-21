@@ -98,12 +98,23 @@ pub async fn delete_connection(state: &AppState, id: String) -> Result<(), Strin
 }
 
 /// Connects with `conn`, reads the server information and disconnects.
-/// Without `password`, uses the saved one.
+/// Without `password`, uses the one saved for the connection with the same
+/// id (the stored `password_saved` decides, not the one sent by the UI,
+/// which may be stale).
 pub async fn test_connection(
     state: &AppState,
-    conn: ConnectionConfig,
+    mut conn: ConnectionConfig,
     password: Option<String>,
 ) -> Result<ServerInfo, String> {
+    if password.is_none() {
+        conn.password_saved = state
+            .connections
+            .lock()
+            .await
+            .connections
+            .iter()
+            .any(|c| c.id == conn.id && c.password_saved);
+    }
     let password = resolve_password(state, &conn, password).await?;
     let driver = state.driver(&conn.driver)?;
     let mut session = driver

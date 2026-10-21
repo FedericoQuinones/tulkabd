@@ -18,10 +18,10 @@ pub use query::{
     MAX_FETCH_ROWS,
 };
 pub use results::{ResultBuffer, Selection, MAX_ROWS};
-pub use state::{AppState, TabState};
+pub use state::{AppState, SharedBuffer, TabState};
 pub use types::{
     Clipboard, CopyMode, CopyOutcome, RunOutcome, RunSummary, SaveConnectionResult, SessionInfo,
-    UiEvent, DISCONNECTED, PASSWORD_REQUIRED,
+    UiEvent, BUSY, CLOSED, DISCONNECTED, PASSWORD_REQUIRED,
 };
 
 /// The core types used in the command signatures (`ConnectionConfig`,

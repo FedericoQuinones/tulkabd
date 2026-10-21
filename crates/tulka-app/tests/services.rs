@@ -5,8 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use std::thread::ThreadId;
 use tempfile::TempDir;
+
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver};
+use tokio::sync::Notify;
 use tulka_app::*;
 use tulka_core::{
     estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, CancelHandle, Column,
@@ -38,6 +41,34 @@ impl Driver for FakeDriver {
             user: p.user.clone(),
             database: p.database.clone().unwrap_or_else(|| "master".into()),
             cancel: Arc::new(FakeCancel::default()),
+            dropped: None,
+        }))
+    }
+}
+
+/// Like [`FakeDriver`], but `connect` signals `entered` and then waits for
+/// `release`; `dropped` is set when one of its sessions is dropped.
+#[derive(Default)]
+struct GatedDriver {
+    entered: Notify,
+    release: Notify,
+    dropped: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Driver for GatedDriver {
+    fn id(&self) -> &'static str {
+        "gated"
+    }
+
+    async fn connect(&self, p: &ConnectParams) -> Result<Box<dyn Session>, DriverError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(Box::new(FakeSession {
+            user: p.user.clone(),
+            database: "master".into(),
+            cancel: Arc::new(FakeCancel::default()),
+            dropped: Some(self.dropped.clone()),
         }))
     }
 }
@@ -46,6 +77,15 @@ struct FakeSession {
     user: String,
     database: String,
     cancel: Arc<FakeCancel>,
+    dropped: Option<Arc<AtomicBool>>,
+}
+
+impl Drop for FakeSession {
+    fn drop(&mut self) {
+        if let Some(flag) = &self.dropped {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -136,7 +176,8 @@ impl Session for FakeSession {
     }
 
     /// Statements separated by `;`: `rows N`, `trickle N` (one row per
-    /// event), `wait` (until cancelled), `error`, `disconnect`, `affected N`.
+    /// event), `wait` (until cancelled), `error`, `disconnect`, `affected N`,
+    /// `panic`.
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError> {
         self.cancel.requested.store(false, Ordering::SeqCst);
         let mut index = 0;
@@ -155,6 +196,7 @@ impl Session for FakeSession {
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 },
+                "panic" => panic!("fake driver panic"),
                 "error" => {
                     let _ = tx
                         .send(ExecEvent::Message {
@@ -201,11 +243,16 @@ impl CancelHandle for CancelRef {
 #[derive(Default)]
 struct FakeClipboard {
     texts: Mutex<Vec<String>>,
+    threads: Mutex<Vec<ThreadId>>,
 }
 
 impl Clipboard for FakeClipboard {
     fn write_text(&self, text: String) -> Result<(), String> {
         self.texts.lock().unwrap().push(text);
+        self.threads
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
         Ok(())
     }
 }
@@ -219,9 +266,15 @@ struct Fixture {
 }
 
 fn fixture(secrets: Arc<dyn SecretStore>) -> Fixture {
+    fixture_with(secrets, vec![])
+}
+
+/// A fixture with [`FakeDriver`] plus `extra` drivers.
+fn fixture_with(secrets: Arc<dyn SecretStore>, mut extra: Vec<Arc<dyn Driver>>) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let config = ConfigStore::at(dir.path().join("config.json"));
-    let state = AppState::new(config, secrets.clone(), vec![Arc::new(FakeDriver)]).unwrap();
+    extra.push(Arc::new(FakeDriver));
+    let state = AppState::new(config, secrets.clone(), extra).unwrap();
     Fixture {
         state: Arc::new(state),
         secrets,
@@ -657,7 +710,7 @@ async fn cancel_stops_a_run_that_streams_rows_meanwhile() {
     assert_eq!(rows.len(), 700);
     // ...and a second run on the same tab is refused, not queued.
     let (busy, _) = run(&f.state, "t1", "rows 1").await;
-    assert_eq!(busy.unwrap_err(), "a query is already running on this tab");
+    assert_eq!(busy.unwrap_err(), BUSY);
 
     cancel_query(&f.state, "t1".into()).await.unwrap();
     let summary = tokio::time::timeout(TIMEOUT, running)
@@ -731,7 +784,7 @@ async fn copy_results_in_excel_and_ai_formats() {
     let (result, _) = run(&f.state, "t1", "rows 4").await;
     assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
     let all_rows: Vec<_> = (0..4).map(fake_row).collect();
-    let clipboard = FakeClipboard::default();
+    let clipboard = Arc::new(FakeClipboard::default());
 
     let out = copy_results(
         &f.state,
@@ -739,13 +792,16 @@ async fn copy_results_in_excel_and_ai_formats() {
         0,
         CopyMode::Excel,
         Selection::All,
-        &clipboard,
+        clipboard.clone(),
     )
     .await
     .unwrap();
     assert_eq!(out, CopyOutcome { rows: 4, tokens: 0 });
     let expected = to_excel_tsv(&fake_columns(), &all_rows, system_decimal_separator());
     assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+    // Formatting and the clipboard write run off the runtime thread.
+    let threads = clipboard.threads.lock().unwrap().clone();
+    assert!(!threads.contains(&std::thread::current().id()));
 
     let out = copy_results(
         &f.state,
@@ -753,7 +809,7 @@ async fn copy_results_in_excel_and_ai_formats() {
         0,
         CopyMode::Ai,
         Selection::Rows { from: 1, to: 2 },
-        &clipboard,
+        clipboard.clone(),
     )
     .await
     .unwrap();
@@ -777,7 +833,7 @@ async fn copy_results_in_excel_and_ai_formats() {
             rows: (3, 3),
             cols: (0, 1),
         },
-        &clipboard,
+        clipboard.clone(),
     )
     .await
     .unwrap();
@@ -791,8 +847,199 @@ async fn copy_results_in_excel_and_ai_formats() {
         5,
         CopyMode::Excel,
         Selection::All,
-        &clipboard
+        clipboard.clone()
     )
     .await
     .is_err());
+}
+
+#[tokio::test]
+async fn copy_works_while_the_result_is_streaming() {
+    let (f, _) = connected("t1").await;
+    let (sink, mut rx) = streamer();
+    let state = f.state.clone();
+    let running =
+        tokio::spawn(
+            async move { run_query(&state, "t1".into(), "rows 700; wait".into(), sink).await },
+        );
+    wait_for_total(&mut rx, 700).await;
+    let clipboard = Arc::new(FakeClipboard::default());
+    let out = copy_results(
+        &f.state,
+        "t1".into(),
+        0,
+        CopyMode::Excel,
+        Selection::All,
+        clipboard.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.rows, 700);
+    cancel_query(&f.state, "t1".into()).await.unwrap();
+    let summary = tokio::time::timeout(TIMEOUT, running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.outcome, RunOutcome::Cancelled);
+}
+
+// --------------------------------------------- runs that never check back in
+
+/// After a run that did not end normally, the tab reports "disconnected"
+/// (not "busy") and a new open_session recovers it.
+async fn assert_disconnected_then_recovers(f: &Fixture, saved: &ConnectionConfig) {
+    let (result, _) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap_err(), DISCONNECTED);
+    assert_eq!(
+        use_database(&f.state, "t1".into(), "b".into())
+            .await
+            .unwrap_err(),
+        DISCONNECTED
+    );
+    // Nothing left to cancel.
+    cancel_query(&f.state, "t1".into()).await.unwrap();
+    open_session(&f.state, "t1".into(), saved.id.clone(), None, None)
+        .await
+        .unwrap();
+    let (result, _) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+}
+
+#[tokio::test]
+async fn a_panicking_driver_leaves_the_tab_disconnected_not_busy() {
+    let (f, saved) = connected("t1").await;
+    let state = f.state.clone();
+    let joined = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 1; panic".into(), |_| {}).await
+    })
+    .await;
+    assert!(joined.unwrap_err().is_panic());
+    assert_disconnected_then_recovers(&f, &saved).await;
+}
+
+#[tokio::test]
+async fn a_panicking_event_sink_leaves_the_tab_disconnected_not_busy() {
+    let (f, saved) = connected("t1").await;
+    let state = f.state.clone();
+    let joined = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 1".into(), |_| {
+            panic!("sink panic")
+        })
+        .await
+    })
+    .await;
+    assert!(joined.unwrap_err().is_panic());
+    assert_disconnected_then_recovers(&f, &saved).await;
+}
+
+#[tokio::test]
+async fn a_dropped_run_leaves_the_tab_disconnected_not_busy() {
+    let (f, saved) = connected("t1").await;
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(100),
+        run_query(&f.state, "t1".into(), "rows 1; wait".into(), |_| {}),
+    )
+    .await;
+    assert!(dropped.is_err(), "the run should still be waiting");
+    assert_disconnected_then_recovers(&f, &saved).await;
+}
+
+// ------------------------------------------------- close during open_session
+
+async fn gated_fixture() -> (Fixture, Arc<GatedDriver>, ConnectionConfig) {
+    let gated = Arc::new(GatedDriver::default());
+    let f = fixture_with(Arc::new(MemoryStore::default()), vec![gated.clone()]);
+    let mut conn = new_conn();
+    conn.driver = "gated".into();
+    let saved = save_connection(&f.state, conn, Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    (f, gated, saved)
+}
+
+#[tokio::test]
+async fn closing_a_tab_while_it_connects_closes_the_new_session() {
+    let (f, gated, saved) = gated_fixture().await;
+    let state = f.state.clone();
+    let id = saved.id.clone();
+    let opening =
+        tokio::spawn(async move { open_session(&state, "t1".into(), id, None, None).await });
+    tokio::time::timeout(TIMEOUT, gated.entered.notified())
+        .await
+        .unwrap();
+
+    close_session(&f.state, "t1".into()).await.unwrap();
+    gated.release.notify_one();
+    let err = tokio::time::timeout(TIMEOUT, opening)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err, CLOSED);
+    assert!(gated.dropped.load(Ordering::SeqCst), "session not closed");
+    let (result, _) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap_err(), "no session is open on this tab");
+
+    // Opening the tab again later works.
+    gated.release.notify_one();
+    open_session(&f.state, "t1".into(), saved.id, None, None)
+        .await
+        .unwrap();
+    let (result, _) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+}
+
+#[tokio::test]
+async fn a_slow_open_does_not_replace_a_newer_one() {
+    let (f, gated, saved) = gated_fixture().await;
+    let state = f.state.clone();
+    let id = saved.id.clone();
+    let slow = tokio::spawn(async move { open_session(&state, "t1".into(), id, None, None).await });
+    tokio::time::timeout(TIMEOUT, gated.entered.notified())
+        .await
+        .unwrap();
+
+    // A newer open_session on the same tab, with an instant driver.
+    let fast = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    open_session(&f.state, "t1".into(), fast.id, None, None)
+        .await
+        .unwrap();
+    gated.release.notify_one();
+    let err = tokio::time::timeout(TIMEOUT, slow)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err, CLOSED);
+    assert!(gated.dropped.load(Ordering::SeqCst));
+    // The newer session is the one in the tab.
+    let (result, _) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+}
+
+#[tokio::test]
+async fn test_connection_uses_the_stored_password_flag() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    // The UI may send a stale passwordSaved = false.
+    let mut stale = saved.clone();
+    stale.password_saved = false;
+    let info = test_connection(&f.state, stale, None).await.unwrap();
+    assert_eq!(info.version, "Fake SQL 1");
+
+    // A connection that claims a saved password it does not have.
+    let mut claims = new_conn();
+    claims.password_saved = true;
+    assert_eq!(
+        test_connection(&f.state, claims, None).await.unwrap_err(),
+        PASSWORD_REQUIRED
+    );
 }
