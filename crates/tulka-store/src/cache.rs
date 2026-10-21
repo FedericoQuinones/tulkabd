@@ -358,13 +358,12 @@ impl MetaCache {
     }
 
     /// Every cached object as `(connection_id, database, object)`, to build
-    /// the search index.
+    /// the search index. Insertion order (rowid scan, no sort).
     pub fn all_objects(&self) -> Vec<(String, String, DbObject)> {
         let conn = self.lock();
         let q = || -> rusqlite::Result<Vec<(String, String, DbObject)>> {
             let mut st = conn.prepare(
-                "SELECT connection_id, database, schema, name, kind FROM objects
-                 ORDER BY connection_id, database, schema, name",
+                "SELECT connection_id, database, schema, name, kind FROM objects ORDER BY id",
             )?;
             let rows = st.query_map([], |r| {
                 let kind: String = r.get(4)?;
