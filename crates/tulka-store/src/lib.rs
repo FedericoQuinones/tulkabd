@@ -2,5 +2,7 @@
 //! offline. Tauri-free and blocking: callers use `spawn_blocking`.
 
 mod cache;
+mod search;
 
 pub use cache::{CachedDatabase, MetaCache, SCHEMA_VERSION};
+pub use search::{SearchEntry, SearchHit, SearchIndex, SearchResults, SearchScope};
