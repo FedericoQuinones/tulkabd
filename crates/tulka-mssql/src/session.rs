@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use tiberius::error::Error as TdsError;
-use tiberius::{AuthMethod, ColumnType, Config, EncryptionLevel, QueryItem, Row};
+use tiberius::{AuthMethod, ColumnType, Config, EncryptionLevel, QueryItem, Row, SqlBrowser};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
@@ -46,21 +46,75 @@ pub struct MssqlSession {
     cancel_requested: Arc<AtomicBool>,
 }
 
-/// Opens a session. `connect_timeout_s` bounds the TCP connection and the
-/// login together; queries run without a timeout.
+/// The default SQL Server port. With a named instance it means "ask SQL
+/// Server Browser for the instance's port".
+const DEFAULT_PORT: u16 = 1433;
+
+/// Where to connect, parsed from the Server field and the port.
+#[derive(Debug, PartialEq, Eq)]
+struct Target {
+    host: String,
+    /// The instance of `host\instance` when its port must be looked up with
+    /// SQL Server Browser (UDP 1434).
+    instance: Option<String>,
+    /// The TCP port when it is known.
+    port: Option<u16>,
+}
+
+impl Target {
+    /// Parses `host` or `host\instance`. A named instance is resolved through
+    /// SQL Server Browser when `port` is the default 1433; any other port is
+    /// used directly, as ADO.NET does for `host\instance,port`.
+    fn parse(server: &str, port: u16) -> Result<Target, DriverError> {
+        let server = server.trim();
+        let Some((host, instance)) = server.split_once('\\') else {
+            return Ok(Target {
+                host: server.to_string(),
+                instance: None,
+                port: Some(port),
+            });
+        };
+        let (host, instance) = (host.trim(), instance.trim());
+        if host.is_empty() || instance.is_empty() || instance.contains('\\') {
+            return Err(DriverError::Other(format!(
+                "invalid server name `{server}`: use host or host\\instance"
+            )));
+        }
+        let browse = port == DEFAULT_PORT;
+        Ok(Target {
+            host: host.to_string(),
+            instance: browse.then(|| instance.to_string()),
+            port: (!browse).then_some(port),
+        })
+    }
+
+    /// `host:port`, or `host\instance` while the port is unknown.
+    fn describe(&self) -> String {
+        match (&self.instance, self.port) {
+            (Some(instance), _) => format!("{}\\{instance}", self.host),
+            (None, Some(port)) => format!("{}:{port}", self.host),
+            (None, None) => self.host.clone(),
+        }
+    }
+}
+
+/// Opens a session. `connect_timeout_s` bounds the SQL Browser lookup, the
+/// TCP connection and the login together; queries run without a timeout.
 pub async fn connect(p: &ConnectParams) -> Result<MssqlSession, DriverError> {
+    let target = Target::parse(&p.server, p.port)?;
     let timeout =
         (p.connect_timeout_s > 0).then(|| Duration::from_secs(p.connect_timeout_s.into()));
     let client = match timeout {
-        Some(limit) => tokio::time::timeout(limit, open(p, timeout))
+        Some(limit) => tokio::time::timeout(limit, open(p, &target, timeout))
             .await
             .map_err(|_| {
                 DriverError::Unreachable(format!(
-                    "{}:{} did not answer within {} s",
-                    p.server, p.port, p.connect_timeout_s
+                    "{} did not answer within {} s",
+                    target.describe(),
+                    p.connect_timeout_s
                 ))
             })??,
-        None => open(p, None).await?,
+        None => open(p, &target, None).await?,
     };
     let cancel = client.cancel_handle();
     Ok(MssqlSession {
@@ -70,10 +124,16 @@ pub async fn connect(p: &ConnectParams) -> Result<MssqlSession, DriverError> {
     })
 }
 
-fn config(p: &ConnectParams, timeout: Option<Duration>) -> Config {
+fn config(p: &ConnectParams, target: &Target, timeout: Option<Duration>) -> Config {
     let mut config = Config::new();
-    config.host(&p.server);
-    config.port(p.port);
+    config.host(&target.host);
+    if let Some(port) = target.port {
+        config.port(port);
+    }
+    if let Some(instance) = &target.instance {
+        // Without a port, Tiberius asks SQL Browser on UDP 1434.
+        config.instance_name(instance);
+    }
     if let Some(db) = p.database.as_deref().filter(|db| !db.is_empty()) {
         config.database(db);
     }
@@ -98,21 +158,41 @@ fn config(p: &ConnectParams, timeout: Option<Duration>) -> Config {
     config
 }
 
-async fn open(p: &ConnectParams, timeout: Option<Duration>) -> Result<Client, DriverError> {
-    let mut config = config(p, timeout);
+async fn open(
+    p: &ConnectParams,
+    target: &Target,
+    timeout: Option<Duration>,
+) -> Result<Client, DriverError> {
+    let mut config = config(p, target, timeout);
+    let mut target_name = target.describe();
+    let mut named = target.instance.is_some();
     // Azure SQL can redirect the login to another node, once.
     for _ in 0..2 {
-        let addr = config.get_addr();
-        let tcp = TcpStream::connect(&addr)
-            .await
-            .map_err(|e| DriverError::Unreachable(format!("{addr}: {e}")))?;
+        let tcp = if named {
+            // Looks the port up with SQL Browser, then connects to it.
+            TcpStream::connect_named(&config)
+                .await
+                .map_err(|e| browser_error(&target_name, e))?
+        } else {
+            let addr = config.get_addr();
+            TcpStream::connect(&addr)
+                .await
+                .map_err(|e| DriverError::Unreachable(format!("{addr}: {e}")))?
+        };
         // Latency matters more than throughput for an interactive client.
         let _ = tcp.set_nodelay(true);
         match Client::connect(config.clone(), tcp.compat_write()).await {
             Ok(client) => return Ok(client),
             Err(TdsError::Routing { host, port }) => {
-                config.host(host);
-                config.port(port);
+                // The redirect names a host and port; no instance lookup.
+                let routed = Target {
+                    host,
+                    instance: None,
+                    port: Some(port),
+                };
+                config = self::config(p, &routed, timeout);
+                target_name = routed.describe();
+                named = false;
             }
             Err(e) => return Err(login_error(e)),
         }
@@ -120,6 +200,18 @@ async fn open(p: &ConnectParams, timeout: Option<Duration>) -> Result<Client, Dr
     Err(DriverError::Other(
         "the server redirected the login more than once".into(),
     ))
+}
+
+/// Maps a failed SQL Browser lookup or connection to a named instance.
+fn browser_error(target: &str, e: TdsError) -> DriverError {
+    match e {
+        TdsError::Io { message, .. } => DriverError::Unreachable(format!("{target}: {message}")),
+        _ => DriverError::Unreachable(format!(
+            "{target}: SQL Server Browser (UDP 1434) did not return the instance's port. \
+             Check the instance name and that the SQL Server Browser service is running, \
+             or enter the instance's TCP port."
+        )),
+    }
 }
 
 fn login_error(e: TdsError) -> DriverError {
@@ -466,5 +558,68 @@ async fn resend_cancel_while<F: Future>(request: F, out: &Emitter) -> F::Output 
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(host: &str, instance: Option<&str>, port: Option<u16>) -> Target {
+        Target {
+            host: host.into(),
+            instance: instance.map(Into::into),
+            port,
+        }
+    }
+
+    #[test]
+    fn plain_host_uses_the_port() {
+        assert_eq!(
+            Target::parse("db01", 1433).unwrap(),
+            target("db01", None, Some(1433))
+        );
+        assert_eq!(
+            Target::parse(" 10.0.0.5 ", 14333).unwrap(),
+            target("10.0.0.5", None, Some(14333))
+        );
+    }
+
+    #[test]
+    fn named_instance_on_the_default_port_asks_sql_browser() {
+        let t = Target::parse("db01\\SQLEXPRESS", 1433).unwrap();
+        assert_eq!(t, target("db01", Some("SQLEXPRESS"), None));
+        assert_eq!(t.describe(), "db01\\SQLEXPRESS");
+        assert_eq!(
+            Target::parse(" db01 \\ SQLEXPRESS ", 1433).unwrap(),
+            target("db01", Some("SQLEXPRESS"), None)
+        );
+    }
+
+    #[test]
+    fn named_instance_with_another_port_connects_to_it() {
+        let t = Target::parse("db01\\SQLEXPRESS", 50123).unwrap();
+        assert_eq!(t, target("db01", None, Some(50123)));
+        assert_eq!(t.describe(), "db01:50123");
+    }
+
+    #[test]
+    fn malformed_instance_names_are_rejected() {
+        for server in ["db01\\", "\\SQLEXPRESS", "\\", "db01\\a\\b"] {
+            assert!(
+                matches!(Target::parse(server, 1433), Err(DriverError::Other(_))),
+                "{server}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_sets_the_instance_only_for_a_browser_lookup() {
+        let p = ConnectParams::default();
+        let named = config(&p, &Target::parse("db01\\SQLEXPRESS", 1433).unwrap(), None);
+        // Tiberius sends the SQL Browser request to UDP 1434.
+        assert_eq!(named.get_addr(), "db01:1434");
+        let direct = config(&p, &Target::parse("db01\\SQLEXPRESS", 50123).unwrap(), None);
+        assert_eq!(direct.get_addr(), "db01:50123");
     }
 }

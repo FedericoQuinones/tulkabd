@@ -125,6 +125,64 @@ async fn unreachable_host_is_unreachable() {
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
+/// Answers one SQL Server Browser (SSRP) request for `instance` on
+/// `127.0.0.1:1434` with `port`. `None` if the UDP port is taken.
+async fn fake_sql_browser(instance: &str, port: u16) -> Option<tokio::task::JoinHandle<()>> {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:1434").await.ok()?;
+    let instance = instance.to_string();
+    Some(tokio::spawn(async move {
+        let mut buf = [0u8; 256];
+        let (len, from) = socket.recv_from(&mut buf).await.unwrap();
+        // CLNT_UCAST_INST (0x04) followed by the instance name.
+        assert_eq!(&buf[..len], [&[4u8][..], instance.as_bytes()].concat());
+        let data = format!(
+            "ServerName;TULKA;InstanceName;{instance};IsClustered;No;Version;16.0;tcp;{port};;"
+        );
+        let mut reply = vec![5u8];
+        reply.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        reply.extend_from_slice(data.as_bytes());
+        socket.send_to(&reply, from).await.unwrap();
+    }))
+}
+
+#[tokio::test]
+async fn named_instance_resolves_through_sql_browser() {
+    let Some(mut p) = test_params() else { return };
+    // The login sends the instance name, which the server checks against its
+    // own: the test container is the default instance, MSSQLSERVER.
+    let Some(browser) = fake_sql_browser("MSSQLSERVER", p.port).await else {
+        println!("skipped (UDP 127.0.0.1:1434 is in use)");
+        return;
+    };
+    p.server = format!("{}\\MSSQLSERVER", p.server);
+    p.port = 1433;
+    let mut s = connect(&p).await;
+    browser.await.unwrap();
+    let (result, events) = collect(s.as_mut(), "SELECT 1").await;
+    result.unwrap();
+    assert_eq!(rows(&events), vec![vec![Value::Int(1)]]);
+}
+
+#[tokio::test]
+async fn named_instance_without_sql_browser_is_unreachable() {
+    // Needs no server: nothing answers SSRP on 127.0.0.2.
+    let p = ConnectParams {
+        server: "127.0.0.2\\NOPE".into(),
+        connect_timeout_s: 5,
+        ..ConnectParams::default()
+    };
+    let started = Instant::now();
+    let result = MssqlDriver.connect(&p).await;
+    match result {
+        Err(DriverError::Unreachable(message)) => {
+            assert!(message.contains("SQL Server Browser"), "{message}");
+            assert!(message.starts_with("127.0.0.2\\NOPE"), "{message}");
+        }
+        other => panic!("{:?}", other.err()),
+    }
+    assert!(started.elapsed() < Duration::from_secs(4));
+}
+
 #[tokio::test]
 async fn maps_types_and_unicode() {
     let Some(p) = test_params() else { return };

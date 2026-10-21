@@ -5,7 +5,7 @@
   import type { ConnectionConfig, GuardLevel } from "../ipc";
   import { applyEnvironment, ENVIRONMENTS, initialEnvState, type EnvState } from "./env";
   import { connections } from "./store.svelte";
-  import { validateConnection } from "./validate";
+  import { isNamedInstance, validateConnection } from "./validate";
 
   interface Props {
     /** Connection to edit, or a prefilled copy (Duplicate) to create. */
@@ -147,6 +147,9 @@
             {#if errors.port}<div class="err">{t(errors.port)}</div>{/if}
           </div>
         </div>
+        {#if isNamedInstance(server) && !errors.server}
+          <div class="hint">{t("connection.instanceHint")}</div>
+        {/if}
         <div class="fl">
           <label for="c-auth">{t("connection.field.auth")}</label>
           <select id="c-auth">

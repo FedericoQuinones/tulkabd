@@ -65,6 +65,8 @@ pub enum ExecEvent {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectParams {
+    /// `host` or `host\instance`. A named instance's port is looked up
+    /// through SQL Server Browser when `port` is the default 1433.
     pub server: String,
     pub port: u16,
     pub user: String,

@@ -9,7 +9,8 @@ listed below. Every changed spot in the code carries a `tulka patch` comment,
 so `grep -rn "tulka patch"` lists them all.
 
 tulka uses it as a path dependency (`crates/tulka-mssql/Cargo.toml`) with
-`default-features = false, features = ["tds73", "rustls", "chrono"]`. The
+`default-features = false, features = ["tds73", "rustls", "chrono", "sql-browser-tokio"]`
+(the last one, unpatched upstream code, resolves named instances). The
 crate is excluded from the tulka workspace (root `Cargo.toml`), so it builds
 and tests as a standalone package with its own `Cargo.lock` and `target/`.
 

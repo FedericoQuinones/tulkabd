@@ -1,4 +1,4 @@
-import { validateConnection, type ConnectionForm } from "./validate";
+import { isNamedInstance, validateConnection, type ConnectionForm } from "./validate";
 
 const valid: ConnectionForm = { name: "Docker local", server: "127.0.0.1", port: 14333 };
 
@@ -20,5 +20,17 @@ describe("validateConnection", () => {
     expect(validateConnection({ ...valid, server: "" })).toEqual({
       server: "connection.errors.serverRequired",
     });
+  });
+  it("accepts host\\instance and rejects malformed instance names", () => {
+    expect(validateConnection({ ...valid, server: "db01\\SQLEXPRESS" })).toEqual({});
+    for (const server of ["db01\\", "\\SQLEXPRESS", "db01\\a\\b", " \\ "]) {
+      expect(validateConnection({ ...valid, server })).toEqual({
+        server: "connection.errors.serverInstance",
+      });
+    }
+  });
+  it("tells named instances apart", () => {
+    expect(isNamedInstance("db01\\SQLEXPRESS")).toBe(true);
+    expect(isNamedInstance("db01")).toBe(false);
   });
 });
