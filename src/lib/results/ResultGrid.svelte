@@ -6,7 +6,8 @@
   import type { PaneResult } from "../pane/reduce";
   import { cellText } from "./cellText";
   import { isSelected, type GridSelection } from "./selection";
-  import { WINDOW_SIZE, visibleRange, windowOffsets } from "./virtual";
+  import { visibleRange } from "./virtual";
+  import { WindowCache } from "./windowCache";
 
   interface Props {
     tabId: string;
@@ -21,11 +22,15 @@
   const NUMERIC = new Set(["int", "bigint", "smallint", "tinyint", "decimal", "numeric", "float", "real", "money", "smallmoney"]);
 
   // The parent keys this component by run, so the cache and widths die with the run.
-  const rowCache = new Map<number, Value[]>();
-  const inflight = new Set<number>();
-  let alive = true;
-  onDestroy(() => (alive = false));
   let version = $state(0);
+  const cache = new WindowCache(
+    (offset, limit) => ipc.fetchRows(tabId, resultIndex, offset, limit),
+    () => version++,
+  );
+  onDestroy(() => {
+    cache.destroy();
+    stopResize?.();
+  });
 
   let selection = $state<GridSelection | null>(null);
   let scrollTop = $state(0);
@@ -44,39 +49,16 @@
     return selection;
   }
 
-  function loadedIn(offset: number, size: number): number {
-    let n = 0;
-    for (let i = offset; i < offset + size; i++) if (rowCache.has(i)) n++;
-    return n;
-  }
-
-  async function load(offset: number) {
-    // Rows still streaming in: ask for what exists now and refetch when `total` grows.
-    const limit = Math.min(WINDOW_SIZE, total - offset);
-    if (limit <= 0 || inflight.has(offset) || loadedIn(offset, limit) === limit) return;
-    inflight.add(offset);
-    try {
-      const rows = await ipc.fetchRows(tabId, resultIndex, offset, WINDOW_SIZE);
-      if (!alive) return;
-      rows.forEach((r, i) => rowCache.set(offset + i, r));
-      version++;
-    } catch {
-      // Left as placeholders; scrolling again retries.
-    } finally {
-      inflight.delete(offset);
-    }
-  }
-
   $effect(() => {
     // Re-runs on scroll and when `total` grows.
-    void total;
-    for (const o of windowOffsets(range.start, range.end)) void load(o);
+    cache.ensure(range.start, range.end, total);
   });
 
   function rowAt(i: number): Value[] | undefined {
     void version;
-    return rowCache.get(i);
+    return cache.get(i);
   }
+  const fetchError = $derived((void version, cache.error));
 
   function pickCell(e: MouseEvent, row: number, col: number) {
     if (e.shiftKey && selection?.kind === "cells") selection = { ...selection, focus: { row, col } };
@@ -88,22 +70,36 @@
     else selection = { kind: "rows", anchor: row, focus: row };
   }
 
+  let stopResize: (() => void) | undefined;
   function startResize(e: PointerEvent, col: number) {
     e.preventDefault();
+    stopResize?.();
     const startX = e.clientX;
     const startW = colWidth(col);
     const move = (ev: PointerEvent) => {
       widths[col] = Math.max(48, startW + ev.clientX - startX);
     };
-    const up = () => {
+    const stop = () => {
       window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      stopResize = undefined;
     };
+    stopResize = stop;
     window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
   }
 </script>
 
+{#if fetchError}
+  <div class="notice" role="alert">
+    <span>{t("results.fetchFailed", { error: fetchError })}</span>
+    <button type="button" onclick={() => cache.retry()}>{t("results.retry")}</button>
+  </div>
+{:else if total === 0}
+  <div class="notice muted">{t("results.empty")}</div>
+{/if}
 <div
   class="grid"
   role="grid"
@@ -162,6 +158,37 @@
 </div>
 
 <style>
+  .notice {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 3;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    padding: 8px 16px;
+    background: var(--raised);
+    border-top: 1px solid var(--control);
+    color: var(--negative);
+    font-size: 12px;
+  }
+  .notice.muted {
+    top: 36px;
+    bottom: auto;
+    border: 0;
+    background: none;
+    color: var(--muted);
+  }
+  .notice button {
+    border: 1px solid var(--control);
+    border-radius: var(--radius-control);
+    background: none;
+    color: var(--soft);
+    font: inherit;
+    padding: 2px 10px;
+    cursor: pointer;
+  }
   .grid {
     height: 100%;
     overflow: auto;

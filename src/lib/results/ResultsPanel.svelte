@@ -15,6 +15,7 @@
 
   const MAX_ROWS = 100_000;
   const TOAST_MS = 2500;
+  const ERROR_TOAST_MS = 5000;
 
   let tab = $state<number | "messages">(0);
   let grid = $state<ResultGrid>();
@@ -43,7 +44,7 @@
   function show(text: string, error = false) {
     clearTimeout(toastTimer);
     toast = { text, error };
-    toastTimer = setTimeout(() => (toast = null), TOAST_MS);
+    toastTimer = setTimeout(() => (toast = null), error ? ERROR_TOAST_MS : TOAST_MS);
   }
   onDestroy(() => clearTimeout(toastTimer));
 
