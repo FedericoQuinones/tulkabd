@@ -67,6 +67,16 @@
     view.focus();
   }
 
+  let shownVersion = -1;
+  // `pane.loadText` swapped the document while the editor is mounted: show it.
+  $effect(() => {
+    const v = pane.docVersion;
+    if (!view || v === shownVersion) return;
+    shownVersion = v;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: pane.initialDoc }, selection: { anchor: 0 } });
+    pane.editorState = null;
+  });
+
   onMount(() => {
     const extensions = [
           lineNumbers(),
@@ -108,7 +118,10 @@
     view = new EditorView({ parent: host, state });
     view.focus();
     report(view);
+    pane.liveDoc = () => view?.state.doc.toString() ?? "";
+    shownVersion = pane.docVersion;
     return () => {
+      pane.liveDoc = null;
       if (view) pane.editorState = view.state.toJSON({ history: historyField });
       view?.destroy();
     };

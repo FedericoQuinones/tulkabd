@@ -47,9 +47,7 @@
         {#if onretry}<button type="button" onclick={onretry}>{t("tabs.retry")}</button>{/if}
       </div>
     {/if}
-    {#key pane.docVersion}
-      <SqlEditor bind:this={editor} {pane} onrun={run} oncursor={(p) => (pane.cursor = p)} />
-    {/key}
+    <SqlEditor bind:this={editor} {pane} onrun={run} oncursor={(p) => (pane.cursor = p)} />
   </div>
   <div class="res"><ResultsPanel {pane} onjump={(line) => editor?.jumpToLine(line)} /></div>
 </section>

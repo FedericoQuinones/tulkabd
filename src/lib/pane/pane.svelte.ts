@@ -51,7 +51,7 @@ export class PaneState {
 
   /** Text the editor starts with when it has no saved state yet. */
   initialDoc = $state("");
-  /** Bumped when `loadText` replaces the whole document, so the editor remounts. */
+  /** Bumped when `loadText` replaces the document; a mounted editor swaps its content. */
   docVersion = $state(0);
   /** Inline notice shown above the editor (e.g. a definition that could not load). */
   notice = $state<string | null>(null);
@@ -65,8 +65,19 @@ export class PaneState {
     this.tabId = tabId;
   }
 
-  /** Replaces the editor document (used when a definition finishes loading). */
+  /** Set by a mounted editor so `loadText` can see what the user has right now. */
+  liveDoc: (() => string) | null = null;
+  private loadedText: string | null = null;
+
+  /**
+   * Puts loaded text (a definition) into the editor. It only replaces the content while the user
+   * has not edited the tab: the document is empty or still the previously loaded text.
+   */
   loadText(text: string) {
+    const saved = this.editorState as { doc?: string } | null;
+    const current = this.liveDoc ? this.liveDoc() : saved ? (saved.doc ?? "") : this.initialDoc;
+    if (current !== "" && current !== this.loadedText) return;
+    this.loadedText = text;
     this.initialDoc = text;
     this.editorState = null;
     this.docVersion++;
