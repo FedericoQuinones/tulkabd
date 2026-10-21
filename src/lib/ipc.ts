@@ -90,6 +90,9 @@ export interface CopyOutcome {
 }
 
 /** Command errors arrive as plain strings; `"password_required"`, `"disconnected"`, `"busy"` (the tab's session is in use) and `"closed"` (tab closed while `open_session` connected) are sentinels. */
+/** Why the connections file could not be read at startup (the app is then read-only for connections), if it could not. */
+export const startupError = () => invoke<string | null>("startup_error");
+
 export const listConnections = () => invoke<ConnectionConfig[]>("list_connections");
 
 export const saveConnection = (conn: ConnectionConfig, password?: string) =>

@@ -14,6 +14,7 @@
   "status.noConnection": "No connection",
   "results.rowsShown": "{shown} of {total} rows",
   "explorer.connectFailed": "Could not connect: {error}",
+  "explorer.startupError": "Your connections file couldn't be read: {error}. tulkabd won't change it.",
   "explorer.loadFailed": "Could not load connections: {error}",
   "explorer.connectionActions": "Connection actions",
   "env.production": "Production",

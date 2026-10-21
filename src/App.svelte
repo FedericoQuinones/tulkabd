@@ -18,6 +18,7 @@
   let promptDatabase: string | undefined;
 
   void connections.refresh();
+  void connections.loadStartupError();
 
   async function connect(conn: ConnectionConfig, password?: string, database?: string) {
     if (pane.status === "connecting" || pane.status === "running") return;
@@ -56,6 +57,9 @@
     <Rail />
     <aside class="explorer">
       <div class="sect"><span>{t("explorer.title")}</span></div>
+      {#if connections.startupError}
+        <p class="error" role="alert">{t("explorer.startupError", { error: connections.startupError })}</p>
+      {/if}
       {#if connections.error}
         <p class="error" role="alert">{t("explorer.loadFailed", { error: connections.error })}</p>
       {/if}
