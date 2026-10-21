@@ -2,19 +2,22 @@
   import { onMount } from "svelte";
   import { EditorState } from "@codemirror/state";
   import { EditorView, drawSelection, keymap, lineNumbers } from "@codemirror/view";
-  import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+  import { defaultKeymap, history, historyField, historyKeymap } from "@codemirror/commands";
   import { HighlightStyle, bracketMatching, indentOnInput, syntaxHighlighting } from "@codemirror/language";
   import { MSSQL, sql } from "@codemirror/lang-sql";
   import { tags } from "@lezer/highlight";
   import { t } from "../i18n/t";
+  import type { PaneState } from "../pane/pane.svelte";
   import { runTarget } from "./runTarget";
 
   interface Props {
+    /** Supplies the starting text and keeps the editor state across tab switches. */
+    pane: PaneState;
     /** Ctrl/Cmd+Enter: receives the selection (or whole doc) to execute. */
     onrun: (target: { sql: string; lineOffset: number }) => void;
     oncursor: (pos: { line: number; col: number }) => void;
   }
-  let { onrun, oncursor }: Props = $props();
+  let { pane, onrun, oncursor }: Props = $props();
 
   let host: HTMLDivElement;
   let view: EditorView | undefined;
@@ -65,11 +68,7 @@
   }
 
   onMount(() => {
-    view = new EditorView({
-      parent: host,
-      state: EditorState.create({
-        doc: "",
-        extensions: [
+    const extensions = [
           lineNumbers(),
           history(),
           drawSelection(),
@@ -94,11 +93,25 @@
           EditorView.updateListener.of((u) => {
             if (u.selectionSet || u.docChanged) report(u.view);
           }),
-        ],
-      }),
-    });
+    ];
+    // Restore from the JSON saved on unmount: it carries text, selection and undo history, while
+    // the extensions (and their callbacks) are always the fresh ones from this instance.
+    const saved = pane.editorState as Record<string, unknown> | null;
+    let state: EditorState;
+    try {
+      state = saved
+        ? EditorState.fromJSON(saved, { extensions }, { history: historyField })
+        : EditorState.create({ doc: pane.initialDoc, extensions });
+    } catch {
+      state = EditorState.create({ doc: pane.initialDoc, extensions });
+    }
+    view = new EditorView({ parent: host, state });
     view.focus();
-    return () => view?.destroy();
+    report(view);
+    return () => {
+      if (view) pane.editorState = view.state.toJSON({ history: historyField });
+      view?.destroy();
+    };
   });
 </script>
 
@@ -106,6 +119,7 @@
 
 <style>
   .editor {
+    flex: 1;
     height: 100%;
     min-height: 0;
     overflow: hidden;

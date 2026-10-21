@@ -5,30 +5,30 @@
   import SqlEditor from "../editor/SqlEditor.svelte";
   import ResultsPanel from "../results/ResultsPanel.svelte";
   import PaneToolbar from "./PaneToolbar.svelte";
-  import { pane } from "./pane.svelte";
+  import type { PaneState } from "./pane.svelte";
 
   interface Props {
+    pane: PaneState;
     onreconnect: () => void;
+    /** Retries loading the text of a definition tab; shown with the pane's notice. */
+    onretry?: () => void;
   }
-  let { onreconnect }: Props = $props();
+  let { pane, onreconnect, onretry }: Props = $props();
 
-  let editor: SqlEditor;
+  let editor = $state<SqlEditor>();
 
   const connection = $derived(connections.list.find((c) => c.id === pane.connectionId) ?? null);
   const envColor = $derived(
     connection ? ENVIRONMENTS.find((e) => e.id === connection.environment)!.color : "var(--control)",
   );
 
-  function run(target = editor.target()) {
+  function run(target = editor?.target() ?? { sql: "", lineOffset: 0 }) {
     if (target.sql.trim() === "" || pane.status !== "idle" || pane.switching || !connection) return;
     void pane.run(target.sql, target.lineOffset);
   }
 </script>
 
 <section class="pane" style:--env={envColor}>
-  <div class="tabs">
-    <div class="tab"><span class="dot" style:background={envColor}></span><span class="lab">{t("pane.tab")}</span></div>
-  </div>
   <PaneToolbar
     {connection}
     database={pane.database}
@@ -40,14 +40,24 @@
     {onreconnect}
     ondatabase={(db) => pane.changeDatabase(db)}
   />
-  <div class="ed"><SqlEditor bind:this={editor} onrun={run} oncursor={(p) => (pane.cursor = p)} /></div>
-  <div class="res"><ResultsPanel onjump={(line) => editor.jumpToLine(line)} /></div>
+  <div class="ed">
+    {#if pane.notice}
+      <div class="notice" role="alert">
+        <span>{pane.notice}</span>
+        {#if onretry}<button type="button" onclick={onretry}>{t("tabs.retry")}</button>{/if}
+      </div>
+    {/if}
+    {#key pane.docVersion}
+      <SqlEditor bind:this={editor} {pane} onrun={run} oncursor={(p) => (pane.cursor = p)} />
+    {/key}
+  </div>
+  <div class="res"><ResultsPanel {pane} onjump={(line) => editor?.jumpToLine(line)} /></div>
 </section>
 
 <style>
   .pane {
     display: grid;
-    grid-template-rows: 36px 48px minmax(120px, 1fr) minmax(160px, 1fr);
+    grid-template-rows: 48px minmax(120px, 1fr) minmax(160px, 1fr);
     position: relative;
     min-width: 0;
     min-height: 0;
@@ -57,41 +67,33 @@
     content: "";
     position: absolute;
     left: 0;
-    top: 36px;
+    top: 0;
     bottom: 0;
     width: 2px;
     background: var(--env);
     z-index: 2;
   }
-  .tabs {
-    display: flex;
-    align-items: stretch;
-    border-bottom: 1px solid var(--border);
-  }
-  .tab {
+  .notice {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 0 14px;
+    gap: 12px;
+    padding: 8px 16px;
+    color: var(--warning);
+    border-bottom: 1px solid var(--border);
   }
-  .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-  }
-  .lab {
-    position: relative;
-  }
-  .lab::after {
-    content: "";
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: -11px;
-    height: 1px;
-    background: var(--env);
+  .notice button {
+    height: 28px;
+    padding: 0 12px;
+    border: 1px solid var(--control);
+    border-radius: var(--radius-control);
+    background: none;
+    color: var(--soft);
+    font: inherit;
+    cursor: pointer;
   }
   .ed {
+    display: flex;
+    flex-direction: column;
     min-height: 0;
     border-bottom: 1px solid var(--border);
     padding-left: 2px;

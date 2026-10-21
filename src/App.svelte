@@ -10,14 +10,18 @@
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
   import { connections } from "./lib/connections/store.svelte";
   import QueryPane from "./lib/pane/QueryPane.svelte";
-  import { pane } from "./lib/pane/pane.svelte";
+  import StructureView from "./lib/structure/StructureView.svelte";
+  import TabStrip from "./lib/tabs/TabStrip.svelte";
+  import { shortcutAction } from "./lib/tabs/shortcuts";
+  import { tabs } from "./lib/tabs/tabs.svelte";
 
   // `undefined` = closed, `null` = new connection, otherwise edit/duplicate this one.
   let dialog = $state<ConnectionConfig | null | undefined>(undefined);
-  let prompting = $state<ConnectionConfig | null>(null);
-  let connectError = $state<string | null>(null);
-  // Remembers the database to restore when a password prompt was opened by Reconnect.
-  let promptDatabase: string | undefined;
+
+  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  const newKey = t(isMac ? "tabs.newKey.mac" : "tabs.newKey.other");
+  const activeTab = $derived(tabs.active);
+  const activePane = $derived(tabs.activePane);
 
   // Tells the backend the first frame is painted (it only prints with TULKA_STARTUP_PROBE=1).
   onMount(() => {
@@ -27,26 +31,14 @@
   void connections.refresh();
   void connections.loadStartupError();
 
-  async function connect(conn: ConnectionConfig, password?: string, database?: string) {
-    if (pane.status === "connecting" || pane.status === "running") return;
-    connectError = null;
-    if (!conn.passwordSaved && password === undefined) {
-      promptDatabase = database;
-      prompting = conn;
-      return;
-    }
-    const result = await pane.open(conn, password, database);
-    if (result.kind === "passwordRequired") {
-      promptDatabase = database;
-      prompting = conn;
-    } else if (result.kind === "error") {
-      connectError = t("explorer.connectFailed", { error: result.error });
-    }
-  }
-
-  function reconnect() {
-    const conn = connections.list.find((c) => c.id === pane.connectionId);
-    if (conn) void connect(conn, undefined, pane.database ?? undefined);
+  function onkeydown(e: KeyboardEvent) {
+    // Dialogs and the password prompt own the keyboard while open.
+    if (dialog !== undefined || tabs.passwordRequest) return;
+    const action = shortcutAction(e, isMac);
+    if (!action) return;
+    e.preventDefault();
+    if (action === "new") tabs.newTab();
+    else if (tabs.activeId) tabs.close(tabs.activeId);
   }
 
   function duplicate(conn: ConnectionConfig) {
@@ -59,6 +51,8 @@
   }
 </script>
 
+<svelte:window {onkeydown} />
+
 <div class="win">
   <div class="cols">
     <Rail />
@@ -70,22 +64,50 @@
       {#if connections.error}
         <p class="error" role="alert">{t("explorer.loadFailed", { error: connections.error })}</p>
       {/if}
-      {#if connectError}<p class="error" role="alert">{connectError}</p>{/if}
+      {#if tabs.connectError}<p class="error" role="alert">{tabs.connectError}</p>{/if}
       {#if connections.list.length === 0}
         <div class="empty">
           <p>{t("explorer.empty")}</p>
           <button class="primary" onclick={() => (dialog = null)}>{t("explorer.new")}</button>
         </div>
       {:else}
-        <ConnectionList onconnect={(c) => connect(c)} onedit={(c) => (dialog = c)} onduplicate={duplicate} />
+        <ConnectionList onconnect={(c) => tabs.connect(c)} onedit={(c) => (dialog = c)} onduplicate={duplicate} />
         <div class="foot">
           <button class="primary" onclick={() => (dialog = null)}>{t("explorer.new")}</button>
         </div>
       {/if}
     </aside>
-    <main class="workspace"><QueryPane onreconnect={reconnect} /></main>
+    <main class="workspace">
+      <TabStrip />
+      <div class="body">
+        {#if activeTab?.pane}
+          {#key activeTab.id}
+            <QueryPane pane={activeTab.pane} onreconnect={() => tabs.reconnectActive()} onretry={() => tabs.retry(activeTab.id)} />
+          {/key}
+        {:else if activeTab?.kind === "structure"}
+          {#key activeTab.id}
+            <StructureView
+              connectionId={activeTab.connectionId!}
+              database={activeTab.database!}
+              schema={activeTab.schema!}
+              name={activeTab.name!}
+            />
+          {/key}
+        {:else}
+          <div class="blank">
+            <p>{t("tabs.empty", { key: newKey })}</p>
+            <p class="sub">{t("tabs.emptyHint")}</p>
+          </div>
+        {/if}
+      </div>
+    </main>
   </div>
-  <StatusBar status={pane.status} session={pane.session} cursor={pane.cursor} onreconnect={reconnect} />
+  <StatusBar
+    status={activePane?.status ?? "idle"}
+    session={activePane?.session ?? null}
+    cursor={activePane?.cursor ?? { line: 1, col: 1 }}
+    onreconnect={() => tabs.reconnectActive()}
+  />
 </div>
 
 {#if dialog !== undefined}
@@ -93,15 +115,11 @@
     <ConnectionDialog initial={dialog ?? undefined} onclose={() => (dialog = undefined)} />
   {/key}
 {/if}
-{#if prompting}
+{#if tabs.passwordRequest}
   <PasswordPrompt
-    connection={prompting}
-    oncancel={() => (prompting = null)}
-    onsubmit={(pw) => {
-      const c = prompting!;
-      prompting = null;
-      void connect(c, pw, promptDatabase);
-    }}
+    connection={tabs.passwordRequest.conn}
+    oncancel={() => tabs.cancelPassword()}
+    onsubmit={(pw) => void tabs.submitPassword(pw)}
   />
 {/if}
 
@@ -170,5 +188,25 @@
     background: var(--ground);
     min-width: 0;
     min-height: 0;
+    display: grid;
+    grid-template-rows: 36px minmax(0, 1fr);
+  }
+  .body {
+    min-height: 0;
+  }
+  .blank {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    color: var(--muted);
+  }
+  .blank p {
+    margin: 0;
+  }
+  .blank .sub {
+    font-size: 12px;
   }
 </style>

@@ -31,12 +31,12 @@ function classify(e: unknown): { kind: "disconnected" | "cancelled" | "query" | 
 }
 
 /**
- * State of the single query tab (`untitled-1`) and the session it owns.
+ * State of one query tab and the session it owns (one `PaneState` per tab).
  * Task 10 consumes `results`, `messages` and `summary`. Message `line` values are
  * already 1-based editor lines (backend line + lineOffset); see `PaneMessage`.
  */
-class PaneState {
-  readonly tabId = "untitled-1";
+export class PaneState {
+  readonly tabId: string;
   connectionId = $state<string | null>(null);
   database = $state<string | null>(null);
   status = $state<PaneStatus>("idle");
@@ -49,8 +49,36 @@ class PaneState {
   /** Editor cursor, shown in the status bar. */
   cursor = $state({ line: 1, col: 1 });
 
+  /** Text the editor starts with when it has no saved state yet. */
+  initialDoc = $state("");
+  /** Bumped when `loadText` replaces the whole document, so the editor remounts. */
+  docVersion = $state(0);
+  /** Inline notice shown above the editor (e.g. a definition that could not load). */
+  notice = $state<string | null>(null);
+  /** CodeMirror state saved when the editor unmounts, so text, cursor and undo survive tab switches. */
+  editorState: unknown = null;
+
   /** True while a use_database call is in flight (Run and the database select are disabled). */
   switching = $state(false);
+
+  constructor(tabId: string) {
+    this.tabId = tabId;
+  }
+
+  /** Replaces the editor document (used when a definition finishes loading). */
+  loadText(text: string) {
+    this.initialDoc = text;
+    this.editorState = null;
+    this.docVersion++;
+  }
+
+  /** Closes the backend session, if one is open. */
+  async close(): Promise<void> {
+    this.runId++;
+    if (!this.hasSession) return;
+    this.hasSession = false;
+    await ipc.closeSession(this.tabId).catch(() => {});
+  }
 
   private hasSession = false;
   // Run token: every run() takes a new id and open() bumps it, so a run that is still pending
@@ -116,18 +144,19 @@ class PaneState {
     this.messages = [];
     this.summary = null;
     // `body` is a view over this pane so the pure reducer can fill it.
+    const self = this;
     const body: PaneBody = {
       get results() {
-        return pane.results;
+        return self.results;
       },
       get messages() {
-        return pane.messages;
+        return self.messages;
       },
       get disconnected() {
-        return pane.status === "disconnected";
+        return self.status === "disconnected";
       },
       set disconnected(v: boolean) {
-        if (v) pane.status = "disconnected";
+        if (v) self.status = "disconnected";
       },
     };
     const cancelledLine = () => this.messages.push({ kind: "info", text: t("pane.cancelled"), line: null });
@@ -183,5 +212,3 @@ class PaneState {
     }
   }
 }
-
-export const pane = new PaneState();
