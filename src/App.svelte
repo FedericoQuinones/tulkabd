@@ -17,7 +17,7 @@
   import { shortcutAction } from "./lib/tabs/shortcuts";
   import { tabs } from "./lib/tabs/tabs.svelte";
 
-  // `undefined` = closed, `null` = new connection, otherwise edit/duplicate this one.
+  // `undefined` = closed, `null` = new connection, otherwise edit this one.
   let dialog = $state<ConnectionConfig | null | undefined>(undefined);
 
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
@@ -82,7 +82,7 @@
 <svelte:window {onkeydown} />
 
 <div class="win">
-  <div class="cols">
+  <div class="cols" class:no-explorer={explorerHidden}>
     <Rail active={explorerHidden ? null : "rail.explorer"} onselect={onrail} />
     {#if !explorerHidden}
       <aside class="explorer" style:width="{explorerWidth}px">
@@ -177,6 +177,10 @@
     display: grid;
     grid-template-columns: 54px auto minmax(0, 1fr);
     min-height: 0;
+  }
+  /* Without the aside the workspace would land in the auto track. */
+  .cols.no-explorer {
+    grid-template-columns: 54px minmax(0, 1fr);
   }
   .explorer {
     position: relative;
