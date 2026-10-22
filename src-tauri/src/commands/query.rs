@@ -1,24 +1,12 @@
 use std::sync::Arc;
 
+use super::PluginClipboard;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
-use tauri_plugin_clipboard_manager::ClipboardExt;
 use tulka_app::tulka_core::Value;
 use tulka_app::{
     AppState, Clipboard, CopyMode, CopyOutcome, RunSummary, Selection, SessionInfo, UiEvent,
 };
-
-/// Writes copied results to the system clipboard through the plugin.
-struct PluginClipboard(AppHandle);
-
-impl Clipboard for PluginClipboard {
-    fn write_text(&self, text: String) -> Result<(), String> {
-        self.0
-            .clipboard()
-            .write_text(text)
-            .map_err(|e| e.to_string())
-    }
-}
 
 #[tauri::command]
 pub async fn open_session(

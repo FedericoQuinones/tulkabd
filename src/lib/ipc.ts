@@ -171,6 +171,20 @@ export interface Folder {
   /** The containing folder; `null` is the root. */
   parentId: string | null;
 }
+/** What a pasted connection string provides; `null` where it did not say. */
+export interface ParsedConnection {
+  /** Host, with `\instance` when one is named. */
+  server: string;
+  port: number | null;
+  user: string | null;
+  password: string | null;
+  database: string | null;
+  encrypt: boolean | null;
+  trustServerCertificate: boolean | null;
+  connectTimeoutS: number | null;
+  /** Keys that were not understood, as written. */
+  ignoredKeys: string[];
+}
 export type ExplorerStatus = "connecting" | "connected" | "disconnected" | "error";
 /** Pushed on the `app-event` event, outside of any command. No `indexIdle` follows an `error` or `disconnected` status. */
 export type AppEvent =
@@ -244,6 +258,21 @@ export const moveFolder = (id: string, parentId: string | null) =>
 export const listExpanded = () => invoke<string[]>("list_expanded");
 /** Replaces the set of expanded folder and connection ids. */
 export const setExpanded = (ids: string[]) => invoke<void>("set_expanded", { ids });
+/**
+ * Parses an ADO.NET, ODBC, JDBC or `sqlserver://` connection string. Errors are codes that never
+ * contain the text: `"empty"`, `"no_server"`, `"bad_port"`, `"bad_value:<key>"`, `"unsupported_auth"`,
+ * `"unrecognized"`.
+ */
+export const parseConnectionString = (text: string) =>
+  invoke<ParsedConnection>("parse_connection_string", { text });
+/** Saves a copy named "<name> (copy)" in the same folder, with its own copy of the saved password. */
+export const duplicateConnection = (id: string) => invoke<ConnectionConfig>("duplicate_connection", { id });
+/**
+ * Copies the connection's connection string to the clipboard (from Rust). Resolves to whether the
+ * password was included: only with `includePassword` and a saved password.
+ */
+export const copyConnectionString = (id: string, includePassword: boolean) =>
+  invoke<boolean>("copy_connection_string", { id, includePassword });
 export const listServerDatabases = (conn: ConnectionConfig, password?: string) =>
   invoke<string[]>("list_server_databases", { conn, password: password ?? null });
 

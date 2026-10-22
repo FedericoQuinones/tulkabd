@@ -3,13 +3,16 @@
 use std::sync::Arc;
 
 use tulka_core::{
-    AppConfig, ConnectParams, ConnectionConfig, Folder, SecretError, SecretStore, ServerInfo,
+    format_connection_string, AppConfig, ConnectParams, ConnectionConfig, Folder, ParsedConnection,
+    SecretError, SecretStore, ServerInfo,
 };
 
 use crate::explorer;
 use crate::query::close_session;
 use crate::state::AppState;
-use crate::types::{SaveConnectionResult, CYCLE, EMPTY_NAME, NOT_FOUND, PASSWORD_REQUIRED};
+use crate::types::{
+    Clipboard, SaveConnectionResult, CYCLE, EMPTY_NAME, NOT_FOUND, PASSWORD_REQUIRED,
+};
 
 /// Runs blocking work (keychain, config file) off the async runtime.
 pub(crate) async fn blocking<T: Send + 'static>(
@@ -120,6 +123,100 @@ pub async fn delete_connection(state: &AppState, id: String) -> Result<(), Strin
     }
     explorer::forget_connection(state, &id).await;
     Ok(())
+}
+
+/// Copies a connection under a new id, named `"<name> (copy)"`, in the same
+/// folder. A saved password is copied to the new id's keychain entry, so
+/// deleting either one leaves the other's password alone. If the password
+/// cannot be read or stored the copy is saved without one. Fails with
+/// [`NOT_FOUND`].
+pub async fn duplicate_connection(
+    state: &AppState,
+    id: String,
+) -> Result<ConnectionConfig, String> {
+    state.ensure_writable()?;
+    let mut current = state.connections.lock().await;
+    let original = current
+        .connections
+        .iter()
+        .find(|c| c.id == id)
+        .ok_or(NOT_FOUND)?;
+    let mut copy = ConnectionConfig {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: format!("{} (copy)", original.name),
+        ..original.clone()
+    };
+    copy.password_saved = false;
+    if original.password_saved {
+        let secrets = state.secrets.clone();
+        let (from, to) = (original.id.clone(), copy.id.clone());
+        copy.password_saved = blocking(move || match secrets.get(&from) {
+            Ok(Some(password)) => secrets.set(&to, &password).is_ok(),
+            _ => false,
+        })
+        .await?;
+    }
+
+    let mut next = current.clone();
+    next.connections.push(copy.clone());
+    match persist(state, next).await {
+        Ok(saved) => *current = saved,
+        Err(e) => {
+            if copy.password_saved {
+                let secrets = state.secrets.clone();
+                let key = copy.id.clone();
+                let _ = blocking(move || secrets.delete(&key)).await;
+            }
+            return Err(e);
+        }
+    }
+    Ok(copy)
+}
+
+/// Copies the connection's ADO.NET connection string to the clipboard.
+/// With `include_password` the saved password is read from the keychain and
+/// included; the result says whether it was (`false` when none is saved or
+/// the keychain is unavailable). Without it the keychain is not touched.
+/// Fails with [`NOT_FOUND`].
+pub async fn copy_connection_string(
+    state: &AppState,
+    clipboard: Arc<dyn Clipboard>,
+    id: String,
+    include_password: bool,
+) -> Result<bool, String> {
+    let conn = state
+        .connections
+        .lock()
+        .await
+        .connections
+        .iter()
+        .find(|c| c.id == id)
+        .cloned()
+        .ok_or(NOT_FOUND)?;
+    let password = if include_password && conn.password_saved {
+        let secrets = state.secrets.clone();
+        match blocking(move || secrets.get(&id)).await? {
+            Ok(password) => password,
+            Err(SecretError::Unavailable(_)) => None,
+            Err(e) => return Err(format!("could not read the saved password: {e}")),
+        }
+    } else {
+        None
+    };
+    let included = password.is_some();
+    blocking(move || {
+        let text = format_connection_string(&conn, password.as_deref());
+        clipboard.write_text(text)
+    })
+    .await??;
+    Ok(included)
+}
+
+/// Parses a pasted connection string. Errors are the codes of
+/// [`tulka_core::ConnStrError`] (`"unrecognized"`, `"bad_value:<key>"`, ...)
+/// and never contain the text.
+pub fn parse_connection_string(text: String) -> Result<ParsedConnection, String> {
+    tulka_core::parse_connection_string(&text).map_err(|e| e.to_string())
 }
 
 /// Applies `f` to a copy of the config and persists it; the in-memory config

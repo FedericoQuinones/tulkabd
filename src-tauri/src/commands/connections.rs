@@ -1,6 +1,10 @@
-use tauri::State;
-use tulka_app::tulka_core::{ConnectionConfig, Folder, ServerInfo};
-use tulka_app::{AppState, SaveConnectionResult};
+use std::sync::Arc;
+
+use tauri::{AppHandle, State};
+use tulka_app::tulka_core::{ConnectionConfig, Folder, ParsedConnection, ServerInfo};
+use tulka_app::{AppState, Clipboard, SaveConnectionResult};
+
+use super::PluginClipboard;
 
 /// Why the connections file could not be read at startup, if it could not.
 #[tauri::command]
@@ -99,4 +103,29 @@ pub async fn list_server_databases(
     password: Option<String>,
 ) -> Result<Vec<String>, String> {
     tulka_app::list_server_databases(&state, conn, password).await
+}
+
+#[tauri::command]
+pub fn parse_connection_string(text: String) -> Result<ParsedConnection, String> {
+    tulka_app::parse_connection_string(text)
+}
+
+#[tauri::command]
+pub async fn duplicate_connection(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ConnectionConfig, String> {
+    tulka_app::duplicate_connection(&state, id).await
+}
+
+/// Returns whether the password was included.
+#[tauri::command]
+pub async fn copy_connection_string(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    include_password: bool,
+) -> Result<bool, String> {
+    let clipboard: Arc<dyn Clipboard> = Arc::new(PluginClipboard(app));
+    tulka_app::copy_connection_string(&state, clipboard, id, include_password).await
 }

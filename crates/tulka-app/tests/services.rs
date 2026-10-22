@@ -1508,3 +1508,194 @@ async fn folders_new_connection_with_unknown_folder_goes_to_root() {
     assert_eq!(saved.folder_id, None);
     assert_eq!(list_connections(&f.state).await[0].folder_id, None);
 }
+
+// ------------------------------------------------- duplicate and copy (D7)
+
+#[tokio::test]
+async fn duplicate_copies_the_connection_and_its_password() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let folder = create_folder(&f.state, "Cliente A".into(), None)
+        .await
+        .unwrap();
+    let mut conn = new_conn();
+    conn.name = "Prod".into();
+    conn.folder_id = Some(folder.id.clone());
+    let original = save_connection(&f.state, conn, Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+
+    let copy = duplicate_connection(&f.state, original.id.clone())
+        .await
+        .unwrap();
+    assert_ne!(copy.id, original.id);
+    assert_eq!(copy.name, "Prod (copy)");
+    assert_eq!(copy.folder_id.as_deref(), Some(folder.id.as_str()));
+    assert!(copy.password_saved);
+    assert_eq!(
+        (copy.server.as_str(), copy.user.as_str()),
+        (original.server.as_str(), original.user.as_str())
+    );
+    assert_eq!(f.secrets.get(&copy.id).unwrap().as_deref(), Some(PASSWORD));
+    assert_eq!(list_connections(&f.state).await.len(), 2);
+
+    // The copy has its own keychain entry: deleting it keeps the original's.
+    delete_connection(&f.state, copy.id.clone()).await.unwrap();
+    assert_eq!(f.secrets.get(&copy.id).unwrap(), None);
+    assert_eq!(
+        f.secrets.get(&original.id).unwrap().as_deref(),
+        Some(PASSWORD)
+    );
+    // And the original still connects with it.
+    test_connection(&f.state, original, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn duplicate_without_saved_password_and_unknown_id() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let original = save_connection(&f.state, new_conn(), None)
+        .await
+        .unwrap()
+        .connection;
+    let copy = duplicate_connection(&f.state, original.id.clone())
+        .await
+        .unwrap();
+    assert!(!copy.password_saved);
+    assert_eq!(f.secrets.get(&copy.id).unwrap(), None);
+    assert_eq!(
+        duplicate_connection(&f.state, "nope".into())
+            .await
+            .unwrap_err(),
+        NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn duplicate_is_rejected_in_read_only_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let original = "{ not json";
+    std::fs::write(&path, original).unwrap();
+    let state = AppState::open(
+        ConfigStore::at(&path),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakeDriver)],
+    );
+    let err = duplicate_connection(&state, "x".into()).await.unwrap_err();
+    assert!(err.contains("read-only"), "{err}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn copy_connection_string_with_and_without_the_password() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let mut conn = new_conn();
+    conn.databases = DatabaseScope::Selected {
+        names: vec!["Ventas".into()],
+    };
+    let saved = save_connection(&f.state, conn, Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    let clipboard = Arc::new(FakeClipboard::default());
+
+    let included = copy_connection_string(&f.state, clipboard.clone(), saved.id.clone(), false)
+        .await
+        .unwrap();
+    assert!(!included);
+    let text = clipboard.texts.lock().unwrap().last().unwrap().clone();
+    assert!(
+        text.starts_with("Server=fake-host,1433;Database=Ventas;User ID=sa;"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Password") && !text.contains(PASSWORD),
+        "{text}"
+    );
+
+    let included = copy_connection_string(&f.state, clipboard.clone(), saved.id.clone(), true)
+        .await
+        .unwrap();
+    assert!(included);
+    let text = clipboard.texts.lock().unwrap().last().unwrap().clone();
+    assert!(text.contains(&format!("Password={PASSWORD}")), "{text}");
+    let parsed = tulka_core::parse_connection_string(&text).unwrap();
+    assert_eq!(parsed.password.as_deref(), Some(PASSWORD));
+
+    assert_eq!(
+        copy_connection_string(&f.state, clipboard, "nope".into(), false)
+            .await
+            .unwrap_err(),
+        NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn copy_with_password_but_none_saved_copies_without_it() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), None)
+        .await
+        .unwrap()
+        .connection;
+    let clipboard = Arc::new(FakeClipboard::default());
+    let included = copy_connection_string(&f.state, clipboard.clone(), saved.id.clone(), true)
+        .await
+        .unwrap();
+    assert!(!included);
+    let text = clipboard.texts.lock().unwrap().last().unwrap().clone();
+    assert!(!text.contains("Password"), "{text}");
+}
+
+/// A store that records reads, to check the keychain is touched only when
+/// the password is wanted.
+#[derive(Default)]
+struct CountingStore {
+    inner: MemoryStore,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl SecretStore for CountingStore {
+    fn set(&self, id: &str, secret: &str) -> Result<(), tulka_core::SecretError> {
+        self.inner.set(id, secret)
+    }
+    fn get(&self, id: &str) -> Result<Option<String>, tulka_core::SecretError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.get(id)
+    }
+    fn delete(&self, id: &str) -> Result<(), tulka_core::SecretError> {
+        self.inner.delete(id)
+    }
+}
+
+#[tokio::test]
+async fn copy_without_password_never_reads_the_keychain() {
+    let store = Arc::new(CountingStore::default());
+    let f = fixture(store.clone());
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    let clipboard = Arc::new(FakeClipboard::default());
+    copy_connection_string(&f.state, clipboard.clone(), saved.id.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(store.reads.load(Ordering::SeqCst), 0);
+    copy_connection_string(&f.state, clipboard, saved.id, true)
+        .await
+        .unwrap();
+    assert_eq!(store.reads.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn parse_connection_string_reports_codes() {
+    let p = parse_connection_string("Server=h,1500;UID=sa;PWD=x".into()).unwrap();
+    assert_eq!((p.server.as_str(), p.port), ("h", Some(1500)));
+    assert_eq!(
+        parse_connection_string("hola mundo".into()).unwrap_err(),
+        "unrecognized"
+    );
+    assert_eq!(
+        parse_connection_string("Server=h;Encrypt=x".into()).unwrap_err(),
+        "bad_value:Encrypt"
+    );
+}
