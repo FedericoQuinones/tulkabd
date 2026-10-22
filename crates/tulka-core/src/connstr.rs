@@ -278,8 +278,13 @@ fn read_value(s: &str) -> Option<(String, &str)> {
     None
 }
 
+/// Digits only: `parse` would also take a leading `+`.
 fn parse_port(text: &str) -> Result<u16, ConnStrError> {
-    match text.trim().parse::<u16>() {
+    let text = text.trim();
+    if !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(ConnStrError::BadPort);
+    }
+    match text.parse::<u16>() {
         Ok(port) if port > 0 => Ok(port),
         _ => Err(ConnStrError::BadPort),
     }
@@ -301,8 +306,12 @@ fn percent_decode(text: &str) -> Option<String> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
+            let hex = bytes.get(i + 1..i + 3)?;
+            // `from_str_radix` would also take a sign.
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
             i += 3;
         } else {
             out.push(bytes[i]);
@@ -653,6 +662,10 @@ mod tests {
         assert_eq!(err("Server=x,abc"), "bad_port");
         assert_eq!(err("Server=x,0"), "bad_port");
         assert_eq!(err("Server=x,70000"), "bad_port");
+        assert_eq!(err("Server=x,+1433"), "bad_port");
+        assert_eq!(err("Server=x;Port=+1433"), "bad_port");
+        assert_eq!(err("sqlserver://x:+1433"), "bad_port");
+        assert_eq!(err("sqlserver://u:p%+F@x"), "bad_value:Password");
         assert_eq!(err(""), "empty");
         assert_eq!(err("   \n "), "empty");
         assert_eq!(err("hola mundo"), "unrecognized");
