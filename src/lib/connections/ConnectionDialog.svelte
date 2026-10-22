@@ -39,7 +39,7 @@
   let advancedOpen = $state(false);
   let env = $state<EnvState>(initialEnvState(initial));
   let dbKind = $state<"all" | "selected">(initial?.databases.kind ?? "all");
-  let dbNames = $state<string[]>(initial?.databases.kind === "selected" ? [...initial.databases.names] : []);
+  let dbNames = $state<string[]>(initial?.databases.kind === "selected" ? [...new Set(initial.databases.names)] : []);
   // The backend keeps the stored folder on edit, so the selector only exists when creating.
   let folderId = $state<string | null>(initial?.folderId ?? untrack(() => folderProp));
 
@@ -212,7 +212,8 @@
             />
           </div>
         </div>
-        <DatabasePicker bind:kind={dbKind} bind:names={dbNames} load={loadDatabases} error={errors.databases} />
+        <DatabasePicker bind:kind={dbKind} bind:names={dbNames} load={loadDatabases} error={errors.databases}
+          source={JSON.stringify([server, port, user, password])} />
         {#if !isEdit}
           <div class="fl">
             <label for="c-folder">{t("connection.field.folder")}</label>

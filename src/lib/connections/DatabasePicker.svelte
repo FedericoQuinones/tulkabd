@@ -8,8 +8,10 @@
     /** Asks the server for its databases using the form's current values. */
     load: () => Promise<string[]>;
     error?: string;
+    /** Changes when server, port, user or password change; a loaded list is then stale. */
+    source: string;
   }
-  let { kind = $bindable(), names = $bindable(), load, error }: Props = $props();
+  let { kind = $bindable(), names = $bindable(), load, error, source }: Props = $props();
 
   // `null` until "Load databases" succeeds; then the server's list.
   let loaded = $state<string[] | null>(null);
@@ -31,18 +33,33 @@
     return q === "" ? all : all.filter((r) => r.name.toLowerCase().includes(q));
   });
 
+  // Only the latest request may write its result.
+  let request = 0;
+
+  $effect(() => {
+    void source;
+    // Invalidate in-flight and loaded results; chosen names stay.
+    request++;
+    loaded = null;
+    loadError = null;
+    loading = false;
+  });
+
   async function onload() {
+    const mine = ++request;
     loading = true;
     loadError = null;
     try {
-      loaded = await load();
+      const list = await load();
+      if (mine === request) loaded = list;
     } catch (e) {
+      if (mine !== request) return;
       loadError =
         String(e) === "password_required"
           ? t("connection.databases.passwordNeeded")
           : t("connection.databases.loadFailed", { error: String(e) });
     } finally {
-      loading = false;
+      if (mine === request) loading = false;
     }
   }
 

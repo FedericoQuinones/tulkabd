@@ -94,3 +94,95 @@ test("the folder selector shows when creating, prefilled, and is hidden when edi
   open({ initial: base });
   expect(document.querySelector("#c-folder")).toBeNull();
 });
+
+const type = (sel: string, value: string) => {
+  const el = document.querySelector<HTMLInputElement>(sel)!;
+  el.value = value;
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  flushSync();
+};
+const rowNames = () => [...document.querySelectorAll(".list .n")].map((n) => n.textContent);
+
+test("editing the server resets a loaded list but keeps the chosen names", async () => {
+  vi.mocked(ipc.listServerDatabases).mockResolvedValue(["Ventas", "Stock"]);
+  open({ initial: base });
+  button("Load databases").click();
+  await settle();
+  flushSync();
+  expect(rowNames()).toEqual(["Ventas", "Stock", "Gone"]);
+  type("#c-server", "other-host");
+  expect(rowNames()).toEqual(["Ventas", "Gone"]);
+  expect(document.body.textContent).not.toContain("missing");
+});
+
+test("a slow response for an older request is ignored", async () => {
+  let first!: (v: string[]) => void;
+  vi.mocked(ipc.listServerDatabases)
+    .mockImplementationOnce(() => new Promise((r) => (first = r)))
+    .mockResolvedValueOnce(["New1"]);
+  open({ initial: base });
+  button("Load databases").click();
+  type("#c-server", "other-host");
+  button("Load databases").click();
+  await settle();
+  flushSync();
+  first(["Old1"]);
+  await settle();
+  flushSync();
+  expect(rowNames()).toEqual(["New1", "Ventas", "Gone"]);
+});
+
+test("a response arriving after the inputs changed is dropped", async () => {
+  let first!: (v: string[]) => void;
+  vi.mocked(ipc.listServerDatabases).mockImplementationOnce(() => new Promise((r) => (first = r)));
+  open({ initial: base });
+  button("Load databases").click();
+  type("#c-server", "other-host");
+  first(["Old1"]);
+  await settle();
+  flushSync();
+  expect(rowNames()).toEqual(["Ventas", "Gone"]);
+});
+
+test("the filter ignores case", async () => {
+  vi.mocked(ipc.listServerDatabases).mockResolvedValue(["Ventas", "Stock"]);
+  open({ initial: base });
+  button("Load databases").click();
+  await settle();
+  flushSync();
+  type(".filter", "VEN");
+  expect(rowNames()).toEqual(["Ventas"]);
+});
+
+test("Selected, All, Selected keeps the chosen names", () => {
+  open({ initial: base });
+  button("All").click();
+  flushSync();
+  expect(document.querySelector(".list")).toBeNull();
+  button("Selected").click();
+  flushSync();
+  expect(rowNames()).toEqual(["Ventas", "Gone"]);
+});
+
+test("a load error other than password_required is shown inline", async () => {
+  vi.mocked(ipc.listServerDatabases).mockRejectedValue("login failed");
+  open({ initial: base });
+  button("Load databases").click();
+  await settle();
+  flushSync();
+  expect(document.querySelector('[role="alert"]')?.textContent).toBe("Could not load databases: login failed");
+});
+
+test("duplicate saved names do not break the list", () => {
+  open({ initial: { ...base, databases: { kind: "selected", names: ["Ventas", "Ventas"] } } });
+  expect(rowNames()).toEqual(["Ventas"]);
+});
+
+test("Save sends the selected scope", async () => {
+  vi.mocked(ipc.saveConnection).mockResolvedValue({ connection: base, keyringUnavailable: false });
+  open({ initial: base });
+  document.querySelector("form")!.requestSubmit();
+  await settle();
+  const conn = vi.mocked(ipc.saveConnection).mock.calls[0][0];
+  expect(conn.databases).toEqual({ kind: "selected", names: ["Ventas", "Gone"] });
+});
