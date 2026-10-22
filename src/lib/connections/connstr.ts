@@ -19,6 +19,20 @@ export function connStrErrorText(e: unknown): string {
   return t(`connection.connstr.errors.${CODES.includes(code) ? code : "unrecognized"}`);
 }
 
+/**
+ * "Ignored: Application Name, Pooling and 1 unknown setting", or `null` when
+ * nothing was ignored. Unknown keys are never named.
+ */
+export function ignoredText(p: ParsedConnection): string | null {
+  const parts = [...p.ignoredKeys];
+  if (p.unknownKeys === 1) parts.push(t("connection.connstr.unknownOne"));
+  else if (p.unknownKeys > 1) parts.push(t("connection.connstr.unknownMany", { count: p.unknownKeys }));
+  if (parts.length === 0) return null;
+  const last = parts.pop()!;
+  const keys = parts.length === 0 ? last : t("connection.connstr.and", { rest: parts.join(", "), last });
+  return t("connection.connstr.ignored", { keys });
+}
+
 /** Name for a connection filled from a string: `<database> @ <server>`, or the server. */
 export function proposeName(p: ParsedConnection): string {
   return p.database ? `${p.database} @ ${p.server}` : p.server;

@@ -209,6 +209,7 @@ const parsed: ParsedConnection = {
   trustServerCertificate: true,
   connectTimeoutS: 30,
   ignoredKeys: ["Application Name"],
+  unknownKeys: 1,
 };
 const val = (sel: string) => document.querySelector<HTMLInputElement>(sel)!.value;
 const pasteInto = (sel: string, text: string) => {
@@ -238,11 +239,11 @@ test("pasting a connection string fills the form and proposes a name", async () 
   expect(val("#c-timeout")).toBe("30");
   expect(rowNames()).toEqual(["Ventas"]);
   expect(document.body.textContent).toContain("Filled from connection string");
-  expect(document.body.textContent).toContain("Ignored: Application Name");
+  expect(document.body.textContent).toContain("Ignored: Application Name and 1 unknown setting");
 });
 
 test("a name already typed is kept", async () => {
-  vi.mocked(ipc.parseConnectionString).mockResolvedValue({ ...parsed, ignoredKeys: [] });
+  vi.mocked(ipc.parseConnectionString).mockResolvedValue({ ...parsed, ignoredKeys: [], unknownKeys: 0 });
   open({});
   type("#c-name", "Mine");
   pasteInto("#c-connstr", "Server=...");

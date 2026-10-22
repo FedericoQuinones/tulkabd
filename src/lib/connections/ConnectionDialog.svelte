@@ -3,7 +3,7 @@
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
   import type { ConnectionConfig, DatabaseScope, GuardLevel, ParsedConnection } from "../ipc";
-  import { connStrErrorText, fillFrom, proposeName } from "./connstr";
+  import { connStrErrorText, fillFrom, ignoredText, proposeName } from "./connstr";
   import { applyEnvironment, ENVIRONMENTS, initialEnvState, type EnvState } from "./env";
   import { explorer } from "../explorer/tree.svelte";
   import DatabasePicker from "./DatabasePicker.svelte";
@@ -66,8 +66,8 @@
   // The connection string field. Its text is never kept once it fills the form.
   let connStr = $state("");
   let connStrError = $state<string | null>(null);
-  /** Set once a string filled the form; lists the keys it ignored. */
-  let connStrFilled = $state<{ ignored: string[] } | null>(null);
+  /** Set once a string filled the form, with the note on the keys it ignored. */
+  let connStrFilled = $state<{ ignored: string | null } | null>(null);
 
   function applyParsed(p: ParsedConnection) {
     const fill = fillFrom(p);
@@ -82,7 +82,7 @@
     if (fill.timeout !== undefined) timeout = fill.timeout;
     if (name.trim() === "") name = proposeName(p);
     connStrError = null;
-    connStrFilled = { ignored: p.ignoredKeys };
+    connStrFilled = { ignored: ignoredText(p) };
   }
 
   const prefill = untrack(() => parsedProp);
@@ -255,9 +255,7 @@
             <div class="err">{connStrError}</div>
           {:else if connStrFilled}
             <div class="hint" role="status">
-              {t("connection.connstr.filled")}{#if connStrFilled.ignored.length > 0}. {t("connection.connstr.ignored", {
-                  keys: connStrFilled.ignored.join(", "),
-                })}{/if}
+              {t("connection.connstr.filled")}{#if connStrFilled.ignored}. {connStrFilled.ignored}{/if}
             </div>
           {/if}
         </div>

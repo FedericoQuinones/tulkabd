@@ -119,6 +119,7 @@ const parsed: ParsedConnection = {
   trustServerCertificate: null,
   connectTimeoutS: null,
   ignoredKeys: [],
+  unknownKeys: 0,
 };
 
 test("pasting text that is not a connection string on the tree does nothing", async () => {

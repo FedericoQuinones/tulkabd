@@ -29,8 +29,12 @@ pub struct ParsedConnection {
     pub encrypt: Option<bool>,
     pub trust_server_certificate: Option<bool>,
     pub connect_timeout_s: Option<u32>,
-    /// Keys that were not understood, as written.
+    /// Well-known settings this app does not use, by their canonical names
+    /// (`Application Name`, `Pooling`, ...).
     pub ignored_keys: Vec<String>,
+    /// Other keys that were not understood. They are only counted: their
+    /// names come from the paste and may be a piece of a password.
+    pub unknown_keys: u32,
 }
 
 impl fmt::Debug for ParsedConnection {
@@ -45,6 +49,7 @@ impl fmt::Debug for ParsedConnection {
             .field("trust_server_certificate", &self.trust_server_certificate)
             .field("connect_timeout_s", &self.connect_timeout_s)
             .field("ignored_keys", &self.ignored_keys)
+            .field("unknown_keys", &self.unknown_keys)
             .finish()
     }
 }
@@ -145,10 +150,10 @@ fn strip_prefix_ci<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
         .then(|| &text[prefix.len()..])
 }
 
-/// A key this parser understands, by its canonical name; anything else is
-/// [`Key::Other`]. Errors only ever name a key through [`Key::name`], so
-/// they never carry text from the paste.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A key this parser understands, by its canonical name. Errors and
+/// [`ParsedConnection::ignored_keys`] only ever name a key by a canonical
+/// name from this file, so they never carry text from the paste.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Key {
     Server,
     Port,
@@ -161,9 +166,57 @@ enum Key {
     ConnectTimeout,
     IntegratedSecurity,
     Authentication,
-    /// Not understood; kept as written.
-    Other(String),
+    /// A well-known setting this app does not use, by its canonical name.
+    Ignored(&'static str),
+    /// Not understood; its name is never shown.
+    Unknown,
 }
+
+/// Well-known ADO.NET, ODBC, JDBC and go-mssqldb settings that do not change
+/// how tulkabd connects: normalized key (lowercase, no whitespace) and
+/// canonical name.
+const IGNORED: &[(&str, &str)] = &[
+    ("applicationname", "Application Name"),
+    ("app", "Application Name"),
+    ("appname", "Application Name"),
+    ("multipleactiveresultsets", "MultipleActiveResultSets"),
+    ("mars_connection", "MultipleActiveResultSets"),
+    ("pooling", "Pooling"),
+    ("minpoolsize", "Min Pool Size"),
+    ("maxpoolsize", "Max Pool Size"),
+    ("persistsecurityinfo", "Persist Security Info"),
+    ("workstationid", "Workstation ID"),
+    ("wsid", "Workstation ID"),
+    ("applicationintent", "ApplicationIntent"),
+    ("multisubnetfailover", "MultiSubnetFailover"),
+    ("packetsize", "Packet Size"),
+    ("columnencryptionsetting", "Column Encryption Setting"),
+    ("driver", "Driver"),
+    ("provider", "Provider"),
+    ("connectretrycount", "ConnectRetryCount"),
+    ("connectretryinterval", "ConnectRetryInterval"),
+    ("currentlanguage", "Current Language"),
+    ("language", "Current Language"),
+    ("failoverpartner", "Failover Partner"),
+    ("loadbalancetimeout", "Load Balance Timeout"),
+    ("connectionlifetime", "Load Balance Timeout"),
+    ("enlist", "Enlist"),
+    ("hostnameincertificate", "HostNameInCertificate"),
+    ("commandtimeout", "Command Timeout"),
+    (
+        "transparentnetworkipresolution",
+        "TransparentNetworkIPResolution",
+    ),
+    ("typesystemversion", "Type System Version"),
+    ("userinstance", "User Instance"),
+    ("attachdbfilename", "AttachDbFilename"),
+    ("replication", "Replication"),
+    ("dialtimeout", "Dial Timeout"),
+    (
+        "sendstringparametersasunicode",
+        "sendStringParametersAsUnicode",
+    ),
+];
 
 impl Key {
     /// Resolves a key as written; case and whitespace are ignored.
@@ -189,7 +242,10 @@ impl Key {
             }
             "integratedsecurity" | "trusted_connection" => Key::IntegratedSecurity,
             "authentication" => Key::Authentication,
-            _ => Key::Other(key.trim().to_string()),
+            other => IGNORED
+                .iter()
+                .find(|(k, _)| *k == other)
+                .map_or(Key::Unknown, |&(_, name)| Key::Ignored(name)),
         }
     }
 
@@ -207,12 +263,13 @@ impl Key {
             Key::ConnectTimeout => "Connect Timeout",
             Key::IntegratedSecurity => "Integrated Security",
             Key::Authentication => "Authentication",
-            Key::Other(_) => return None,
+            Key::Ignored(name) => name,
+            Key::Unknown => return None,
         })
     }
 
     /// A value of this key could not be read: `bad_value:<canonical name>`,
-    /// or `unrecognized` for a key not understood (its name came from the paste).
+    /// or `unrecognized` for an unknown key (its name came from the paste).
     fn bad_value(&self) -> ConnStrError {
         match self.name() {
             Some(name) => ConnStrError::BadValue(name.into()),
@@ -384,7 +441,12 @@ impl Builder {
                     self.unsupported_auth = true;
                 }
             }
-            Key::Other(name) => self.out.ignored_keys.push(name.clone()),
+            Key::Ignored(name) => {
+                if !self.out.ignored_keys.iter().any(|k| k == name) {
+                    self.out.ignored_keys.push(name.to_string());
+                }
+            }
+            Key::Unknown => self.out.unknown_keys += 1,
         }
         Ok(())
     }
@@ -473,7 +535,7 @@ impl Builder {
             match percent_decode(value) {
                 Some(value) => self.apply(key, value)?,
                 // A parameter this parser does not use is dropped, unnamed.
-                None if key.name().is_none() => {}
+                None if matches!(key, Key::Ignored(_) | Key::Unknown) => {}
                 None => return Err(key.bad_value()),
             }
         }
@@ -526,6 +588,7 @@ mod tests {
                 trust_server_certificate: Some(true),
                 connect_timeout_s: Some(30),
                 ignored_keys: vec![],
+                unknown_keys: 0,
             }
         );
     }
@@ -569,6 +632,7 @@ mod tests {
                 trust_server_certificate: Some(true),
                 connect_timeout_s: None,
                 ignored_keys: vec![],
+                unknown_keys: 0,
             }
         );
     }
@@ -602,6 +666,7 @@ mod tests {
                 trust_server_certificate: None,
                 connect_timeout_s: None,
                 ignored_keys: vec![],
+                unknown_keys: 0,
             }
         );
         let p = parse(r"jdbc:sqlserver://srv\INST;instanceName=OTHER;password={a;b}");
@@ -691,12 +756,36 @@ mod tests {
     }
 
     #[test]
-    fn unknown_keys_are_reported_as_ignored() {
-        let p = parse("Server=x;Application Name=app;MultipleActiveResultSets=true");
+    fn well_known_keys_are_named_and_others_only_counted() {
+        let p = parse(
+            "Server=x;application name=app;MARS_Connection=yes;Pooling=false;\
+             Driver={ODBC Driver 18};Mystery=1;Other=2",
+        );
         assert_eq!(
             p.ignored_keys,
-            vec!["Application Name", "MultipleActiveResultSets"]
+            vec![
+                "Application Name",
+                "MultipleActiveResultSets",
+                "Pooling",
+                "Driver"
+            ]
         );
+        assert_eq!(p.unknown_keys, 2);
+    }
+
+    #[test]
+    fn a_password_fragment_never_becomes_an_ignored_key() {
+        const PW: &str = "Zx9-SecretPw";
+        for input in [
+            format!("Server=h;Password=a;{PW}=c"),
+            format!("Server=h;Password=a;b={PW}"),
+            format!("sqlserver://h?{PW}=1"),
+            format!("jdbc:sqlserver://h;password=a;{PW}=c"),
+        ] {
+            let p = parse(&input);
+            assert!(p.ignored_keys.iter().all(|k| !k.contains(PW)), "{input}");
+            assert_eq!(p.unknown_keys, 1, "{input}");
+        }
     }
 
     #[test]
@@ -805,6 +894,7 @@ mod tests {
                     trust_server_certificate: Some(false),
                     connect_timeout_s: Some(20),
                     ignored_keys: vec![],
+                    unknown_keys: 0,
                 },
                 "{text}"
             );

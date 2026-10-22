@@ -4,7 +4,7 @@ vi.mock("../ipc", () => ({ parseConnectionString: vi.fn() }));
 
 import * as ipc from "../ipc";
 import type { ParsedConnection } from "../ipc";
-import { connStrErrorText, fillFrom, MAX_PASTE, parsePasted, proposeName } from "./connstr";
+import { connStrErrorText, fillFrom, ignoredText, MAX_PASTE, parsePasted, proposeName } from "./connstr";
 
 const parsed = (over: Partial<ParsedConnection> = {}): ParsedConnection => ({
   server: "db.empresa.com",
@@ -16,6 +16,7 @@ const parsed = (over: Partial<ParsedConnection> = {}): ParsedConnection => ({
   trustServerCertificate: true,
   connectTimeoutS: null,
   ignoredKeys: [],
+  unknownKeys: 0,
   ...over,
 });
 
@@ -73,4 +74,13 @@ test("empty or huge pastes are not sent to the backend", async () => {
 test("a recognized paste yields the parsed connection", async () => {
   vi.mocked(ipc.parseConnectionString).mockResolvedValue(parsed());
   expect(await parsePasted("Server=db.empresa.com,1444")).toEqual(parsed());
+});
+
+test("the ignored note names well-known keys and only counts unknown ones", () => {
+  expect(ignoredText(parsed())).toBeNull();
+  expect(ignoredText(parsed({ ignoredKeys: ["Application Name"] }))).toBe("Ignored: Application Name");
+  expect(ignoredText(parsed({ ignoredKeys: ["Application Name", "Pooling"], unknownKeys: 1 }))).toBe(
+    "Ignored: Application Name, Pooling and 1 unknown setting",
+  );
+  expect(ignoredText(parsed({ unknownKeys: 3 }))).toBe("Ignored: 3 unknown settings");
 });

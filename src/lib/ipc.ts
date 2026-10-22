@@ -182,8 +182,10 @@ export interface ParsedConnection {
   encrypt: boolean | null;
   trustServerCertificate: boolean | null;
   connectTimeoutS: number | null;
-  /** Keys that were not understood, as written. */
+  /** Well-known settings tulkabd does not use, by canonical name (`Application Name`, `Pooling`, ...). */
   ignoredKeys: string[];
+  /** Other keys not understood; only counted, since their names come from the paste. */
+  unknownKeys: number;
 }
 export type ExplorerStatus = "connecting" | "connected" | "disconnected" | "error";
 /** Pushed on the `app-event` event, outside of any command. No `indexIdle` follows an `error` or `disconnected` status. */
