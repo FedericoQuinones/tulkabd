@@ -511,9 +511,9 @@ class ExplorerStore {
       }
     }
     dbs ??= [];
+    // Search hits can name databases not read yet; their counts are unknown, not pending.
+    const extra = new Set<string>();
     if (fs) {
-      // Search hits can name databases not read yet.
-      const extra = new Set<string>();
       for (const h of this.hits) {
         if (h.connectionId === id && !dbs.some((d) => d.name === h.database)) extra.add(h.database);
       }
@@ -530,7 +530,8 @@ class ExplorerStore {
       if (!this.visible(fs, key, inMatch)) continue;
       const childIn = inMatch || (fs?.match.has(key) ?? false);
       const open = !db.noAccess && this.open(fs, key);
-      const indexing = st?.indexing.includes(db.name) || (db.indexedAt === null && !db.noAccess && live);
+      const indexing =
+        st?.indexing.includes(db.name) || (db.indexedAt === null && !db.noAccess && live && !extra.has(db.name));
       out.push({
         key,
         level,

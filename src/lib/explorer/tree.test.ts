@@ -485,3 +485,12 @@ test("while a search is pending, old hits that no longer match are hidden", asyn
   void explorer.setFilter("xy");
   expect(labels()).not.toContain("dbo.Pedidos");
 });
+
+test("a database known only from search hits is not shown as indexing", async () => {
+  explorer.state("c1").status = "connected";
+  vi.mocked(ipc.searchObjects).mockResolvedValue(response([hit({ schema: "dbo", name: "Pedidos", kind: "table" })]));
+  await explorer.setFilter("ped");
+  const r = explorer.rows.find((x) => x.kind === "database");
+  expect(r?.kind === "database" && r.db.name).toBe("Ventas");
+  expect(r?.kind === "database" && r.indexing).toBe(false);
+});
