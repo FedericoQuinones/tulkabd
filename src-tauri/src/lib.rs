@@ -20,6 +20,17 @@ fn startup_probe() {
     }
 }
 
+/// Opt-in UI probe: prints `msg` and returns true under `TULKA_STARTUP_PROBE=1`;
+/// otherwise does nothing and returns false so the UI stops reporting.
+#[tauri::command]
+fn probe_log(msg: String) -> bool {
+    let on = std::env::var_os("TULKA_STARTUP_PROBE").is_some_and(|v| v == "1");
+    if on {
+        println!("{msg}");
+    }
+    on
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = STARTED.set(Instant::now());
@@ -36,6 +47,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             startup_probe,
+            probe_log,
             conn::startup_error,
             conn::list_connections,
             conn::save_connection,

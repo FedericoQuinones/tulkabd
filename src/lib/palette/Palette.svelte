@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import { onMount, tick } from "svelte";
   import { t } from "../i18n/t";
   import { highlight, paletteKey } from "./hits";
@@ -15,6 +16,21 @@
 
   const res = $derived(palette.response);
   const count = (n: number, one: string, many: string) => (n === 1 ? t(one) : t(many, { count: n }));
+
+  // Keystroke -> rendered results, logged by the backend only under TULKA_STARTUP_PROBE=1.
+  let probe = true;
+  async function search(value: string) {
+    const t0 = performance.now();
+    await palette.search(value);
+    await tick();
+    requestAnimationFrame(() => {
+      if (!probe) return;
+      const ms = (performance.now() - t0).toFixed(1);
+      invoke<boolean>("probe_log", { msg: `TULKA_PALETTE_MS=${ms} q=${JSON.stringify(value)}` })
+        .then((on) => (probe = on))
+        .catch(() => (probe = false));
+    });
+  }
 
   function close() {
     palette.hide();
@@ -68,7 +84,7 @@
       spellcheck="false"
       autocomplete="off"
       value={palette.query}
-      oninput={(e) => void palette.search(e.currentTarget.value)}
+      oninput={(e) => void search(e.currentTarget.value)}
       {onkeydown}
     />
     {#if palette.error}<p class="error" role="alert">{palette.error}</p>{/if}
