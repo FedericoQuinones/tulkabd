@@ -70,7 +70,11 @@
     }
     busy = false;
     if (ok) onclose();
-    else error ??= explorer.error;
+    else {
+      // Shown here only: the tree's inline error behind the dialog stays clear.
+      error ??= explorer.error;
+      explorer.error = null;
+    }
   }
 </script>
 
