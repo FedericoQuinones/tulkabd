@@ -84,7 +84,7 @@ pub fn parse_connection_string(text: &str) -> Result<ParsedConnection, ConnStrEr
         b.uri(rest)?;
     } else {
         for (key, value) in pairs(text)? {
-            b.apply(&key, value)?;
+            b.apply(key, value)?;
         }
     }
     b.finish()
@@ -145,9 +145,85 @@ fn strip_prefix_ci<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
         .then(|| &text[prefix.len()..])
 }
 
+/// A key this parser understands, by its canonical name; anything else is
+/// [`Key::Other`]. Errors only ever name a key through [`Key::name`], so
+/// they never carry text from the paste.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Key {
+    Server,
+    Port,
+    User,
+    Password,
+    Database,
+    Instance,
+    Encrypt,
+    TrustServerCertificate,
+    ConnectTimeout,
+    IntegratedSecurity,
+    Authentication,
+    /// Not understood; kept as written.
+    Other(String),
+}
+
+impl Key {
+    /// Resolves a key as written; case and whitespace are ignored.
+    fn resolve(key: &str) -> Key {
+        let norm: String = key
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        match norm.as_str() {
+            "server" | "datasource" | "address" | "addr" | "networkaddress" | "servername" => {
+                Key::Server
+            }
+            "port" | "portnumber" => Key::Port,
+            "userid" | "uid" | "user" | "username" => Key::User,
+            "password" | "pwd" => Key::Password,
+            "database" | "initialcatalog" | "databasename" => Key::Database,
+            "instance" | "instancename" => Key::Instance,
+            "encrypt" => Key::Encrypt,
+            "trustservercertificate" => Key::TrustServerCertificate,
+            "connecttimeout" | "connectiontimeout" | "timeout" | "logintimeout" => {
+                Key::ConnectTimeout
+            }
+            "integratedsecurity" | "trusted_connection" => Key::IntegratedSecurity,
+            "authentication" => Key::Authentication,
+            _ => Key::Other(key.trim().to_string()),
+        }
+    }
+
+    /// The canonical name, for errors; `None` for a key not understood.
+    fn name(&self) -> Option<&'static str> {
+        Some(match self {
+            Key::Server => "Server",
+            Key::Port => "Port",
+            Key::User => "User ID",
+            Key::Password => "Password",
+            Key::Database => "Database",
+            Key::Instance => "Instance",
+            Key::Encrypt => "Encrypt",
+            Key::TrustServerCertificate => "TrustServerCertificate",
+            Key::ConnectTimeout => "Connect Timeout",
+            Key::IntegratedSecurity => "Integrated Security",
+            Key::Authentication => "Authentication",
+            Key::Other(_) => return None,
+        })
+    }
+
+    /// A value of this key could not be read: `bad_value:<canonical name>`,
+    /// or `unrecognized` for a key not understood (its name came from the paste).
+    fn bad_value(&self) -> ConnStrError {
+        match self.name() {
+            Some(name) => ConnStrError::BadValue(name.into()),
+            None => ConnStrError::Unrecognized,
+        }
+    }
+}
+
 /// Splits `key=value;key=value` pairs. Values may be quoted with `"…"`,
 /// `'…'` or `{…}`, the closing delimiter doubled inside as an escape.
-fn pairs(text: &str) -> Result<Vec<(String, String)>, ConnStrError> {
+fn pairs(text: &str) -> Result<Vec<(Key, String)>, ConnStrError> {
     let mut out = Vec::new();
     let mut rest = text;
     loop {
@@ -164,9 +240,10 @@ fn pairs(text: &str) -> Result<Vec<(String, String)>, ConnStrError> {
         if key.is_empty() {
             return Err(ConnStrError::Unrecognized);
         }
-        let (value, tail) = read_value(rest[eq + 1..].trim_start())
-            .ok_or_else(|| ConnStrError::BadValue(key.to_string()))?;
-        out.push((key.to_string(), value));
+        let key = Key::resolve(key);
+        let (value, tail) =
+            read_value(rest[eq + 1..].trim_start()).ok_or_else(|| key.bad_value())?;
+        out.push((key, value));
         rest = tail;
     }
 }
@@ -257,27 +334,17 @@ struct Builder {
 }
 
 impl Builder {
-    /// Applies one `key=value` pair; keys ignore case and whitespace.
-    fn apply(&mut self, key: &str, value: String) -> Result<(), ConnStrError> {
-        let key = key.trim();
-        let bad = || ConnStrError::BadValue(key.to_string());
-        let norm: String = key
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect::<String>()
-            .to_ascii_lowercase();
-        match norm.as_str() {
-            "server" | "datasource" | "address" | "addr" | "networkaddress" | "servername" => {
-                self.server(&value)?
-            }
-            "port" | "portnumber" => self.out.port = Some(parse_port(&value)?),
-            "userid" | "uid" | "user" | "username" => self.out.user = Some(value),
-            "password" | "pwd" => self.out.password = Some(value),
-            "database" | "initialcatalog" | "databasename" => {
-                self.out.database = Some(value).filter(|d| !d.is_empty())
-            }
-            "instance" | "instancename" => self.instance = Some(value).filter(|i| !i.is_empty()),
-            "encrypt" => {
+    /// Applies one `key=value` pair.
+    fn apply(&mut self, key: Key, value: String) -> Result<(), ConnStrError> {
+        let bad = || key.bad_value();
+        match &key {
+            Key::Server => self.server(&value)?,
+            Key::Port => self.out.port = Some(parse_port(&value)?),
+            Key::User => self.out.user = Some(value),
+            Key::Password => self.out.password = Some(value),
+            Key::Database => self.out.database = Some(value).filter(|d| !d.is_empty()),
+            Key::Instance => self.instance = Some(value).filter(|i| !i.is_empty()),
+            Key::Encrypt => {
                 let v = value.trim().to_ascii_lowercase();
                 self.out.encrypt = Some(match v.as_str() {
                     "mandatory" | "strict" => true,
@@ -285,20 +352,20 @@ impl Builder {
                     _ => parse_bool(&v).ok_or_else(bad)?,
                 })
             }
-            "trustservercertificate" => {
+            Key::TrustServerCertificate => {
                 self.out.trust_server_certificate = Some(parse_bool(&value).ok_or_else(bad)?)
             }
-            "connecttimeout" | "connectiontimeout" | "timeout" | "logintimeout" => {
+            Key::ConnectTimeout => {
                 self.out.connect_timeout_s = Some(value.trim().parse().map_err(|_| bad())?)
             }
-            "integratedsecurity" | "trusted_connection" => {
+            Key::IntegratedSecurity => {
                 if value.trim().eq_ignore_ascii_case("sspi")
                     || parse_bool(&value).ok_or_else(bad)?
                 {
                     self.unsupported_auth = true;
                 }
             }
-            "authentication" => {
+            Key::Authentication => {
                 let method: String = value
                     .chars()
                     .filter(|c| !c.is_whitespace())
@@ -308,7 +375,7 @@ impl Builder {
                     self.unsupported_auth = true;
                 }
             }
-            _ => self.out.ignored_keys.push(key.to_string()),
+            Key::Other(name) => self.out.ignored_keys.push(name.clone()),
         }
         Ok(())
     }
@@ -343,7 +410,7 @@ impl Builder {
             self.out.server = local_alias(host.trim());
         }
         for (key, value) in pairs(props)? {
-            self.apply(&key, value)?;
+            self.apply(key, value)?;
         }
         Ok(())
     }
@@ -359,12 +426,10 @@ impl Builder {
                     Some((u, p)) => (u, Some(p)),
                     None => (userinfo, None),
                 };
-                let decode = |s: &str, key: &str| {
-                    percent_decode(s).ok_or_else(|| ConnStrError::BadValue(key.into()))
-                };
-                self.out.user = Some(decode(user, "user")?);
+                let decode = |s: &str, key: Key| percent_decode(s).ok_or_else(|| key.bad_value());
+                self.out.user = Some(decode(user, Key::User)?);
                 if let Some(p) = password {
-                    self.out.password = Some(decode(p, "password")?);
+                    self.out.password = Some(decode(p, Key::Password)?);
                 }
                 host_port
             }
@@ -373,9 +438,7 @@ impl Builder {
         let (host, port) = match host_port.strip_prefix('[') {
             // IPv6 literal: [::1]:1433
             Some(v6) => {
-                let (h, tail) = v6
-                    .split_once(']')
-                    .ok_or(ConnStrError::BadValue("server".into()))?;
+                let (h, tail) = v6.split_once(']').ok_or_else(|| Key::Server.bad_value())?;
                 (h, tail.strip_prefix(':'))
             }
             None => match host_port.rsplit_once(':') {
@@ -386,20 +449,24 @@ impl Builder {
         if let Some(port) = port {
             self.out.port = Some(parse_port(port)?);
         }
-        let host = percent_decode(host).ok_or(ConnStrError::BadValue("server".into()))?;
+        let host = percent_decode(host).ok_or_else(|| Key::Server.bad_value())?;
         self.out.server = local_alias(host.trim());
 
         let (path, query) = after.split_once('?').unwrap_or((after, ""));
         let database = percent_decode(path.trim_start_matches('/'))
-            .ok_or(ConnStrError::BadValue("database".into()))?;
+            .ok_or_else(|| Key::Database.bad_value())?;
         if !database.is_empty() {
             self.out.database = Some(database);
         }
         for param in query.split('&').filter(|p| !p.is_empty()) {
             let (key, value) = param.split_once('=').unwrap_or((param, ""));
-            let key = percent_decode(key).ok_or(ConnStrError::Unrecognized)?;
-            let value = percent_decode(value).ok_or_else(|| ConnStrError::BadValue(key.clone()))?;
-            self.apply(&key, value)?;
+            let key = Key::resolve(&percent_decode(key).ok_or(ConnStrError::Unrecognized)?);
+            match percent_decode(value) {
+                Some(value) => self.apply(key, value)?,
+                // A parameter this parser does not use is dropped, unnamed.
+                None if key.name().is_none() => {}
+                None => return Err(key.bad_value()),
+            }
         }
         Ok(())
     }
@@ -592,6 +659,22 @@ mod tests {
         assert_eq!(err("Database=x;User ID=u"), "no_server");
         assert_eq!(err("Server=;User ID=u"), "no_server");
         assert_eq!(err(r#"Server=x;Password="open"#), "bad_value:Password");
+        // Errors name keys canonically, never as typed.
+        assert_eq!(err("Server=x;ENCRYPT=maybe"), "bad_value:Encrypt");
+        assert_eq!(err("Server=x;pwd={open"), "bad_value:Password");
+        assert_eq!(
+            err("Server=x;connection timeout=soon"),
+            "bad_value:Connect Timeout"
+        );
+        // A malformed value of an unknown key is not named at all.
+        assert_eq!(err(r#"Server=x;Secret="open"#), "unrecognized");
+    }
+
+    #[test]
+    fn an_unknown_uri_parameter_that_does_not_decode_is_dropped() {
+        let p = parse("sqlserver://h?mystery=%ZZ&encrypt=false");
+        assert_eq!(p.encrypt, Some(false));
+        assert_eq!(err("sqlserver://h?encrypt=%ZZ"), "bad_value:Encrypt");
     }
 
     #[test]
@@ -625,6 +708,12 @@ mod tests {
             format!("sqlserver://u:%ZZ{PW}@h"),
             format!("jdbc:sqlserver://h:{PW};password={PW}"),
             format!("jdbc:sqlserver://h;password={{{PW}"),
+            // Unknown keys are text from the paste too.
+            format!("Password=a;{PW}=\"x"),
+            format!("Server=h;{PW}={{x"),
+            format!("sqlserver://h?{PW}=%ZZ&encrypt=maybe"),
+            format!("sqlserver://h?%ZZ{PW}=1"),
+            format!("jdbc:sqlserver://h;{PW}='x"),
         ];
         for input in &inputs {
             let e = parse_connection_string(input).unwrap_err();
