@@ -6,9 +6,11 @@
   import StatusBar from "./lib/shell/StatusBar.svelte";
   import type { ConnectionConfig } from "./lib/ipc";
   import ConnectionDialog from "./lib/connections/ConnectionDialog.svelte";
-  import ConnectionList from "./lib/connections/ConnectionList.svelte";
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
   import { connections } from "./lib/connections/store.svelte";
+  import ExplorerTree from "./lib/explorer/ExplorerTree.svelte";
+  import { explorer } from "./lib/explorer/tree.svelte";
+  import { clampWidth, loadLayout, saveLayout, MAX_WIDTH, MIN_WIDTH } from "./lib/shell/layout";
   import QueryPane from "./lib/pane/QueryPane.svelte";
   import StructureView from "./lib/structure/StructureView.svelte";
   import TabStrip from "./lib/tabs/TabStrip.svelte";
@@ -28,26 +30,52 @@
     requestAnimationFrame(() => void invoke("startup_probe").catch(() => {}));
   });
 
-  void connections.refresh();
+  void explorer.init();
   void connections.loadStartupError();
 
+  const layout = loadLayout();
+  let explorerWidth = $state(layout.width);
+  let explorerHidden = $state(layout.hidden);
+  const remember = () => saveLayout({ width: explorerWidth, hidden: explorerHidden });
+
+  function onrail(key: string) {
+    if (key !== "rail.explorer") return;
+    explorerHidden = !explorerHidden;
+    remember();
+  }
+
+  let resizing: { x: number; width: number } | null = null;
+  function resizeStart(e: PointerEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    resizing = { x: e.clientX, width: explorerWidth };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+  function resizeMove(e: PointerEvent) {
+    if (resizing) explorerWidth = clampWidth(resizing.width + e.clientX - resizing.x);
+  }
+  function resizeEnd() {
+    if (!resizing) return;
+    resizing = null;
+    remember();
+  }
+  function resizeKey(e: KeyboardEvent) {
+    const step = e.key === "ArrowLeft" ? -16 : e.key === "ArrowRight" ? 16 : 0;
+    if (step === 0) return;
+    e.preventDefault();
+    explorerWidth = clampWidth(explorerWidth + step);
+    remember();
+  }
+
   function onkeydown(e: KeyboardEvent) {
-    // Dialogs and the password prompt own the keyboard while open.
-    if (dialog !== undefined || tabs.passwordRequest) return;
+    // Dialogs and the password prompts own the keyboard while open.
+    if (dialog !== undefined || tabs.passwordRequest || explorer.passwordRequest) return;
+    if (document.querySelector('[aria-modal="true"]')) return;
     const action = shortcutAction(e, isMac);
     if (!action) return;
     e.preventDefault();
     if (action === "new") tabs.newTab();
     else if (tabs.activeId) tabs.close(tabs.activeId);
-  }
-
-  function duplicate(conn: ConnectionConfig) {
-    dialog = {
-      ...conn,
-      id: crypto.randomUUID(),
-      name: t("connection.copySuffix", { name: conn.name }),
-      passwordSaved: false,
-    };
   }
 </script>
 
@@ -55,28 +83,35 @@
 
 <div class="win">
   <div class="cols">
-    <Rail />
-    <aside class="explorer">
-      <div class="sect"><span>{t("explorer.title")}</span></div>
-      {#if connections.startupError}
-        <p class="error" role="alert">{t("explorer.startupError", { error: connections.startupError })}</p>
-      {/if}
-      {#if connections.error}
-        <p class="error" role="alert">{t("explorer.loadFailed", { error: connections.error })}</p>
-      {/if}
-      {#if tabs.connectError}<p class="error" role="alert">{tabs.connectError}</p>{/if}
-      {#if connections.list.length === 0}
-        <div class="empty">
-          <p>{t("explorer.empty")}</p>
-          <button class="primary" onclick={() => (dialog = null)}>{t("explorer.new")}</button>
-        </div>
-      {:else}
-        <ConnectionList onconnect={(c) => tabs.connect(c)} onedit={(c) => (dialog = c)} onduplicate={duplicate} />
-        <div class="foot">
-          <button class="primary" onclick={() => (dialog = null)}>{t("explorer.new")}</button>
-        </div>
-      {/if}
-    </aside>
+    <Rail active={explorerHidden ? null : "rail.explorer"} onselect={onrail} />
+    {#if !explorerHidden}
+      <aside class="explorer" style:width="{explorerWidth}px">
+        {#if connections.startupError}
+          <p class="error" role="alert">{t("explorer.startupError", { error: connections.startupError })}</p>
+        {/if}
+        {#if connections.error}
+          <p class="error" role="alert">{t("explorer.loadFailed", { error: connections.error })}</p>
+        {/if}
+        {#if tabs.connectError}<p class="error" role="alert">{tabs.connectError}</p>{/if}
+        <ExplorerTree onnewconnection={() => (dialog = null)} onedit={(c) => (dialog = c)} />
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+        <div
+          class="resize"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t("explorer.resize")}
+          aria-valuenow={explorerWidth}
+          aria-valuemin={MIN_WIDTH}
+          aria-valuemax={MAX_WIDTH}
+          tabindex="0"
+          onpointerdown={resizeStart}
+          onpointermove={resizeMove}
+          onpointerup={resizeEnd}
+          onpointercancel={resizeEnd}
+          onkeydown={resizeKey}
+        ></div>
+      </aside>
+    {/if}
     <main class="workspace">
       <TabStrip />
       <div class="body">
@@ -121,6 +156,14 @@
     oncancel={() => tabs.cancelPassword()}
     onsubmit={(pw) => void tabs.submitPassword(pw)}
   />
+{:else if explorer.passwordRequest}
+  {#key explorer.passwordRequest.conn.id}
+    <PasswordPrompt
+      connection={explorer.passwordRequest.conn}
+      oncancel={() => explorer.cancelPassword()}
+      onsubmit={(pw) => void explorer.submitPassword(pw)}
+    />
+  {/key}
 {/if}
 
 <style>
@@ -132,51 +175,31 @@
   }
   .cols {
     display: grid;
-    grid-template-columns: 54px 272px 1fr;
+    grid-template-columns: 54px auto minmax(0, 1fr);
     min-height: 0;
   }
   .explorer {
+    position: relative;
     background: var(--surface);
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
+    min-width: 0;
   }
-  .sect {
-    padding: 12px 16px 4px;
-    color: var(--muted);
-    font-size: 12px;
+  .resize {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: -3px;
+    width: 6px;
+    cursor: col-resize;
+    z-index: 2;
+    outline: none;
   }
-  .empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 12px;
-    margin-top: 40px;
-    color: var(--muted);
-  }
-  .empty p {
-    margin: 0;
-  }
-  .primary {
-    height: 34px;
-    padding: 0 16px;
-    border: 1px solid var(--control);
-    border-radius: var(--radius-control);
-    background: none;
-    color: var(--text);
-    font: inherit;
-    font-weight: 500;
-    cursor: pointer;
-  }
-  .primary:hover {
-    border-color: var(--accent);
-  }
-  .foot {
-    margin-top: auto;
-    padding: 12px 16px;
-    display: flex;
-    justify-content: center;
+  .resize:hover,
+  .resize:focus-visible {
+    background: linear-gradient(var(--accent), var(--accent)) center / 1px 100% no-repeat;
   }
   .error {
     margin: 4px 16px;
