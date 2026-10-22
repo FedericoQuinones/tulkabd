@@ -383,6 +383,7 @@ const actions = (): MenuActions => ({
   moveTo: vi.fn(),
   remove: vi.fn(),
   newSubfolder: vi.fn(),
+  newConnection: vi.fn(),
 });
 
 test("object menus follow the kind", () => {

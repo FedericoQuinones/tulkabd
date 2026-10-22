@@ -10,7 +10,7 @@
   import { explorer, menuFor } from "./tree.svelte";
 
   interface Props {
-    onnewconnection: () => void;
+    onnewconnection: (folderId?: string | null) => void;
     onedit: (conn: ConnectionConfig) => void;
   }
   let { onnewconnection, onedit }: Props = $props();
@@ -78,6 +78,7 @@
       }
     },
     newSubfolder: (folder: Folder) => (dialog = { kind: "create", parent: folder }),
+    newConnection: (folder: Folder) => onnewconnection(folder.id),
   };
 
   function rowName(row: Row): string {
@@ -108,7 +109,7 @@
     menu = {
       items: [
         { id: "newFolder", label: t("explorer.menu.newFolder"), run: () => (dialog = { kind: "create", parent: null }) },
-        { id: "newConnection", label: t("explorer.menu.newConnection"), run: onnewconnection },
+        { id: "newConnection", label: t("explorer.menu.newConnection"), run: () => onnewconnection(null) },
       ],
       x: r.left,
       y: r.bottom + 4,
@@ -277,7 +278,7 @@
   {#if empty}
     <div class="empty">
       <p>{t("explorer.empty")}</p>
-      <button type="button" class="primary" onclick={onnewconnection}>{t("explorer.new")}</button>
+      <button type="button" class="primary" onclick={() => onnewconnection(null)}>{t("explorer.new")}</button>
     </div>
   {:else}
     <!-- Drops on the empty area move the item to the top level. -->

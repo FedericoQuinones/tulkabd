@@ -19,6 +19,8 @@
 
   // `undefined` = closed, `null` = new connection, otherwise edit this one.
   let dialog = $state<ConnectionConfig | null | undefined>(undefined);
+  // Folder preselected when the new-connection dialog opens from a folder menu.
+  let dialogFolder = $state<string | null>(null);
 
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
   const newKey = t(isMac ? "tabs.newKey.mac" : "tabs.newKey.other");
@@ -93,7 +95,10 @@
           <p class="error" role="alert">{t("explorer.loadFailed", { error: connections.error })}</p>
         {/if}
         {#if tabs.connectError}<p class="error" role="alert">{tabs.connectError}</p>{/if}
-        <ExplorerTree onnewconnection={() => (dialog = null)} onedit={(c) => (dialog = c)} />
+        <ExplorerTree onnewconnection={(folderId) => {
+            dialogFolder = folderId ?? null;
+            dialog = null;
+          }} onedit={(c) => (dialog = c)} />
         <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="resize"
@@ -147,7 +152,7 @@
 
 {#if dialog !== undefined}
   {#key dialog?.id}
-    <ConnectionDialog initial={dialog ?? undefined} onclose={() => (dialog = undefined)} />
+    <ConnectionDialog initial={dialog ?? undefined} folderId={dialogFolder} onclose={() => (dialog = undefined)} />
   {/key}
 {/if}
 {#if tabs.passwordRequest}

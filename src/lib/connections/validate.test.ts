@@ -1,6 +1,6 @@
 import { isNamedInstance, validateConnection, type ConnectionForm } from "./validate";
 
-const valid: ConnectionForm = { name: "Docker local", server: "127.0.0.1", port: 14333, timeout: 15 };
+const valid: ConnectionForm = { name: "Docker local", server: "127.0.0.1", port: 14333, timeout: 15, databases: { kind: "all" } };
 
 describe("validateConnection", () => {
   it("accepts a valid form", () => {
@@ -41,5 +41,14 @@ describe("validateConnection", () => {
     }
     expect(validateConnection({ ...valid, timeout: 1 })).toEqual({});
     expect(validateConnection({ ...valid, timeout: 600 })).toEqual({});
+  });
+  it("requires at least one database when Selected", () => {
+    expect(validateConnection({ ...valid, databases: { kind: "selected", names: [] } })).toEqual({
+      databases: "connection.errors.databasesRequired",
+    });
+    expect(validateConnection({ ...valid, databases: { kind: "selected", names: ["Ventas"] } })).toEqual({});
+  });
+  it("does not ask for a list when All", () => {
+    expect(validateConnection({ ...valid, databases: { kind: "all" } })).toEqual({});
   });
 });

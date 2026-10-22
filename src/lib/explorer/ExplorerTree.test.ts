@@ -79,6 +79,7 @@ test("Shift+F10 opens the row menu and Escape closes it", async () => {
   expect([...menu.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent!.trim())).toEqual([
     "Rename",
     "New subfolder",
+    "New connection here",
     "Delete",
   ]);
   key(document.activeElement!, "Escape");

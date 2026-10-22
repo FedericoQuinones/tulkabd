@@ -197,6 +197,7 @@ export interface MenuActions {
   moveTo(row: Row): void;
   remove(row: Row): void;
   newSubfolder(folder: Folder): void;
+  newConnection(folder: Folder): void;
 }
 
 /**
@@ -209,6 +210,11 @@ export function buildMenu(row: Row, ui: MenuActions, store: MenuStore): MenuItem
       return [
         { id: "rename", label: t("explorer.menu.rename"), run: () => ui.rename(row) },
         { id: "newSubfolder", label: t("explorer.menu.newSubfolder"), run: () => ui.newSubfolder(row.folder) },
+        {
+          id: "newConnectionHere",
+          label: t("explorer.menu.newConnectionHere"),
+          run: () => ui.newConnection(row.folder),
+        },
         { id: "delete", label: t("explorer.menu.delete"), run: () => ui.remove(row), danger: true, separator: true },
       ];
     case "connection": {

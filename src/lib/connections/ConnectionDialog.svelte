@@ -2,17 +2,21 @@
   import { onMount, untrack } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
-  import type { ConnectionConfig, GuardLevel } from "../ipc";
+  import type { ConnectionConfig, DatabaseScope, GuardLevel } from "../ipc";
   import { applyEnvironment, ENVIRONMENTS, initialEnvState, type EnvState } from "./env";
+  import { explorer } from "../explorer/tree.svelte";
+  import DatabasePicker from "./DatabasePicker.svelte";
   import { connections } from "./store.svelte";
   import { isNamedInstance, validateConnection } from "./validate";
 
   interface Props {
     /** Connection to edit, or a prefilled copy (Duplicate) to create. */
     initial?: ConnectionConfig;
+    /** Folder preselected for a new connection (opened from a folder's menu). */
+    folderId?: string | null;
     onclose: () => void;
   }
-  let { initial: initialProp, onclose }: Props = $props();
+  let { initial: initialProp, folderId: folderProp = null, onclose }: Props = $props();
   // The dialog is keyed by connection in App, so the initial value is read once.
   const initial = untrack(() => initialProp);
 
@@ -34,6 +38,10 @@
   let timeout = $state<number | null>(initial?.connectTimeoutS ?? 15);
   let advancedOpen = $state(false);
   let env = $state<EnvState>(initialEnvState(initial));
+  let dbKind = $state<"all" | "selected">(initial?.databases.kind ?? "all");
+  let dbNames = $state<string[]>(initial?.databases.kind === "selected" ? [...initial.databases.names] : []);
+  // The backend keeps the stored folder on edit, so the selector only exists when creating.
+  let folderId = $state<string | null>(initial?.folderId ?? untrack(() => folderProp));
 
 
   let errors = $state<Record<string, string>>({});
@@ -45,6 +53,27 @@
 
   onMount(() => nameInput.focus());
 
+  function scope(): DatabaseScope {
+    return dbKind === "selected" ? { kind: "selected", names: dbNames } : { kind: "all" };
+  }
+
+  /** Folder choices with their path, e.g. "Cliente A / Proyecto X". */
+  const folderOptions = $derived.by(() => {
+    const byId = new Map(explorer.folders.map((f) => [f.id, f]));
+    const label = (id: string): string => {
+      const parts: string[] = [];
+      for (let cur = byId.get(id), n = 0; cur && n < byId.size; cur = cur.parentId ? byId.get(cur.parentId) : undefined, n++) {
+        parts.unshift(cur.name);
+      }
+      return parts.join(" / ");
+    };
+    return explorer.folders.map((f) => ({ id: f.id, label: label(f.id) })).sort((a, b) => a.label.localeCompare(b.label));
+  });
+
+  function loadDatabases() {
+    return ipc.listServerDatabases(build(), password || undefined);
+  }
+
   function build(): ConnectionConfig {
     return {
       id,
@@ -53,7 +82,7 @@
       server: server.trim(),
       port,
       user,
-      databases: initial?.databases ?? { kind: "all" },
+      databases: scope(),
       environment: env.environment,
       color: env.color,
       guard: env.guard,
@@ -63,12 +92,12 @@
       connectTimeoutS: timeout ?? 15,
       passwordSaved: savedConn?.passwordSaved ?? initial?.passwordSaved ?? false,
       // The backend keeps the stored folder on edit; this only matters for a new connection.
-      folderId: initial?.folderId ?? null,
+      folderId,
     };
   }
 
   function validate(): boolean {
-    errors = validateConnection({ name, server, port, timeout });
+    errors = validateConnection({ name, server, port, timeout, databases: scope() });
     // The timeout field sits in the collapsed Advanced section.
     if (errors.timeout) advancedOpen = true;
     return Object.keys(errors).length === 0;
@@ -183,6 +212,16 @@
             />
           </div>
         </div>
+        <DatabasePicker bind:kind={dbKind} bind:names={dbNames} load={loadDatabases} error={errors.databases} />
+        {#if !isEdit}
+          <div class="fl">
+            <label for="c-folder">{t("connection.field.folder")}</label>
+            <select id="c-folder" bind:value={folderId}>
+              <option value={null}>{t("connection.folder.root")}</option>
+              {#each folderOptions as f (f.id)}<option value={f.id}>{f.label}</option>{/each}
+            </select>
+          </div>
+        {/if}
         <div class="fl">
           <span class="lbl" id="c-env">{t("connection.field.environment")}</span>
           <div class="envs" role="radiogroup" aria-labelledby="c-env">
