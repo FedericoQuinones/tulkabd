@@ -693,6 +693,15 @@ class ExplorerStore {
     });
   }
 
+  /** Saves a copy of the connection (with its own copy of the saved password) and focuses it. */
+  async duplicate(id: string): Promise<boolean> {
+    return this.attempt(async () => {
+      const copy = await ipc.duplicateConnection(id);
+      await connections.refresh();
+      this.focusKey = copy.id;
+    });
+  }
+
   /** Drag and drop or Move to folder…; a folder never goes inside itself. */
   async move(item: DragItem, target: string | null): Promise<void> {
     if (item.kind === "folder") {
@@ -723,6 +732,24 @@ class ExplorerStore {
     try {
       await navigator.clipboard.writeText(text);
       this.showToast(t("explorer.copied", { name: text }));
+    } catch (e) {
+      this.error = t("explorer.copyFailed", { error: String(e) });
+    }
+  }
+
+  /**
+   * Copies the connection string through the Rust clipboard; the password is
+   * read from the keychain only when `includePassword`, and never reaches the UI.
+   */
+  async copyConnectionString(id: string, includePassword: boolean): Promise<void> {
+    try {
+      const included = await ipc.copyConnectionString(id, includePassword);
+      const key = included
+        ? "explorer.connstr.copiedWithPassword"
+        : includePassword
+          ? "explorer.connstr.copiedNoPassword"
+          : "explorer.connstr.copied";
+      this.showToast(t(key));
     } catch (e) {
       this.error = t("explorer.copyFailed", { error: String(e) });
     }

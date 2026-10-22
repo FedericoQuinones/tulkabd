@@ -25,6 +25,8 @@ vi.mock("../ipc", () => ({
   closeSession: vi.fn(),
   runQuery: vi.fn(),
   objectDefinition: vi.fn(),
+  duplicateConnection: vi.fn(),
+  copyConnectionString: vi.fn(),
 }));
 
 import * as ipc from "../ipc";
@@ -384,6 +386,7 @@ const actions = (): MenuActions => ({
   remove: vi.fn(),
   newSubfolder: vi.fn(),
   newConnection: vi.fn(),
+  newFromConnStr: vi.fn(),
 });
 
 test("object menus follow the kind", () => {
@@ -437,11 +440,70 @@ test("connection menu toggles Connect and Disconnect", () => {
     "newTab",
     "rename",
     "edit",
+    "duplicate",
     "moveTo",
+    "copyConnStr",
+    "copyConnStrPassword",
     "delete",
   ]);
   explorer.state("c2").status = "connected";
   expect(buildMenu(row(), actions(), explorer)[0].id).toBe("disconnect");
+});
+
+test("Copy connection string with password is offered only with a saved password", () => {
+  connections.list = connections.list.map((c) => (c.id === "c2" ? { ...c, passwordSaved: false } : c));
+  const row = explorer.rows.find((r) => r.kind === "connection" && r.conn.id === "c2")!;
+  const ids = buildMenu(row, actions(), explorer).map((m) => m.id);
+  expect(ids).toContain("copyConnStr");
+  expect(ids).not.toContain("copyConnStrPassword");
+});
+
+test("folder menu offers New from connection string", () => {
+  const ui = actions();
+  const row = explorer.rows.find((r) => r.kind === "folder" && r.folder.id === "fa")!;
+  const item = buildMenu(row, ui, explorer).find((m) => m.id === "newFromConnStr")!;
+  expect(item.label).toBe("New from connection string…");
+  item.run();
+  expect(ui.newFromConnStr).toHaveBeenCalledWith(folders[1]);
+});
+
+test("Duplicate saves a copy, reloads the list and focuses the copy", async () => {
+  const copy = conn("c9", "Local (copy)", null);
+  vi.mocked(ipc.duplicateConnection).mockResolvedValue(copy);
+  vi.mocked(ipc.listConnections).mockResolvedValue([sales, local, billing, copy]);
+  const row = explorer.rows.find((r) => r.kind === "connection" && r.conn.id === "c2")!;
+  buildMenu(row, actions(), explorer).find((m) => m.id === "duplicate")!.run();
+  await flush();
+  expect(ipc.duplicateConnection).toHaveBeenCalledWith("c2");
+  expect(connections.list.map((c) => c.id)).toContain("c9");
+  expect(explorer.focusKey).toBe("c9");
+  expect(explorer.error).toBeNull();
+});
+
+test("a failed Duplicate shows the error", async () => {
+  vi.mocked(ipc.duplicateConnection).mockRejectedValue("the connections file is read-only: x");
+  await explorer.duplicate("c2");
+  expect(explorer.error).toContain("read-only");
+});
+
+test("Copy connection string says whether the password was included", async () => {
+  vi.mocked(ipc.copyConnectionString).mockResolvedValue(false);
+  await explorer.copyConnectionString("c2", false);
+  expect(ipc.copyConnectionString).toHaveBeenLastCalledWith("c2", false);
+  expect(explorer.toast).toBe("Copied the connection string");
+
+  vi.mocked(ipc.copyConnectionString).mockResolvedValue(true);
+  await explorer.copyConnectionString("c2", true);
+  expect(ipc.copyConnectionString).toHaveBeenLastCalledWith("c2", true);
+  expect(explorer.toast).toBe("Copied — includes the password");
+
+  vi.mocked(ipc.copyConnectionString).mockResolvedValue(false);
+  await explorer.copyConnectionString("c2", true);
+  expect(explorer.toast).toBe("Copied without the password: none is saved");
+
+  vi.mocked(ipc.copyConnectionString).mockRejectedValue("no clipboard");
+  await explorer.copyConnectionString("c2", false);
+  expect(explorer.error).toBe("Could not copy: no clipboard");
 });
 
 test("Copy name writes the quoted name to the clipboard", async () => {

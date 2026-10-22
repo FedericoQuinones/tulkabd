@@ -2,10 +2,15 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
-vi.mock("../ipc", () => ({ listServerDatabases: vi.fn(), saveConnection: vi.fn(), testConnection: vi.fn() }));
+vi.mock("../ipc", () => ({
+  listServerDatabases: vi.fn(),
+  saveConnection: vi.fn(),
+  testConnection: vi.fn(),
+  parseConnectionString: vi.fn(),
+}));
 
 import * as ipc from "../ipc";
-import type { ConnectionConfig } from "../ipc";
+import type { ConnectionConfig, ParsedConnection } from "../ipc";
 import { explorer } from "../explorer/tree.svelte";
 import { connections } from "./store.svelte";
 import ConnectionDialog from "./ConnectionDialog.svelte";
@@ -31,7 +36,12 @@ const base: ConnectionConfig = {
   folderId: null,
 };
 
-function open(props: { initial?: ConnectionConfig; folderId?: string | null }) {
+function open(props: {
+  initial?: ConnectionConfig;
+  folderId?: string | null;
+  parsed?: ParsedConnection;
+  focusConnStr?: boolean;
+}) {
   cmp = mount(ConnectionDialog, { target: document.body, props: { onclose: () => {}, ...props } });
   flushSync();
 }
@@ -185,4 +195,96 @@ test("Save sends the selected scope", async () => {
   await settle();
   const conn = vi.mocked(ipc.saveConnection).mock.calls[0][0];
   expect(conn.databases).toEqual({ kind: "selected", names: ["Ventas", "Gone"] });
+});
+
+// ---------------------------------------------------------- connection string
+
+const parsed: ParsedConnection = {
+  server: "db.empresa.com",
+  port: 1444,
+  user: "fede",
+  password: "a;b\"c",
+  database: "Ventas",
+  encrypt: null,
+  trustServerCertificate: true,
+  connectTimeoutS: 30,
+  ignoredKeys: ["Application Name"],
+};
+const val = (sel: string) => document.querySelector<HTMLInputElement>(sel)!.value;
+const pasteInto = (sel: string, text: string) => {
+  const ev = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(ev, "clipboardData", { value: { getData: () => text } });
+  document.querySelector(sel)!.dispatchEvent(ev);
+  return ev;
+};
+
+test("pasting a connection string fills the form and proposes a name", async () => {
+  vi.mocked(ipc.parseConnectionString).mockResolvedValue(parsed);
+  open({});
+  const ev = pasteInto("#c-connstr", "Server=...");
+  // Parsed from the clipboard, so the text (and its password) never lands in the plain field.
+  expect(ev.defaultPrevented).toBe(true);
+  await settle();
+  flushSync();
+  expect(ipc.parseConnectionString).toHaveBeenCalledWith("Server=...");
+  expect(val("#c-connstr")).toBe("");
+  expect(val("#c-name")).toBe("Ventas @ db.empresa.com");
+  expect(val("#c-server")).toBe("db.empresa.com");
+  expect(val("#c-port")).toBe("1444");
+  expect(val("#c-user")).toBe("fede");
+  const pass = document.querySelector<HTMLInputElement>("#c-pass")!;
+  expect(pass.value).toBe("a;b\"c");
+  expect(pass.type).toBe("password");
+  expect(val("#c-timeout")).toBe("30");
+  expect(rowNames()).toEqual(["Ventas"]);
+  expect(document.body.textContent).toContain("Filled from connection string");
+  expect(document.body.textContent).toContain("Ignored: Application Name");
+});
+
+test("a name already typed is kept", async () => {
+  vi.mocked(ipc.parseConnectionString).mockResolvedValue({ ...parsed, ignoredKeys: [] });
+  open({});
+  type("#c-name", "Mine");
+  pasteInto("#c-connstr", "Server=...");
+  await settle();
+  flushSync();
+  expect(val("#c-name")).toBe("Mine");
+  expect(document.body.textContent).not.toContain("Ignored:");
+});
+
+test("an unreadable string shows the error inline and changes nothing", async () => {
+  vi.mocked(ipc.parseConnectionString).mockRejectedValue("bad_value:Encrypt");
+  open({ initial: base });
+  pasteInto("#c-connstr", "Server=x;Encrypt=maybe");
+  await settle();
+  flushSync();
+  expect(document.body.textContent).toContain("The value of Encrypt can't be read.");
+  expect(val("#c-server")).toBe("127.0.0.1");
+  // Kept in the field so it can be fixed.
+  expect(val("#c-connstr")).toBe("Server=x;Encrypt=maybe");
+});
+
+test("leaving the field parses what was typed", async () => {
+  vi.mocked(ipc.parseConnectionString).mockResolvedValue({ ...parsed, database: null });
+  open({});
+  type("#c-connstr", "Server=db.empresa.com");
+  document.querySelector("#c-connstr")!.dispatchEvent(new FocusEvent("blur"));
+  await settle();
+  flushSync();
+  expect(ipc.parseConnectionString).toHaveBeenCalledWith("Server=db.empresa.com");
+  expect(val("#c-server")).toBe("db.empresa.com");
+  expect(val("#c-name")).toBe("db.empresa.com");
+});
+
+test("a string parsed before opening (a paste on the tree) fills the form", () => {
+  open({ parsed, folderId: null });
+  expect(val("#c-server")).toBe("db.empresa.com");
+  expect(document.querySelector<HTMLInputElement>("#c-pass")!.value).toBe("a;b\"c");
+  expect(document.body.textContent).toContain("Filled from connection string");
+  expect(document.activeElement?.id).toBe("c-name");
+});
+
+test("New from connection string focuses the field", () => {
+  open({ focusConnStr: true });
+  expect(document.activeElement?.id).toBe("c-connstr");
 });

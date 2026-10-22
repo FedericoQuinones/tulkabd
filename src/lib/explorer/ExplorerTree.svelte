@@ -1,7 +1,8 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { t } from "../i18n/t";
-  import type { ConnectionConfig, Folder } from "../ipc";
+  import type { ConnectionConfig, Folder, ParsedConnection } from "../ipc";
+  import { parsePasted } from "../connections/connstr";
   import { connections } from "../connections/store.svelte";
   import ContextMenu from "./ContextMenu.svelte";
   import FolderDialog, { type FolderDialogMode } from "./FolderDialog.svelte";
@@ -12,8 +13,13 @@
   interface Props {
     onnewconnection: (folderId?: string | null) => void;
     onedit: (conn: ConnectionConfig) => void;
+    /**
+     * New connection from a connection string: `parsed` fills the form (a paste on
+     * the tree); `null` opens it with the connection string field focused.
+     */
+    onnewfromstring?: (folderId: string | null, parsed: ParsedConnection | null) => void;
   }
-  let { onnewconnection, onedit }: Props = $props();
+  let { onnewconnection, onedit, onnewfromstring = () => {} }: Props = $props();
 
   let treeEl = $state<HTMLDivElement>();
   let filterEl = $state<HTMLInputElement>();
@@ -79,6 +85,7 @@
     },
     newSubfolder: (folder: Folder) => (dialog = { kind: "create", parent: folder }),
     newConnection: (folder: Folder) => onnewconnection(folder.id),
+    newFromConnStr: (folder: Folder) => onnewfromstring(folder.id, null),
   };
 
   function rowName(row: Row): string {
@@ -110,6 +117,7 @@
       items: [
         { id: "newFolder", label: t("explorer.menu.newFolder"), run: () => (dialog = { kind: "create", parent: null }) },
         { id: "newConnection", label: t("explorer.menu.newConnection"), run: () => onnewconnection(null) },
+        { id: "newFromConnStr", label: t("explorer.menu.newFromConnStr"), run: () => onnewfromstring(null, null) },
       ],
       x: r.left,
       y: r.bottom + 4,
@@ -163,6 +171,29 @@
       const target = rows.find((r) => r.key === nav.activate);
       if (target?.kind === "notice") void target.action?.run();
     }
+  }
+
+  // ---- paste a connection string ----
+
+  /** The folder a new connection pasted on this row goes to: the row's folder, or its connection's. */
+  function folderOf(row: Row | undefined): string | null {
+    if (!row) return null;
+    if (row.kind === "folder") return row.folder.id;
+    if (row.kind === "connection") return row.conn.folderId ?? null;
+    if ("connectionId" in row) return connections.list.find((c) => c.id === row.connectionId)?.folderId ?? null;
+    return null;
+  }
+
+  /**
+   * Ctrl+V on the tree (the `paste` event, so no clipboard permission is needed):
+   * a recognized connection string opens New connection filled in; anything else is ignored.
+   */
+  async function onpaste(e: ClipboardEvent) {
+    const target = e.target as HTMLElement | null;
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable) return;
+    const folder = folderOf(rows.find((r) => r.key === tabKey));
+    const parsed = await parsePasted(e.clipboardData?.getData("text/plain"));
+    if (parsed) onnewfromstring(folder, parsed);
   }
 
   // ---- drag and drop (connections and folders) ----
@@ -289,6 +320,7 @@
       tabindex="-1"
       bind:this={treeEl}
       {onkeydown}
+      {onpaste}
       ondragover={(e) => ondragover(null, e)}
       ondrop={(e) => ondrop(null, e)}
     >

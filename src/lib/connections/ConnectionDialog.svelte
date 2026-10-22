@@ -2,7 +2,8 @@
   import { onMount, untrack } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
-  import type { ConnectionConfig, DatabaseScope, GuardLevel } from "../ipc";
+  import type { ConnectionConfig, DatabaseScope, GuardLevel, ParsedConnection } from "../ipc";
+  import { connStrErrorText, fillFrom, proposeName } from "./connstr";
   import { applyEnvironment, ENVIRONMENTS, initialEnvState, type EnvState } from "./env";
   import { explorer } from "../explorer/tree.svelte";
   import DatabasePicker from "./DatabasePicker.svelte";
@@ -10,13 +11,23 @@
   import { isNamedInstance, validateConnection } from "./validate";
 
   interface Props {
-    /** Connection to edit, or a prefilled copy (Duplicate) to create. */
+    /** Connection to edit; one whose id is not saved yet is a prefilled new connection. */
     initial?: ConnectionConfig;
     /** Folder preselected for a new connection (opened from a folder's menu). */
     folderId?: string | null;
+    /** A connection string already parsed (pasted on the tree) to fill the form with. */
+    parsed?: ParsedConnection;
+    /** Focus the connection string field instead of the name (New from connection string…). */
+    focusConnStr?: boolean;
     onclose: () => void;
   }
-  let { initial: initialProp, folderId: folderProp = null, onclose }: Props = $props();
+  let {
+    initial: initialProp,
+    folderId: folderProp = null,
+    parsed: parsedProp,
+    focusConnStr = false,
+    onclose,
+  }: Props = $props();
   // The dialog is keyed by connection in App, so the initial value is read once.
   const initial = untrack(() => initialProp);
 
@@ -50,8 +61,62 @@
   let keyringUnavailable = $state(false);
   let saveError = $state<string | null>(null);
   let nameInput: HTMLInputElement;
+  let connStrInput: HTMLInputElement;
 
-  onMount(() => nameInput.focus());
+  // The connection string field. Its text is never kept once it fills the form.
+  let connStr = $state("");
+  let connStrError = $state<string | null>(null);
+  /** Set once a string filled the form; lists the keys it ignored. */
+  let connStrFilled = $state<{ ignored: string[] } | null>(null);
+
+  function applyParsed(p: ParsedConnection) {
+    const fill = fillFrom(p);
+    server = fill.server;
+    port = fill.port;
+    user = fill.user;
+    password = fill.password;
+    dbKind = fill.databases.kind;
+    dbNames = fill.databases.kind === "selected" ? fill.databases.names : [];
+    if (fill.encrypt !== undefined) encrypt = fill.encrypt;
+    if (fill.trust !== undefined) trust = fill.trust;
+    if (fill.timeout !== undefined) timeout = fill.timeout;
+    if (name.trim() === "") name = proposeName(p);
+    connStrError = null;
+    connStrFilled = { ignored: p.ignoredKeys };
+  }
+
+  const prefill = untrack(() => parsedProp);
+  if (prefill) applyParsed(prefill);
+
+  /** Parses `text` and fills the form; on failure shows the error and leaves the form alone. */
+  async function fillFromString(text: string): Promise<boolean> {
+    try {
+      applyParsed(await ipc.parseConnectionString(text));
+      connStr = "";
+      return true;
+    } catch (e) {
+      connStrFilled = null;
+      connStrError = connStrErrorText(e);
+      return false;
+    }
+  }
+
+  function onConnStrPaste(e: ClipboardEvent) {
+    const text = e.clipboardData?.getData("text/plain") ?? "";
+    if (text.trim() === "") return;
+    // Parsed straight from the clipboard, so a password never shows in this plain field;
+    // only a string that does not parse is put there, to be fixed.
+    e.preventDefault();
+    void fillFromString(text).then((ok) => {
+      if (!ok) connStr = text;
+    });
+  }
+
+  function onConnStrCommit() {
+    if (connStr.trim() !== "") void fillFromString(connStr);
+  }
+
+  onMount(() => (focusConnStr ? connStrInput : nameInput).focus());
 
   function scope(): DatabaseScope {
     return dbKind === "selected" ? { kind: "selected", names: dbNames } : { kind: "all" };
@@ -166,6 +231,36 @@
       }}
     >
       <div class="panel-b">
+        <div class="fl">
+          <label for="c-connstr">{t("connection.connstr.label")}</label>
+          <input
+            id="c-connstr"
+            class="m"
+            bind:this={connStrInput}
+            bind:value={connStr}
+            placeholder={t("connection.connstr.placeholder")}
+            autocomplete="off"
+            spellcheck="false"
+            aria-invalid={!!connStrError}
+            onpaste={onConnStrPaste}
+            onblur={onConnStrCommit}
+            onkeydown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                onConnStrCommit();
+              }
+            }}
+          />
+          {#if connStrError}
+            <div class="err">{connStrError}</div>
+          {:else if connStrFilled}
+            <div class="hint" role="status">
+              {t("connection.connstr.filled")}{#if connStrFilled.ignored.length > 0}. {t("connection.connstr.ignored", {
+                  keys: connStrFilled.ignored.join(", "),
+                })}{/if}
+            </div>
+          {/if}
+        </div>
         <div class="fl">
           <label for="c-name">{t("connection.field.name")}</label>
           <input id="c-name" bind:this={nameInput} bind:value={name} aria-invalid={!!errors.name} />

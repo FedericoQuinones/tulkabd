@@ -4,7 +4,7 @@
   import { t } from "./lib/i18n/t";
   import Rail from "./lib/shell/Rail.svelte";
   import StatusBar from "./lib/shell/StatusBar.svelte";
-  import type { ConnectionConfig } from "./lib/ipc";
+  import type { ConnectionConfig, ParsedConnection } from "./lib/ipc";
   import ConnectionDialog from "./lib/connections/ConnectionDialog.svelte";
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
   import { connections } from "./lib/connections/store.svelte";
@@ -21,6 +21,17 @@
   let dialog = $state<ConnectionConfig | null | undefined>(undefined);
   // Folder preselected when the new-connection dialog opens from a folder menu.
   let dialogFolder = $state<string | null>(null);
+  // A new connection from a connection string: already parsed (a paste on the tree),
+  // or with the connection string field focused (New from connection string…).
+  let dialogParsed = $state<ParsedConnection | undefined>(undefined);
+  let dialogFocusConnStr = $state(false);
+
+  function openDialog(conn: ConnectionConfig | null, folderId: string | null = null, parsed?: ParsedConnection, focusConnStr = false) {
+    dialogFolder = folderId;
+    dialogParsed = parsed;
+    dialogFocusConnStr = focusConnStr;
+    dialog = conn;
+  }
 
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
   const newKey = t(isMac ? "tabs.newKey.mac" : "tabs.newKey.other");
@@ -95,10 +106,11 @@
           <p class="error" role="alert">{t("explorer.loadFailed", { error: connections.error })}</p>
         {/if}
         {#if tabs.connectError}<p class="error" role="alert">{tabs.connectError}</p>{/if}
-        <ExplorerTree onnewconnection={(folderId) => {
-            dialogFolder = folderId ?? null;
-            dialog = null;
-          }} onedit={(c) => (dialog = c)} />
+        <ExplorerTree
+          onnewconnection={(folderId) => openDialog(null, folderId ?? null)}
+          onedit={(c) => openDialog(c)}
+          onnewfromstring={(folderId, parsed) => openDialog(null, folderId, parsed ?? undefined, parsed === null)}
+        />
         <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="resize"
@@ -152,7 +164,16 @@
 
 {#if dialog !== undefined}
   {#key dialog?.id}
-    <ConnectionDialog initial={dialog ?? undefined} folderId={dialogFolder} onclose={() => (dialog = undefined)} />
+    <ConnectionDialog
+      initial={dialog ?? undefined}
+      folderId={dialogFolder}
+      parsed={dialogParsed}
+      focusConnStr={dialogFocusConnStr}
+      onclose={() => {
+        dialog = undefined;
+        dialogParsed = undefined;
+      }}
+    />
   {/key}
 {/if}
 {#if tabs.passwordRequest}

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { flushSync, mount, tick, unmount } from "svelte";
-import type { ConnectionConfig, Folder } from "../ipc";
+import type { ConnectionConfig, Folder, ParsedConnection } from "../ipc";
 
 vi.mock("../ipc", () => ({
   connectExplorer: vi.fn(),
@@ -14,6 +14,7 @@ vi.mock("../ipc", () => ({
   moveConnection: vi.fn(),
   listFolders: vi.fn(),
   listConnections: vi.fn(),
+  parseConnectionString: vi.fn(),
 }));
 
 import * as ipc from "../ipc";
@@ -25,6 +26,7 @@ const folders: Folder[] = [{ id: "fa", name: "Cliente A", parentId: null }];
 const conn = { id: "c1", name: "Sales", folderId: "fa", color: "#e5566f", passwordSaved: true } as ConnectionConfig;
 
 let cmp: ReturnType<typeof mount> | undefined;
+const onnewfromstring = vi.fn();
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(ipc.explorerDatabases).mockResolvedValue([]);
@@ -34,7 +36,7 @@ beforeEach(() => {
   explorer.reset();
   explorer.folders = folders;
   explorer.persistDelayMs = 0;
-  cmp = mount(ExplorerTree, { target: document.body, props: { onnewconnection: () => {}, onedit: () => {} } });
+  cmp = mount(ExplorerTree, { target: document.body, props: { onnewconnection: () => {}, onedit: () => {}, onnewfromstring } });
   flushSync();
 });
 afterEach(() => {
@@ -80,6 +82,7 @@ test("Shift+F10 opens the row menu and Escape closes it", async () => {
     "Rename",
     "New subfolder",
     "New connection here",
+    "New from connection string…",
     "Delete",
   ]);
   key(document.activeElement!, "Escape");
@@ -97,4 +100,66 @@ test("Escape in the filter clears it", async () => {
   flushSync();
   expect(explorer.filter).toBe("");
   expect(items()).toHaveLength(1);
+});
+
+const paste = (el: Element, text: string) => {
+  const ev = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(ev, "clipboardData", { value: { getData: (type: string) => (type === "text/plain" ? text : "") } });
+  el.dispatchEvent(ev);
+};
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
+const parsed: ParsedConnection = {
+  server: "db",
+  port: null,
+  user: "sa",
+  password: "pw",
+  database: null,
+  encrypt: null,
+  trustServerCertificate: null,
+  connectTimeoutS: null,
+  ignoredKeys: [],
+};
+
+test("pasting text that is not a connection string on the tree does nothing", async () => {
+  vi.mocked(ipc.parseConnectionString).mockRejectedValue("unrecognized");
+  const [folder] = items();
+  folder.focus();
+  paste(folder, "hola mundo");
+  await settle();
+  expect(ipc.parseConnectionString).toHaveBeenCalledWith("hola mundo");
+  expect(onnewfromstring).not.toHaveBeenCalled();
+  expect(explorer.error).toBeNull();
+});
+
+test("pasting a connection string on a folder opens a new connection in it", async () => {
+  vi.mocked(ipc.parseConnectionString).mockResolvedValue(parsed);
+  const [folder] = items();
+  folder.focus();
+  paste(folder, "Server=db;UID=sa;PWD=pw");
+  await settle();
+  expect(onnewfromstring).toHaveBeenCalledWith("fa", parsed);
+});
+
+test("pasting into an input inside the tree is left alone", async () => {
+  vi.mocked(ipc.parseConnectionString).mockResolvedValue(parsed);
+  const [folder] = items();
+  folder.focus();
+  key(folder, "F2");
+  flushSync();
+  const input = folder.querySelector("input")!;
+  paste(input, "Server=db");
+  await settle();
+  expect(ipc.parseConnectionString).not.toHaveBeenCalled();
+  expect(onnewfromstring).not.toHaveBeenCalled();
+});
+
+test("the + menu offers New from connection string", () => {
+  document.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!.click();
+  flushSync();
+  const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (b) => b.textContent!.trim() === "New from connection string…",
+  )!;
+  item.click();
+  expect(onnewfromstring).toHaveBeenCalledWith(null, null);
 });

@@ -188,6 +188,8 @@ export interface MenuStore {
   refresh(id: string): unknown;
   refreshDatabase(id: string, database: string): unknown;
   copyName(object: DbObject): unknown;
+  duplicate(id: string): unknown;
+  copyConnectionString(id: string, includePassword: boolean): unknown;
 }
 
 /** Menu actions that need a dialog or an inline editor, provided by the tree component. */
@@ -198,6 +200,8 @@ export interface MenuActions {
   remove(row: Row): void;
   newSubfolder(folder: Folder): void;
   newConnection(folder: Folder): void;
+  /** Opens a new connection in `folder` with the connection string field focused. */
+  newFromConnStr(folder: Folder): void;
 }
 
 /**
@@ -215,12 +219,13 @@ export function buildMenu(row: Row, ui: MenuActions, store: MenuStore): MenuItem
           label: t("explorer.menu.newConnectionHere"),
           run: () => ui.newConnection(row.folder),
         },
+        { id: "newFromConnStr", label: t("explorer.menu.newFromConnStr"), run: () => ui.newFromConnStr(row.folder) },
         { id: "delete", label: t("explorer.menu.delete"), run: () => ui.remove(row), danger: true, separator: true },
       ];
     case "connection": {
       const id = row.conn.id;
       const live = row.status === "connected" || row.status === "connecting";
-      return [
+      const items: MenuItem[] = [
         live
           ? { id: "disconnect", label: t("explorer.menu.disconnect"), run: () => store.disconnect(id) }
           : { id: "connect", label: t("explorer.menu.connect"), run: () => store.connect(id) },
@@ -228,9 +233,24 @@ export function buildMenu(row: Row, ui: MenuActions, store: MenuStore): MenuItem
         { id: "newTab", label: t("explorer.menu.newTab"), run: () => tabs.open({ kind: "query", connectionId: id }) },
         { id: "rename", label: t("explorer.menu.rename"), run: () => ui.rename(row), separator: true },
         { id: "edit", label: t("explorer.menu.edit"), run: () => ui.edit(row.conn) },
+        { id: "duplicate", label: t("explorer.menu.duplicate"), run: () => store.duplicate(id) },
         { id: "moveTo", label: t("explorer.menu.moveTo"), run: () => ui.moveTo(row) },
-        { id: "delete", label: t("explorer.menu.delete"), run: () => ui.remove(row), danger: true, separator: true },
+        {
+          id: "copyConnStr",
+          label: t("explorer.menu.copyConnStr"),
+          run: () => store.copyConnectionString(id, false),
+          separator: true,
+        },
       ];
+      if (row.conn.passwordSaved) {
+        items.push({
+          id: "copyConnStrPassword",
+          label: t("explorer.menu.copyConnStrPassword"),
+          run: () => store.copyConnectionString(id, true),
+        });
+      }
+      items.push({ id: "delete", label: t("explorer.menu.delete"), run: () => ui.remove(row), danger: true, separator: true });
+      return items;
     }
     case "database": {
       const { connectionId } = row;
