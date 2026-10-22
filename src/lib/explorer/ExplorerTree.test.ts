@@ -164,3 +164,17 @@ test("the + menu offers New from connection string", () => {
   item.click();
   expect(onnewfromstring).toHaveBeenCalledWith(null, null);
 });
+
+test("beforepaste is cancelled on the tree so WebKit fires paste there, but not in an input", () => {
+  const before = (el: Element) => {
+    const ev = new Event("beforepaste", { bubbles: true, cancelable: true });
+    el.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  };
+  const [folder] = items();
+  folder.focus();
+  expect(before(folder)).toBe(true);
+  key(folder, "F2");
+  flushSync();
+  expect(before(folder.querySelector("input")!)).toBe(false);
+});

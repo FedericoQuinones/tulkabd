@@ -188,13 +188,27 @@
    * Ctrl+V on the tree (the `paste` event, so no clipboard permission is needed):
    * a recognized connection string opens New connection filled in; anything else is ignored.
    */
+  const editable = (t: EventTarget | null) =>
+    t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || (t instanceof HTMLElement && t.isContentEditable);
+
   async function onpaste(e: ClipboardEvent) {
-    const target = e.target as HTMLElement | null;
-    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable) return;
+    if (editable(e.target)) return;
     const folder = folderOf(rows.find((r) => r.key === tabKey));
     const parsed = await parsePasted(e.clipboardData?.getData("text/plain"));
     if (parsed) onnewfromstring(folder, parsed);
   }
+
+  // WebKit fires `paste` on a non-editable element only when its `beforepaste`
+  // was cancelled. Not a Svelte event attribute, so it is attached here.
+  $effect(() => {
+    const el = treeEl;
+    if (!el) return;
+    const onbeforepaste = (e: Event) => {
+      if (!editable(e.target)) e.preventDefault();
+    };
+    el.addEventListener("beforepaste", onbeforepaste);
+    return () => el.removeEventListener("beforepaste", onbeforepaste);
+  });
 
   // ---- drag and drop (connections and folders) ----
 
