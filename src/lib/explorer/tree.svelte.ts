@@ -585,6 +585,12 @@ class ExplorerStore {
     return this.loadObjects(c, d, kind);
   }
 
+  private reloadColumns(c: string, d: string, o: DbObject): Promise<void> {
+    const { [keyOf.object(c, d, o)]: _, ...rest } = this.columns;
+    this.columns = rest;
+    return this.loadColumns(c, d, o);
+  }
+
   private objectRow(out: Row[], c: string, d: string, o: DbObject, level: number, parent: string) {
     const key = keyOf.object(c, d, o);
     const expandable = o.kind !== "procedure";
@@ -596,7 +602,10 @@ class ExplorerStore {
       if (!this.colLoads.has(key)) this.later(() => this.loadColumns(c, d, o));
       out.push(this.notice(key, "loading", level + 1, "muted", t("explorer.loading")));
     } else if (!Array.isArray(cols)) {
-      out.push(this.notice(key, "error", level + 1, "error", cols.error));
+      out.push(this.notice(key, "error", level + 1, "error", cols.error, {
+        label: t("explorer.retry"),
+        run: () => this.reloadColumns(c, d, o),
+      }));
     } else if (cols.length === 0) {
       out.push(this.notice(key, "empty", level + 1, "muted", t("explorer.none")));
     } else {

@@ -451,3 +451,22 @@ test("Copy name writes the quoted name to the clipboard", async () => {
   expect(explorer.toast).toBe("Copied [dbo].[Pedidos]");
   vi.unstubAllGlobals();
 });
+
+test("a failed column load shows the error with Retry", async () => {
+  explorer.expanded.add("c2");
+  explorer.state("c2").databases = [db("Ventas", { tables: 1 })];
+  const obj = { schema: "dbo", name: "Pedidos", kind: "table" as const };
+  vi.mocked(ipc.explorerObjects).mockResolvedValue([obj]);
+  vi.mocked(ipc.explorerColumns)
+    .mockRejectedValueOnce("cache locked")
+    .mockResolvedValueOnce([{ name: "Id", typeName: "int", nullable: false, primaryKey: true, default: null }]);
+  await explorer.expand(keyOf.db("c2", "Ventas"));
+  await explorer.expand(keyOf.group("c2", "Ventas", "table"));
+  await explorer.expand(keyOf.object("c2", "Ventas", obj));
+  const notice = explorer.rows.find((r) => r.kind === "notice" && r.tone === "error");
+  expect(notice?.kind === "notice" && notice.text).toBe("cache locked");
+  expect(notice?.kind === "notice" && notice.action?.label).toBe("Retry");
+  if (notice?.kind === "notice") await notice.action!.run();
+  expect(ipc.explorerColumns).toHaveBeenCalledTimes(2);
+  expect(labels()).toContain("col:Id");
+});
