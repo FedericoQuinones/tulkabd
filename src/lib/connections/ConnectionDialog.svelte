@@ -112,6 +112,13 @@
     });
   }
 
+  /** Closes the dialog; a string that failed to parse may hold a password, so it is cleared first. */
+  function close() {
+    connStr = "";
+    connStrError = null;
+    onclose();
+  }
+
   function onConnStrCommit() {
     if (connStr.trim() !== "") void fillFromString(connStr);
   }
@@ -195,7 +202,7 @@
         password = "";
         return;
       }
-      onclose();
+      close();
     } catch (e) {
       saveError = t("connection.errors.saveFailed", { error: String(e) });
     } finally {
@@ -206,7 +213,7 @@
   function onkeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
       e.stopPropagation();
-      onclose();
+      close();
     }
   }
 
@@ -393,7 +400,7 @@
         <button type="button" class="ghost l" disabled={busy !== null} onclick={test}>
           {busy === "test" ? t("connection.testing") : t("connection.test")}
         </button>
-        <button type="button" class="ghost" onclick={onclose}>
+        <button type="button" class="ghost" onclick={close}>
           {keyringUnavailable ? t("connection.close") : t("connection.cancel")}
         </button>
         <button type="submit" class="run" disabled={busy !== null}>

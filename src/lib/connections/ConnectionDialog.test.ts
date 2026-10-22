@@ -41,6 +41,7 @@ function open(props: {
   folderId?: string | null;
   parsed?: ParsedConnection;
   focusConnStr?: boolean;
+  onclose?: () => void;
 }) {
   cmp = mount(ConnectionDialog, { target: document.body, props: { onclose: () => {}, ...props } });
   flushSync();
@@ -288,4 +289,24 @@ test("a string parsed before opening (a paste on the tree) fills the form", () =
 test("New from connection string focuses the field", () => {
   open({ focusConnStr: true });
   expect(document.activeElement?.id).toBe("c-connstr");
+});
+
+test.each(["Escape", "Cancel"])("%s clears a failed connection string before closing", async (how) => {
+  vi.mocked(ipc.parseConnectionString).mockRejectedValue("bad_value:Encrypt");
+  const onclose = vi.fn();
+  open({ onclose });
+  pasteInto("#c-connstr", "Server=x;Password=secret;Encrypt=maybe");
+  await settle();
+  flushSync();
+  expect(val("#c-connstr")).toBe("Server=x;Password=secret;Encrypt=maybe");
+  if (how === "Escape") {
+    document
+      .querySelector("#c-name")!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  } else {
+    button("Cancel").click();
+  }
+  flushSync();
+  expect(onclose).toHaveBeenCalled();
+  expect(val("#c-connstr")).toBe("");
 });
