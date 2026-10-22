@@ -127,9 +127,9 @@ pub async fn delete_connection(state: &AppState, id: String) -> Result<(), Strin
 
 /// Copies a connection under a new id, named `"<name> (copy)"`, in the same
 /// folder. A saved password is copied to the new id's keychain entry, so
-/// deleting either one leaves the other's password alone. If the password
-/// cannot be read or stored the copy is saved without one. Fails with
-/// [`NOT_FOUND`].
+/// deleting either one leaves the other's password alone. With no usable
+/// keychain the copy is saved without a password; any other keychain error
+/// fails the duplicate. Fails with [`NOT_FOUND`].
 pub async fn duplicate_connection(
     state: &AppState,
     id: String,
@@ -151,10 +151,15 @@ pub async fn duplicate_connection(
         let secrets = state.secrets.clone();
         let (from, to) = (original.id.clone(), copy.id.clone());
         copy.password_saved = blocking(move || match secrets.get(&from) {
-            Ok(Some(password)) => secrets.set(&to, &password).is_ok(),
-            _ => false,
+            Ok(Some(password)) => match secrets.set(&to, &password) {
+                Ok(()) => Ok(true),
+                Err(SecretError::Unavailable(_)) => Ok(false),
+                Err(e) => Err(format!("could not store the password: {e}")),
+            },
+            Ok(None) | Err(SecretError::Unavailable(_)) => Ok(false),
+            Err(e) => Err(format!("could not read the saved password: {e}")),
         })
-        .await?;
+        .await??;
     }
 
     let mut next = current.clone();

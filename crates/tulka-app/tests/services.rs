@@ -1699,3 +1699,69 @@ fn parse_connection_string_reports_codes() {
         "bad_value:Encrypt"
     );
 }
+
+/// A memory store whose reads or writes can be made to fail.
+#[derive(Default)]
+struct FlakyStore {
+    inner: MemoryStore,
+    fail_get: Mutex<Option<tulka_core::SecretError>>,
+    fail_set: Mutex<Option<tulka_core::SecretError>>,
+}
+
+impl SecretStore for FlakyStore {
+    fn set(&self, id: &str, secret: &str) -> Result<(), tulka_core::SecretError> {
+        match self.fail_set.lock().unwrap().clone() {
+            Some(e) => Err(e),
+            None => self.inner.set(id, secret),
+        }
+    }
+    fn get(&self, id: &str) -> Result<Option<String>, tulka_core::SecretError> {
+        match self.fail_get.lock().unwrap().clone() {
+            Some(e) => Err(e),
+            None => self.inner.get(id),
+        }
+    }
+    fn delete(&self, id: &str) -> Result<(), tulka_core::SecretError> {
+        self.inner.delete(id)
+    }
+}
+
+#[tokio::test]
+async fn duplicate_fails_on_keychain_errors_but_not_on_an_unavailable_keychain() {
+    use tulka_core::SecretError;
+    let store = Arc::new(FlakyStore::default());
+    let f = fixture(store.clone());
+    let original = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+
+    *store.fail_get.lock().unwrap() = Some(SecretError::Other("boom".into()));
+    let err = duplicate_connection(&f.state, original.id.clone())
+        .await
+        .unwrap_err();
+    assert!(err.contains("could not read the saved password"), "{err}");
+    assert_eq!(list_connections(&f.state).await.len(), 1);
+
+    *store.fail_get.lock().unwrap() = None;
+    *store.fail_set.lock().unwrap() = Some(SecretError::Other("boom".into()));
+    let err = duplicate_connection(&f.state, original.id.clone())
+        .await
+        .unwrap_err();
+    assert!(err.contains("could not store the password"), "{err}");
+    assert_eq!(list_connections(&f.state).await.len(), 1);
+
+    // An unavailable keychain is soft: the copy is saved without a password.
+    *store.fail_set.lock().unwrap() = Some(SecretError::Unavailable("locked".into()));
+    let copy = duplicate_connection(&f.state, original.id.clone())
+        .await
+        .unwrap();
+    assert!(!copy.password_saved);
+    *store.fail_set.lock().unwrap() = None;
+    *store.fail_get.lock().unwrap() = Some(SecretError::Unavailable("locked".into()));
+    let copy = duplicate_connection(&f.state, original.id.clone())
+        .await
+        .unwrap();
+    assert!(!copy.password_saved);
+    assert_eq!(list_connections(&f.state).await.len(), 3);
+}
