@@ -71,6 +71,7 @@
       oninput={(e) => void palette.search(e.currentTarget.value)}
       {onkeydown}
     />
+    {#if palette.error}<p class="error" role="alert">{palette.error}</p>{/if}
     <div class="list" id="palette-list" role="listbox" aria-label={t("palette.results")} bind:this={list}>
       {#each palette.groups as group (group.key)}
         <div class="group" role="presentation" class:off={!group.connected}>
@@ -200,6 +201,12 @@
     background: none;
     color: var(--accent);
     font-weight: 500;
+  }
+  .error {
+    margin: 8px 16px 0;
+    color: var(--negative);
+    font-size: 12px;
+    word-break: break-word;
   }
   .none {
     margin: 12px 16px;

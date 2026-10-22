@@ -250,5 +250,6 @@
   "palette.indexingOne": "indexing 1 database…",
   "palette.indexingMany": "indexing {count} databases…",
   "palette.keys.other": "↵ open · Ctrl ↵ top 10 · → definition",
-  "palette.keys.mac": "↵ open · ⌘ ↵ top 10 · → definition"
+  "palette.keys.mac": "↵ open · ⌘ ↵ top 10 · → definition",
+  "palette.connectFailed": "Could not connect to {name}: {error}"
 }

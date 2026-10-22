@@ -39,6 +39,9 @@ export interface ConnRuntime {
 
 type Loaded<T> = T[] | { error: string };
 
+/** Hears the end of a connect: `null` when connected, else the error. */
+export type ConnectThen = (error: string | null) => void;
+
 interface FilterSets {
   /** Nodes whose name matches; their subtree shows as usual. */
   match: Set<string>;
@@ -65,8 +68,8 @@ class ExplorerStore {
   error = $state<string | null>(null);
   /** Short-lived confirmation, e.g. after Copy name. */
   toast = $state<string | null>(null);
-  /** `then` runs once the connection succeeds (the palette opens its result with it). */
-  passwordRequest = $state<{ conn: ConnectionConfig; then?: () => void } | null>(null);
+  /** `then` hears how the connect ends (the palette opens its result with it). */
+  passwordRequest = $state<{ conn: ConnectionConfig; then?: ConnectThen } | null>(null);
   persistDelayMs = 400;
 
   readonly rows: Row[] = $derived.by(() => this.flatten());
@@ -192,8 +195,11 @@ class ExplorerStore {
 
   // ---- connecting --------------------------------------------------------
 
-  /** Connects the Explorer session; `then` runs once connected, after a password prompt if one is needed. */
-  async connect(id: string, password?: string, then?: () => void): Promise<void> {
+  /**
+   * Connects the Explorer session. `then` gets `null` once connected, or the error when the connect
+   * fails; a password prompt passes it on to the next attempt, and a cancelled prompt drops it.
+   */
+  async connect(id: string, password?: string, then?: ConnectThen): Promise<void> {
     const conn = connections.list.find((c) => c.id === id);
     if (!conn) return;
     const st = this.state(id);
@@ -207,7 +213,7 @@ class ExplorerStore {
       await ipc.connectExplorer(id, password);
       if (!current()) return;
       st.status = "connected";
-      then?.();
+      then?.(null);
       await this.loadDatabases(id);
     } catch (e) {
       if (!current()) return;
@@ -224,6 +230,7 @@ class ExplorerStore {
       } else {
         st.status = "error";
         st.message = s;
+        then?.(s);
       }
     }
   }

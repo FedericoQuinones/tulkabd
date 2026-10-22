@@ -204,3 +204,36 @@ test("the footer counts matches and databases, and says when databases are index
   expect(foot).toContain("2 matches in 2 databases");
   expect(foot).toContain("indexing 3 databases…");
 });
+
+test("a failed connect shows its error in the palette and opens nothing", async () => {
+  const open = vi.spyOn(tabs, "open").mockReturnValue("t");
+  vi.mocked(ipc.connectExplorer).mockRejectedValueOnce("Login failed for user 'sa'.");
+  vi.mocked(ipc.searchObjects).mockResolvedValue(response([hit({ name: "Pedidos", connected: false })]));
+  palette.show();
+  await palette.search("ped");
+  await palette.choose("open");
+  expect(open).not.toHaveBeenCalled();
+  expect(palette.isOpen).toBe(true);
+  expect(palette.query).toBe("ped");
+  expect(palette.error).toBe("Could not connect to Sales: Login failed for user 'sa'.");
+  cmp = mount(Palette, { target: document.body });
+  flushSync();
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain("Login failed");
+  await palette.search("pedi");
+  expect(palette.error).toBeNull();
+});
+
+test("a connect that fails after the password prompt reopens the palette with the error", async () => {
+  const open = vi.spyOn(tabs, "open").mockReturnValue("t");
+  vi.mocked(ipc.connectExplorer).mockRejectedValueOnce("password_required").mockRejectedValueOnce("Login failed");
+  vi.mocked(ipc.searchObjects).mockResolvedValue(response([hit({ name: "Pedidos", connectionId: "c2", connectionName: "Local", connected: false })]));
+  palette.show();
+  await palette.search("ped");
+  await palette.choose("open");
+  expect(palette.isOpen).toBe(false);
+  await explorer.submitPassword("bad");
+  expect(open).not.toHaveBeenCalled();
+  expect(palette.isOpen).toBe(true);
+  expect(palette.query).toBe("ped");
+  expect(palette.error).toBe("Could not connect to Local: Login failed");
+});
