@@ -323,3 +323,68 @@ async fn connect_explorer_indexes_the_server_and_search_finds_it() {
         NOT_CONNECTED
     );
 }
+
+/// Measurement, not a check: full indexing time and search latency over the
+/// databases made by `scripts/mssql-seed-many.sql`. Run with
+/// `cargo test -p tulka-app --test live_mssql -- --ignored --nocapture seeded`.
+#[tokio::test]
+#[ignore]
+async fn seeded_server_indexing_and_search_timings() {
+    let Some(l) = live().await else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let recorder = Arc::new(Recorder::default());
+    let state = AppState::new(
+        ConfigStore::at(dir.path().join("config.json")),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(MssqlDriver)],
+    )
+    .unwrap()
+    .with_metadata(
+        Arc::new(tulka_store::MetaCache::in_memory()),
+        recorder.clone(),
+    );
+    let conn = save_connection(&state, l.conn.clone(), Some(l.password.clone()))
+        .await
+        .unwrap()
+        .connection;
+
+    let start = Instant::now();
+    connect_explorer(&state, conn.id.clone(), None)
+        .await
+        .unwrap();
+    let connected = start.elapsed();
+    tokio::time::timeout(Duration::from_secs(600), async {
+        while !recorder
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, AppEvent::IndexIdle { .. }))
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("indexing never finished");
+    println!(
+        "TIMING connect={connected:?} full_index={:?}",
+        start.elapsed()
+    );
+
+    for q in ["table_1", "proc_4", "vw 12", "zzz"] {
+        let mut times = Vec::new();
+        let mut last = None;
+        for _ in 0..20 {
+            let t = Instant::now();
+            last = Some(search_objects(&state, q.into(), 50).await);
+            times.push(t.elapsed());
+        }
+        times.sort();
+        let r = last.unwrap();
+        println!(
+            "TIMING search {q:?}: median={:?} max={:?} total_matches={}",
+            times[10], times[19], r.total_matches
+        );
+    }
+    disconnect_explorer(&state, conn.id).await.unwrap();
+}
