@@ -3,6 +3,7 @@
 //! implements.
 
 pub mod config;
+pub mod connstr;
 pub mod driver;
 pub mod error;
 pub mod export;
@@ -14,6 +15,9 @@ pub mod value;
 pub use config::{
     AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope, Environment, Folder,
     GuardLevel,
+};
+pub use connstr::{
+    format_connection_string, parse_connection_string, ConnStrError, ParsedConnection,
 };
 pub use driver::{
     CancelHandle, Column, ConnectParams, Driver, ExecEvent, MessageKind, ServerInfo, Session,
