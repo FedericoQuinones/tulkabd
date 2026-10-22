@@ -4,13 +4,36 @@ import { t } from "../i18n/t";
 import type { CachedDatabase, ColumnInfo, ConnectionConfig, DbObject, Folder, ObjectKind, PaletteHit } from "../ipc";
 import { tabs } from "../tabs/tabs.svelte";
 
+/** `[name]` with `]` doubled. */
+export const quoteIdent = (s: string) => `[${s.replaceAll("]", "]]")}]`;
+
 /** `[schema].[name]` with `]` doubled; mirrors `qualified` in tulka-core. */
 export function quoteName(schema: string, name: string): string {
-  const q = (s: string) => `[${s.replaceAll("]", "]]")}]`;
-  return `${q(schema)}.${q(name)}`;
+  return `${quoteIdent(schema)}.${quoteIdent(name)}`;
 }
 
 export const selectTop10 = (schema: string, name: string) => `SELECT TOP 10 * FROM ${quoteName(schema, name)};`;
+
+export interface ObjectTarget {
+  connectionId: string;
+  database: string;
+  schema: string;
+  name: string;
+}
+
+/** The tabs an object opens, shared by the Explorer menu and the palette. */
+export const objectTabs = {
+  selectTop: (o: ObjectTarget) =>
+    tabs.open({
+      kind: "query",
+      connectionId: o.connectionId,
+      database: o.database,
+      sql: selectTop10(o.schema, o.name),
+      run: true,
+    }),
+  structure: (o: ObjectTarget) => tabs.open({ kind: "structure", ...o }),
+  definition: (o: ObjectTarget) => tabs.open({ kind: "definition", ...o }),
+};
 
 export const OBJECT_KINDS: ObjectKind[] = ["table", "view", "procedure"];
 
@@ -267,20 +290,20 @@ export function buildMenu(row: Row, ui: MenuActions, store: MenuStore): MenuItem
     case "object": {
       const { connectionId, database, object } = row;
       const { schema, name, kind } = object;
-      const target = { connectionId, database, schema, name };
+      const target: ObjectTarget = { connectionId, database, schema, name };
       const items: MenuItem[] = [];
       if (kind !== "procedure") {
         items.push(
           {
             id: "selectTop",
             label: t("explorer.menu.selectTop"),
-            run: () => tabs.open({ kind: "query", connectionId, database, sql: selectTop10(schema, name), run: true }),
+            run: () => objectTabs.selectTop(target),
           },
-          { id: "structure", label: t("explorer.menu.structure"), run: () => tabs.open({ kind: "structure", ...target }) },
+          { id: "structure", label: t("explorer.menu.structure"), run: () => objectTabs.structure(target) },
         );
       }
       if (kind !== "table") {
-        items.push({ id: "definition", label: t("explorer.menu.definition"), run: () => tabs.open({ kind: "definition", ...target }) });
+        items.push({ id: "definition", label: t("explorer.menu.definition"), run: () => objectTabs.definition(target) });
       }
       items.push({
         id: "copyName",
