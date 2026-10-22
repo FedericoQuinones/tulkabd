@@ -5,10 +5,13 @@
   import { defaultKeymap, history, historyField, historyKeymap } from "@codemirror/commands";
   import { HighlightStyle, bracketMatching, indentOnInput, syntaxHighlighting } from "@codemirror/language";
   import { MSSQL, sql } from "@codemirror/lang-sql";
+  import { autocompletion, type CompletionContext, type CompletionSource } from "@codemirror/autocomplete";
   import { tags } from "@lezer/highlight";
   import { t } from "../i18n/t";
   import type { PaneState } from "../pane/pane.svelte";
   import { runTarget } from "./runTarget";
+  import { completionSource, sharedMetadata } from "./completion";
+  import type { CompletionMetadata } from "../ipc";
 
   interface Props {
     /** Supplies the starting text and keeps the editor state across tab switches. */
@@ -35,6 +38,11 @@
       "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": { backgroundColor: "#2c2b30" },
       "&.cm-focused .cm-selectionBackground": { backgroundColor: "#2f4a6e" },
       "&.cm-focused .cm-matchingBracket": { backgroundColor: "#2c2b30", outline: "none" },
+      ".cm-tooltip": { backgroundColor: "var(--raised)", border: "1px solid var(--border)", color: "var(--soft)" },
+      ".cm-tooltip.cm-tooltip-autocomplete > ul": { fontFamily: "var(--mono)", maxHeight: "16em" },
+      ".cm-tooltip-autocomplete ul li[aria-selected]": { backgroundColor: "#2f4a6e", color: "var(--text)" },
+      ".cm-completionDetail": { color: "var(--muted)", fontStyle: "normal", marginLeft: "1em" },
+      ".cm-completionMatchedText": { textDecoration: "none", color: "var(--accent)" },
     },
     { dark: true },
   );
@@ -67,6 +75,28 @@
     view.focus();
   }
 
+  // Completion metadata of the tab's database: fetched when the connection or database changes,
+  // then read from the cache (dropped when that database is re-indexed).
+  $effect(() => {
+    const c = pane.connectionId;
+    const d = pane.database;
+    if (c && d) sharedMetadata().get(c, d).catch(() => {});
+  });
+  let built: { meta: CompletionMetadata; source: CompletionSource } | null = null;
+  async function complete(ctx: CompletionContext) {
+    const c = pane.connectionId;
+    const d = pane.database;
+    if (!c || !d) return null;
+    let meta: CompletionMetadata;
+    try {
+      meta = await sharedMetadata().get(c, d);
+    } catch {
+      return null;
+    }
+    if (built?.meta !== meta) built = { meta, source: completionSource(meta) };
+    return built.source(ctx);
+  }
+
   let shownVersion = -1;
   // `pane.loadText` swapped the document while the editor is mounted: show it.
   $effect(() => {
@@ -85,6 +115,7 @@
           indentOnInput(),
           bracketMatching(),
           sql({ dialect: MSSQL }),
+          autocompletion({ override: [complete] }),
           syntaxHighlighting(highlight),
           theme,
           EditorView.contentAttributes.of({ "aria-label": t("pane.editorLabel") }),

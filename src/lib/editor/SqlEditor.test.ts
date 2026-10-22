@@ -2,7 +2,14 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
-vi.mock("../ipc", () => ({ openSession: vi.fn(), closeSession: vi.fn() }));
+vi.mock("../ipc", () => ({
+  openSession: vi.fn(),
+  closeSession: vi.fn(),
+  completionMetadata: vi.fn(async () => ({ schemas: [], objects: [], columns: {} })),
+  onAppEvent: vi.fn(async () => () => {}),
+}));
+
+import * as ipc from "../ipc";
 
 import { PaneState } from "../pane/pane.svelte";
 import SqlEditor from "./SqlEditor.svelte";
@@ -49,4 +56,18 @@ test("loadText while the tab is unmounted is used on the next mount", () => {
   pane.loadText("CREATE VIEW v");
   show(pane);
   expect(text()).toBe("CREATE VIEW v");
+});
+
+test("completion metadata is fetched per connection and database, not per mount", () => {
+  const pane = new PaneState("t");
+  pane.connectionId = "c-meta";
+  pane.database = "Ventas";
+  show(pane);
+  unmount(cmp!);
+  show(pane);
+  expect(ipc.completionMetadata).toHaveBeenCalledTimes(1);
+  pane.database = "Hist";
+  flushSync();
+  expect(ipc.completionMetadata).toHaveBeenLastCalledWith("c-meta", "Hist");
+  expect(ipc.completionMetadata).toHaveBeenCalledTimes(2);
 });
