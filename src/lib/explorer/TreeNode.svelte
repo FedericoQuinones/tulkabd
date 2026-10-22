@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { t } from "../i18n/t";
-  import type { Row } from "./tree.svelte";
+  import type { Row } from "./tree";
 
   interface Props {
     row: Row;

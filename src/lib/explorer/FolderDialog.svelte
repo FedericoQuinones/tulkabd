@@ -1,6 +1,6 @@
 <script lang="ts" module>
   import type { Folder } from "../ipc";
-  import type { DragItem } from "./tree.svelte";
+  import type { DragItem } from "./tree";
 
   export type FolderDialogMode =
     | { kind: "create"; parent: Folder | null }
@@ -11,7 +11,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { t } from "../i18n/t";
-  import { canMoveFolder, explorer } from "./tree.svelte";
+  import { canMoveFolder } from "./tree";
+  import { explorer } from "./tree.svelte";
 
   interface Props {
     mode: FolderDialogMode;

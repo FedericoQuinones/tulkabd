@@ -34,14 +34,14 @@ import {
   buildMenu,
   buildTree,
   canMoveFolder,
-  explorer,
   keyOf,
   navigate,
   quoteName,
   selectTop10,
   type MenuActions,
   type Row,
-} from "./tree.svelte";
+} from "./tree";
+import { explorer } from "./tree.svelte";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -394,11 +394,11 @@ test("object menus follow the kind", () => {
     kind: "object",
     object: { schema: "dbo", name: "Order Details", kind },
   });
-  const ids = (r: Row) => buildMenu(r, actions()).map((m) => m.id);
+  const ids = (r: Row) => buildMenu(r, actions(), explorer).map((m) => m.id);
   expect(ids(mk("table"))).toEqual(["selectTop", "structure", "copyName"]);
   expect(ids(mk("view"))).toEqual(["selectTop", "structure", "definition", "copyName"]);
   expect(ids(mk("procedure"))).toEqual(["definition", "copyName"]);
-  expect(buildMenu(mk("table"), actions()).find((m) => m.id === "copyName")?.hint).toBe("[dbo].[Order Details]");
+  expect(buildMenu(mk("table"), actions(), explorer).find((m) => m.id === "copyName")?.hint).toBe("[dbo].[Order Details]");
 });
 
 test("Select top 10 opens a query tab that runs the quoted select", () => {
@@ -414,7 +414,7 @@ test("Select top 10 opens a query tab that runs the quoted select", () => {
     database: "Ventas",
     object: { schema: "dbo", name: "Order Details", kind: "table" },
   };
-  buildMenu(row, actions()).find((m) => m.id === "selectTop")!.run();
+  buildMenu(row, actions(), explorer).find((m) => m.id === "selectTop")!.run();
   expect(spy).toHaveBeenCalledWith({
     kind: "query",
     connectionId: "c2",
@@ -422,7 +422,7 @@ test("Select top 10 opens a query tab that runs the quoted select", () => {
     sql: "SELECT TOP 10 * FROM [dbo].[Order Details];",
     run: true,
   });
-  buildMenu(row, actions()).find((m) => m.id === "structure")!.run();
+  buildMenu(row, actions(), explorer).find((m) => m.id === "structure")!.run();
   expect(spy).toHaveBeenLastCalledWith({ kind: "structure", connectionId: "c2", database: "Ventas", schema: "dbo", name: "Order Details" });
   spy.mockRestore();
 });
@@ -430,7 +430,7 @@ test("Select top 10 opens a query tab that runs the quoted select", () => {
 test("connection menu toggles Connect and Disconnect", () => {
   explorer.expanded.add("c2");
   const row = () => explorer.rows.find((r) => r.kind === "connection" && r.conn.id === "c2")!;
-  expect(buildMenu(row(), actions()).map((m) => m.id)).toEqual([
+  expect(buildMenu(row(), actions(), explorer).map((m) => m.id)).toEqual([
     "connect",
     "refresh",
     "newTab",
@@ -440,7 +440,7 @@ test("connection menu toggles Connect and Disconnect", () => {
     "delete",
   ]);
   explorer.state("c2").status = "connected";
-  expect(buildMenu(row(), actions())[0].id).toBe("disconnect");
+  expect(buildMenu(row(), actions(), explorer)[0].id).toBe("disconnect");
 });
 
 test("Copy name writes the quoted name to the clipboard", async () => {

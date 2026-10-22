@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { MenuItem } from "./tree.svelte";
+  import type { MenuItem } from "./tree";
 
   interface Props {
     items: MenuItem[];

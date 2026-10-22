@@ -6,7 +6,8 @@
   import ContextMenu from "./ContextMenu.svelte";
   import FolderDialog, { type FolderDialogMode } from "./FolderDialog.svelte";
   import TreeNode from "./TreeNode.svelte";
-  import { buildMenu, canMoveFolder, explorer, navigate, type DragItem, type MenuActions, type MenuItem, type Row } from "./tree.svelte";
+  import { canMoveFolder, navigate, type DragItem, type MenuActions, type MenuItem, type Row } from "./tree";
+  import { explorer, menuFor } from "./tree.svelte";
 
   interface Props {
     onnewconnection: () => void;
@@ -96,7 +97,7 @@
 
   function openMenu(row: Row, x: number, y: number) {
     explorer.focusKey = row.key;
-    const items = buildMenu(row, ui);
+    const items = menuFor(row, ui);
     if (items.length === 0) return;
     const returnTo = treeEl?.querySelectorAll<HTMLElement>('[role="treeitem"]')[rows.findIndex((r) => r.key === row.key)] ?? null;
     menu = { items, x, y, label: t("explorer.menu.label", { name: rowName(row) }), returnTo };
