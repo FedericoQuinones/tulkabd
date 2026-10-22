@@ -14,6 +14,8 @@
   import QueryPane from "./lib/pane/QueryPane.svelte";
   import StructureView from "./lib/structure/StructureView.svelte";
   import TabStrip from "./lib/tabs/TabStrip.svelte";
+  import Palette from "./lib/palette/Palette.svelte";
+  import { palette } from "./lib/palette/palette.svelte";
   import { shortcutAction } from "./lib/tabs/shortcuts";
   import { tabs } from "./lib/tabs/tabs.svelte";
 
@@ -52,6 +54,7 @@
   const remember = () => saveLayout({ width: explorerWidth, hidden: explorerHidden });
 
   function onrail(key: string) {
+    if (key === "rail.search") palette.show();
     if (key !== "rail.explorer") return;
     explorerHidden = !explorerHidden;
     remember();
@@ -87,7 +90,8 @@
     const action = shortcutAction(e, isMac);
     if (!action) return;
     e.preventDefault();
-    if (action === "new") tabs.newTab();
+    if (action === "palette") palette.show();
+    else if (action === "new") tabs.newTab();
     else if (tabs.activeId) tabs.close(tabs.activeId);
   }
 </script>
@@ -175,6 +179,9 @@
       }}
     />
   {/key}
+{/if}
+{#if palette.isOpen}
+  <Palette />
 {/if}
 {#if tabs.passwordRequest}
   <PasswordPrompt

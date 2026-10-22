@@ -233,5 +233,22 @@
   "explorer.move.action": "Move",
   "explorer.move.current": "current",
   "explorer.resize": "Resize the explorer",
-  "explorer.dismiss": "Dismiss"
+  "explorer.dismiss": "Dismiss",
+  "palette.label": "Search objects",
+  "palette.placeholder": "Search tables, views and procedures (Folder/ to scope)",
+  "palette.results": "Matching objects",
+  "palette.notConnected": "not connected",
+  "palette.none": "Nothing matches",
+  "palette.kind.table": "table",
+  "palette.kind.view": "view",
+  "palette.kind.procedure": "procedure",
+  "palette.footer": "{matches} in {databases}",
+  "palette.matchOne": "1 match",
+  "palette.matchMany": "{count} matches",
+  "palette.databaseOne": "1 database",
+  "palette.databaseMany": "{count} databases",
+  "palette.indexingOne": "indexing 1 database…",
+  "palette.indexingMany": "indexing {count} databases…",
+  "palette.keys.other": "↵ open · Ctrl ↵ top 10 · → definition",
+  "palette.keys.mac": "↵ open · ⌘ ↵ top 10 · → definition"
 }

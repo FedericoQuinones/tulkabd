@@ -65,7 +65,8 @@ class ExplorerStore {
   error = $state<string | null>(null);
   /** Short-lived confirmation, e.g. after Copy name. */
   toast = $state<string | null>(null);
-  passwordRequest = $state<{ conn: ConnectionConfig } | null>(null);
+  /** `then` runs once the connection succeeds (the palette opens its result with it). */
+  passwordRequest = $state<{ conn: ConnectionConfig; then?: () => void } | null>(null);
   persistDelayMs = 400;
 
   readonly rows: Row[] = $derived.by(() => this.flatten());
@@ -191,7 +192,8 @@ class ExplorerStore {
 
   // ---- connecting --------------------------------------------------------
 
-  async connect(id: string, password?: string): Promise<void> {
+  /** Connects the Explorer session; `then` runs once connected, after a password prompt if one is needed. */
+  async connect(id: string, password?: string, then?: () => void): Promise<void> {
     const conn = connections.list.find((c) => c.id === id);
     if (!conn) return;
     const st = this.state(id);
@@ -205,13 +207,14 @@ class ExplorerStore {
       await ipc.connectExplorer(id, password);
       if (!current()) return;
       st.status = "connected";
+      then?.();
       await this.loadDatabases(id);
     } catch (e) {
       if (!current()) return;
       const s = String(e);
       if (s === "password_required") {
         st.status = "offline";
-        this.passwordRequest = { conn };
+        this.passwordRequest = { conn, then };
       } else if (s === "closed") {
         // A disconnect or a newer connect won; its status event says the rest.
         if (st.status === "connecting") st.status = "offline";
@@ -228,7 +231,7 @@ class ExplorerStore {
   async submitPassword(password: string): Promise<void> {
     const req = this.passwordRequest;
     this.passwordRequest = null;
-    if (req) await this.connect(req.conn.id, password);
+    if (req) await this.connect(req.conn.id, password, req.then);
   }
 
   cancelPassword(): void {

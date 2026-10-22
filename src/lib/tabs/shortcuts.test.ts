@@ -26,3 +26,10 @@ test("held keys and handled events are ignored", () => {
   expect(shortcutAction(ev("t", { ctrlKey: true, repeat: true }), false)).toBeNull();
   expect(shortcutAction(ev("t", { ctrlKey: true, defaultPrevented: true }), false)).toBeNull();
 });
+test("ctrl+p opens the palette, also from a plain input", () => {
+  expect(shortcutAction(ev("p", { ctrlKey: true }), false)).toBe("palette");
+  expect(shortcutAction(ev("p", { metaKey: true }), true)).toBe("palette");
+  const input = { tagName: "INPUT", isContentEditable: false, closest: () => null } as unknown as HTMLElement;
+  expect(shortcutAction(ev("p", { ctrlKey: true }, input), false)).toBe("palette");
+  expect(shortcutAction(ev("p", { ctrlKey: true, repeat: true }), false)).toBeNull();
+});
