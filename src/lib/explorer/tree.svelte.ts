@@ -13,6 +13,7 @@ import {
   buildTree,
   canMoveFolder,
   keyOf,
+  narrowHits,
   OBJECT_KINDS,
   parseKey,
   quoteName,
@@ -57,6 +58,8 @@ class ExplorerStore {
   columns = $state.raw<Record<string, Loaded<ColumnInfo>>>({});
   filter = $state("");
   hits = $state.raw<PaletteHit[]>([]);
+  /** The query `hits` answer. */
+  private hitsQuery = "";
   focusKey = $state<string | null>(null);
   /** The last failed tree action (folder commands, copy); shown inline above the tree. */
   error = $state<string | null>(null);
@@ -367,13 +370,22 @@ class ExplorerStore {
     const q = query.trim();
     if (q.length < 2) {
       this.hits = [];
+      this.hitsQuery = "";
       return;
     }
+    // Until the answer arrives, show only the old hits that still match.
+    const extends_ = this.hitsQuery !== "" && q.toLowerCase().startsWith(this.hitsQuery.toLowerCase());
+    this.hits = extends_ ? narrowHits(this.hits, q) : [];
     try {
       const res = await ipc.searchObjects(q, 200);
-      if (token === this.searchToken) this.hits = res.hits;
+      if (token !== this.searchToken) return;
+      this.hits = res.hits;
+      this.hitsQuery = q;
     } catch {
-      if (token === this.searchToken) this.hits = [];
+      if (token === this.searchToken) {
+        this.hits = [];
+        this.hitsQuery = "";
+      }
     }
   }
 
@@ -734,6 +746,7 @@ class ExplorerStore {
     this.columns = {};
     this.filter = "";
     this.hits = [];
+    this.hitsQuery = "";
     this.focusKey = null;
     this.error = null;
     this.toast = null;

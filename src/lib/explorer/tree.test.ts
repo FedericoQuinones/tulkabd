@@ -470,3 +470,18 @@ test("a failed column load shows the error with Retry", async () => {
   expect(ipc.explorerColumns).toHaveBeenCalledTimes(2);
   expect(labels()).toContain("col:Id");
 });
+
+test("while a search is pending, old hits that no longer match are hidden", async () => {
+  vi.mocked(ipc.searchObjects).mockResolvedValueOnce(
+    response([hit({ schema: "dbo", name: "Pedidos", kind: "table" }), hit({ schema: "dbo", name: "Personas", kind: "view" })]),
+  );
+  await explorer.setFilter("pe");
+  expect(labels()).toContain("dbo.Personas");
+  vi.mocked(ipc.searchObjects).mockImplementation(() => new Promise(() => {}));
+  void explorer.setFilter("ped");
+  expect(labels()).toContain("dbo.Pedidos");
+  expect(labels()).not.toContain("dbo.Personas");
+  // A query that does not extend the previous one drops the old hits at once.
+  void explorer.setFilter("xy");
+  expect(labels()).not.toContain("dbo.Pedidos");
+});

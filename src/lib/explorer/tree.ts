@@ -1,7 +1,7 @@
 // Pure parts of the Explorer tree: names, the folder hierarchy, row types,
 // keyboard navigation and context menus. The stateful store is tree.svelte.ts.
 import { t } from "../i18n/t";
-import type { CachedDatabase, ColumnInfo, ConnectionConfig, DbObject, Folder, ObjectKind } from "../ipc";
+import type { CachedDatabase, ColumnInfo, ConnectionConfig, DbObject, Folder, ObjectKind, PaletteHit } from "../ipc";
 import { tabs } from "../tabs/tabs.svelte";
 
 /** `[schema].[name]` with `]` doubled; mirrors `qualified` in tulka-core. */
@@ -279,6 +279,24 @@ export function actionError(e: unknown): string {
   if (s === "not_found") return t("explorer.errors.notFound");
   if (s === "empty_name") return t("explorer.errors.emptyName");
   return t("explorer.errors.action", { error: s });
+}
+
+/**
+ * The hits that can still match `query`: its text after the last `/` (the
+ * folder scope) must appear in order in `schema.name`, as the fuzzy search needs.
+ */
+export function narrowHits(hits: PaletteHit[], query: string): PaletteHit[] {
+  const needle = Array.from(query.slice(query.lastIndexOf("/") + 1).toLowerCase().replace(/\s+/g, ""));
+  return hits.filter((h) => {
+    const hay = `${h.object.schema}.${h.object.name}`.toLowerCase();
+    let at = 0;
+    for (const ch of needle) {
+      at = hay.indexOf(ch, at);
+      if (at < 0) return false;
+      at += ch.length;
+    }
+    return true;
+  });
 }
 
 /** Parses a JSON row key; `null` for folder and connection ids. */
