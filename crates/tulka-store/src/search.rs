@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32String};
 use serde::Serialize;
 use tulka_core::DbObject;
@@ -143,7 +143,14 @@ impl SearchIndex {
         if query.is_empty() {
             return SearchResults::default();
         }
-        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        // Plain fuzzy words: `$`, `^`, `!` and `'` are name characters, not
+        // operators (`Sheet1$` is a common Excel-import name).
+        let pattern = Pattern::new(
+            query,
+            CaseMatching::Smart,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+        );
         let allowed: Vec<bool> = self
             .dbs
             .iter()
@@ -395,6 +402,20 @@ mod tests {
             assert_eq!(r.total_matches, 0);
             assert_eq!(r.databases_matched, 0);
         }
+    }
+
+    #[test]
+    fn operator_characters_match_literally() {
+        let idx = SearchIndex::build(vec![
+            e("c1", "db1", "dbo", "Sheet1$", ObjectKind::Table),
+            e("c1", "db1", "dbo", "!Import", ObjectKind::Table),
+            e("c1", "db1", "dbo", "Sheet2", ObjectKind::Table),
+        ]);
+        let all = SearchScope::default();
+        assert_eq!(names(&idx.search("Sheet1$", &all, 50)), ["dbo.Sheet1$"]);
+        assert_eq!(names(&idx.search("!imp", &all, 50)), ["dbo.!Import"]);
+        // `^` is no anchor: it must appear in the name.
+        assert!(idx.search("^sheet", &all, 50).hits.is_empty());
     }
 
     #[test]
