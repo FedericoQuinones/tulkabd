@@ -36,7 +36,6 @@ export interface ConnRuntime {
   indexing: string[];
 }
 
-
 type Loaded<T> = T[] | { error: string };
 
 /** Hears the end of a connect: `null` when connected, else the error. */
