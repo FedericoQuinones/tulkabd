@@ -16,8 +16,10 @@
     connectError?: string | null;
     /** Focus the editor when it mounts. */
     autofocus?: boolean;
+    /** Runs the sql; defaults to the pane's own run, which needs an open session. */
+    onrun?: (sql: string, lineOffset: number) => void;
   }
-  let { pane, onreconnect, onretry, connectError = null, autofocus = true }: Props = $props();
+  let { pane, onreconnect, onretry, connectError = null, autofocus = true, onrun }: Props = $props();
 
   let editor = $state<SqlEditor>();
 
@@ -28,7 +30,8 @@
 
   function run(target = editor?.target() ?? { sql: "", lineOffset: 0 }) {
     if (target.sql.trim() === "" || pane.status !== "idle" || pane.switching || !connection) return;
-    void pane.run(target.sql, target.lineOffset);
+    if (onrun) onrun(target.sql, target.lineOffset);
+    else void pane.run(target.sql, target.lineOffset);
   }
 </script>
 
@@ -36,7 +39,7 @@
   <PaneToolbar
     {connection}
     database={pane.database}
-    databases={pane.session?.databases ?? []}
+    databases={pane.session?.databases ?? (pane.database ? [pane.database] : [])}
     status={pane.status}
     switching={pane.switching}
     onrun={() => run()}

@@ -23,7 +23,14 @@
     {#if tab?.pane}
       {#key tab.id}
         <!-- Several groups remount at once (a split collapses, a session restores): only the active one takes the focus. -->
-        <QueryPane pane={tab.pane} autofocus={tabs.activeGroupId === groupId} connectError={tab.connectError} onreconnect={() => tabs.reconnect(tab.id)} onretry={() => tabs.retry(tab.id)} />
+        <QueryPane
+          pane={tab.pane}
+          autofocus={tabs.activeGroupId === groupId}
+          connectError={tab.connectError}
+          onreconnect={() => tabs.reconnect(tab.id)}
+          onretry={tab.name !== undefined ? () => tabs.retry(tab.id) : undefined}
+          onrun={(sql, lineOffset) => tabs.run(tab.id, sql, lineOffset)}
+        />
       {/key}
     {:else if tab?.kind === "structure"}
       {#key tab.id}

@@ -113,6 +113,7 @@
   "tabs.loadFailed": "Could not load: {error}",
   "tabs.retry": "Retry",
   "tabs.connectionDeleted": "This connection was deleted.",
+  "tabs.restoredWithoutConnection": "The connection this tab used no longer exists. Pick one in the Explorer to run it.",
   "structure.columns": "Columns",
   "structure.foreignKeys": "Foreign keys",
   "structure.indexes": "Indexes",

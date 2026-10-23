@@ -4,7 +4,9 @@ import type { ConnectionConfig } from "../ipc";
 import { connections } from "../connections/store.svelte";
 import { ENVIRONMENTS } from "../connections/env";
 import { PaneState } from "../pane/pane.svelte";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { groups, removeGroup, split, type Layout } from "../workspace/layout";
+import { snapshot, watchSession } from "../workspace/session";
 
 export type TabSpec =
   | { kind: "query"; connectionId?: string; database?: string; sql?: string; run?: boolean }
@@ -25,6 +27,12 @@ export interface Tab {
   name?: string;
   /** Why the last connect of this tab failed; shown in the tab's own toolbar. */
   connectError: string | null;
+  /** Query tabs: the text differs from the saved query or file it was opened from. */
+  dirty: boolean;
+  /** Query tabs opened from (or saved as) a saved query. */
+  savedQuery?: { database: string; name: string };
+  /** Query tabs opened from (or saved to) a `.sql` file, with the format to write it back in. */
+  file?: { path: string; encoding: "utf8" | "utf8Bom" | "utf16Le" | "utf16Be"; lineEnding: "lf" | "crlf" };
 }
 
 export interface PasswordRequest {
@@ -45,7 +53,12 @@ const newGroup = (): TabGroup => ({ id: `group-${crypto.randomUUID()}`, tabIds: 
 interface Pending {
   sql?: string;
   run: boolean;
+  /** Editor line of the first line of `sql` (0 when it is the whole document). */
+  lineOffset?: number;
 }
+
+/** Wait after the last change before the session is saved. */
+export const AUTOSAVE_MS = 1000;
 
 /** True when a command rejected because the Explorer has no session for the connection. */
 export function isNotConnected(e: unknown): boolean {
@@ -61,7 +74,7 @@ export function envColor(tab: Tab | null): string {
   return ENVIRONMENTS.find((e) => e.id === conn?.environment)?.color ?? "var(--control)";
 }
 
-class TabsStore {
+export class TabsStore {
   /** Every open tab, in opening order; `tabGroups` holds which group shows each one. */
   list = $state<Tab[]>([]);
   tabGroups = $state<TabGroup[]>([newGroup()]);
@@ -145,13 +158,14 @@ class TabsStore {
         schema: spec.schema,
         name: spec.name,
         connectError: null,
+        dirty: false,
       });
       return id;
     }
     const pane = new PaneState(id);
     const title = spec.kind === "definition" ? spec.name : `untitled-${++this.counter}`;
     if (spec.kind === "query" && spec.sql) pane.initialDoc = spec.sql;
-    const tab: Tab = { id, kind: "query", title, pane, connectError: null };
+    const tab: Tab = { id, kind: "query", title, pane, connectError: null, dirty: false };
     if (spec.kind === "definition") {
       tab.connectionId = spec.connectionId;
       tab.database = spec.database;
@@ -274,7 +288,7 @@ class TabsStore {
     } else if (result.kind === "ok") {
       const p = this.pending.get(id);
       this.pending.delete(id);
-      if (p?.run && p.sql) void pane.run(p.sql, 0);
+      if (p?.run && p.sql) void pane.run(p.sql, p.lineOffset ?? 0);
     }
   }
 
@@ -315,6 +329,23 @@ class TabsStore {
     if (this.activeId) this.reconnect(this.activeId);
   }
 
+  /**
+   * Runs sql in a query tab. A tab bound to a connection but without a session (restored at
+   * startup) connects first, asking for the password if needed, and runs once connected.
+   */
+  run(id: string, sql: string, lineOffset: number): void {
+    const pane = this.list.find((x) => x.id === id)?.pane;
+    if (!pane || pane.status !== "idle") return;
+    if (pane.session) {
+      void pane.run(sql, lineOffset);
+      return;
+    }
+    const conn = connections.list.find((c) => c.id === pane.connectionId);
+    if (!conn) return;
+    this.pending.set(id, { sql, run: true, lineOffset });
+    void this.connectTab(id, conn, undefined, pane.database ?? undefined);
+  }
+
   /** Reopens a query tab's session on the connection and database it was bound to. */
   reconnect(id: string): void {
     const tab = this.list.find((x) => x.id === id);
@@ -338,6 +369,66 @@ class TabsStore {
     }
   }
 
+  /**
+   * Replaces the whole workspace with a restored one (see `restore` in workspace/session). Nothing
+   * connects: a bound tab opens its session on its first Run. Untitled numbering continues after
+   * the highest restored `untitled-N`.
+   */
+  replaceWorkspace(w: { list: Tab[]; tabGroups: TabGroup[]; layout: Layout; activeGroupId: string }): void {
+    const old = this.list.map((x) => x.pane);
+    this.list = w.list;
+    this.tabGroups = w.tabGroups;
+    this.layout = w.layout;
+    this.activeGroupId = w.activeGroupId;
+    this.passwordRequests = [];
+    this.pending.clear();
+    this.counter = Math.max(0, ...w.list.map((x) => Number(/^untitled-(\d+)$/.exec(x.title)?.[1] ?? 0)));
+    for (const p of old) void p?.close();
+  }
+
+  /**
+   * Saves the session AUTOSAVE_MS after the last change (tabs, groups, layout, bindings or editor
+   * text), and right away when the window is asked to close. Returns a function that stops it.
+   */
+  startAutosave(save: (json: string) => Promise<void>): () => void {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
+    let unlisten: (() => void) | null = null;
+    // A failed save must not keep the window from closing (the close waits for this promise).
+    const flush = () => {
+      clearTimeout(timer);
+      timer = undefined;
+      return save(JSON.stringify(snapshot(this))).catch(() => {});
+    };
+    let first = true;
+    const stopEffect = $effect.root(() => {
+      $effect(() => {
+        watchSession(this);
+        if (first) {
+          first = false;
+          return;
+        }
+        clearTimeout(timer);
+        timer = setTimeout(() => void flush(), AUTOSAVE_MS);
+      });
+    });
+    getCurrentWindow()
+      .onCloseRequested(async () => {
+        if (!stopped) await flush();
+      })
+      .then((fn) => {
+        if (stopped) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      stopEffect();
+      unlisten?.();
+    };
+  }
+
   /** Closes every tab (used by tests). */
   async reset(): Promise<void> {
     const panes = this.list.map((x) => x.pane);
@@ -348,6 +439,7 @@ class TabsStore {
     this.activeGroupId = g.id;
     this.passwordRequests = [];
     this.pending.clear();
+    this.counter = 0;
     await Promise.all(panes.map((p) => p?.close()));
   }
 }

@@ -141,6 +141,7 @@
           ]),
           EditorView.updateListener.of((u) => {
             if (u.selectionSet || u.docChanged) report(u.view);
+            if (u.docChanged) pane.edits++;
           }),
     ];
     // Restore from the JSON saved on unmount: it carries text, selection and undo history, while

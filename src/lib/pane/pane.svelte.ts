@@ -53,6 +53,8 @@ export class PaneState {
   initialDoc = $state("");
   /** Bumped when `loadText` replaces the document; a mounted editor swaps its content. */
   docVersion = $state(0);
+  /** Bumped by the mounted editor on every document change; the session autosave watches it. */
+  edits = $state(0);
   /** Inline notice shown above the editor (e.g. a definition that could not load). */
   notice = $state<string | null>(null);
   /** CodeMirror state saved when the editor unmounts, so text, cursor and undo survive tab switches. */
@@ -69,13 +71,19 @@ export class PaneState {
   liveDoc: (() => string) | null = null;
   private loadedText: string | null = null;
 
+  /** The editor text right now: the mounted editor's, else the state saved on unmount, else `initialDoc`. */
+  text(): string {
+    if (this.liveDoc) return this.liveDoc();
+    const saved = this.editorState as { doc?: string } | null;
+    return saved ? (saved.doc ?? "") : this.initialDoc;
+  }
+
   /**
    * Puts loaded text (a definition) into the editor. It only replaces the content while the user
    * has not edited the tab: the document is empty or still the previously loaded text.
    */
   loadText(text: string) {
-    const saved = this.editorState as { doc?: string } | null;
-    const current = this.liveDoc ? this.liveDoc() : saved ? (saved.doc ?? "") : this.initialDoc;
+    const current = this.text();
     if (current !== "" && current !== this.loadedText) return;
     this.loadedText = text;
     this.initialDoc = text;

@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { t } from "./lib/i18n/t";
   import Rail from "./lib/shell/Rail.svelte";
   import StatusBar from "./lib/shell/StatusBar.svelte";
-  import type { ConnectionConfig, ParsedConnection } from "./lib/ipc";
+  import { loadSession, saveSession, type ConnectionConfig, type ParsedConnection } from "./lib/ipc";
   import ConnectionDialog from "./lib/connections/ConnectionDialog.svelte";
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
   import { connections } from "./lib/connections/store.svelte";
@@ -16,6 +16,7 @@
   import { shortcutAction } from "./lib/tabs/shortcuts";
   import { tabs } from "./lib/tabs/tabs.svelte";
   import Workspace from "./lib/workspace/Workspace.svelte";
+  import { parseSession, restore } from "./lib/workspace/session";
 
   // `undefined` = closed, `null` = new connection, otherwise edit this one.
   let dialog = $state<ConnectionConfig | null | undefined>(undefined);
@@ -43,6 +44,32 @@
 
   void explorer.init();
   void connections.loadStartupError();
+
+  // The saved session is restored before the workspace first renders (a mounting editor takes the
+  // focus only in the active group). Nothing connects. Autosave starts after, so an empty
+  // workspace never overwrites the saved one.
+  let restored = $state(false);
+  let destroyed = false;
+  let stopAutosave: (() => void) | null = null;
+  onDestroy(() => {
+    destroyed = true;
+    stopAutosave?.();
+  });
+  async function restoreSession() {
+    const [json] = await Promise.all([loadSession().catch(() => null), connections.refresh()]);
+    if (destroyed) return;
+    const session = parseSession(json);
+    if (session) {
+      // Unreadable connections file: keep the bindings rather than drop them all.
+      const ids = connections.error
+        ? session.tabs.flatMap((x) => (x.connectionId ? [x.connectionId] : []))
+        : connections.list.map((c) => c.id);
+      restore(tabs, session, { connectionIds: new Set(ids) });
+    }
+    restored = true;
+    stopAutosave = tabs.startAutosave(saveSession);
+  }
+  void restoreSession();
 
   const layout = loadLayout();
   let explorerWidth = $state(layout.width);
@@ -131,7 +158,7 @@
       </aside>
     {/if}
     <main class="workspace">
-      <Workspace />
+      {#if restored}<Workspace />{/if}
     </main>
   </div>
   <StatusBar
