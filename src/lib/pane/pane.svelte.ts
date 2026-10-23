@@ -83,10 +83,13 @@ export class PaneState {
     this.docVersion++;
   }
 
-  /** Closes the backend session, if one is open. */
+  /**
+   * Closes the backend session, if one is open or being opened. Closing while an open is in
+   * flight makes the backend reject that open, so it never lands after a newer one.
+   */
   async close(): Promise<void> {
     this.runId++;
-    if (!this.hasSession) return;
+    if (!this.hasSession && this.status !== "connecting") return;
     this.hasSession = false;
     await ipc.closeSession(this.tabId).catch(() => {});
   }
@@ -121,8 +124,7 @@ export class PaneState {
       }
       const info = await ipc.openSession(this.tabId, conn.id, database, password);
       if (token !== this.runId) {
-        // Unbound or closed while connecting: this session has no owner.
-        await ipc.closeSession(this.tabId).catch(() => {});
+        // Unbound or closed while connecting: close() already told the backend, which rejects it.
         return { kind: "busy" };
       }
       this.hasSession = true;

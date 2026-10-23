@@ -105,17 +105,34 @@ test("failed database switch keeps the database and reports the error", async ()
   expect(pane.messages.at(-1)?.kind).toBe("error");
 });
 
-test("an open that finishes after unbind is ignored and its session is closed", async () => {
+test("an open that finishes after unbind leaves the pane clean", async () => {
   const d = deferred<typeof info>();
   vi.mocked(ipc.openSession).mockReturnValueOnce(d.promise);
   pane.status = "idle";
   const opening = pane.open(conn);
+  await new Promise((r) => setTimeout(r, 0));
   pane.unbind();
-  vi.mocked(ipc.closeSession).mockClear();
   d.resolve(info);
   await opening;
   expect(pane.connectionId).toBeNull();
   expect(pane.session).toBeNull();
   expect(pane.status).toBe("idle");
-  expect(ipc.closeSession).toHaveBeenCalledWith("t1");
+});
+
+test("a stale open never closes the session of a newer open", async () => {
+  const a = deferred<typeof info>();
+  vi.mocked(ipc.openSession).mockReturnValueOnce(a.promise);
+  pane.status = "idle";
+  const openingA = pane.open(conn);
+  await new Promise((r) => setTimeout(r, 0));
+  vi.mocked(ipc.closeSession).mockClear();
+  pane.unbind();
+  expect(ipc.closeSession).toHaveBeenCalledTimes(1);
+  await pane.open(conn);
+  expect(pane.connectionId).toBe("c1");
+  a.resolve(info);
+  await openingA;
+  expect(ipc.closeSession).toHaveBeenCalledTimes(1);
+  expect(pane.session).not.toBeNull();
+  expect(pane.connectionId).toBe("c1");
 });
