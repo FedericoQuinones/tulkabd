@@ -1,11 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 
 /// Bump when the table layout changes; a mismatching file is discarded.
 const SESSION_VERSION: i64 = 1;
+
+/// How long a call waits on a file locked by another process.
+const BUSY_TIMEOUT: Duration = Duration::from_millis(200);
 
 const SCHEMA: &str = "
 CREATE TABLE session (
@@ -43,6 +46,8 @@ impl From<rusqlite::Error> for OpenError {
 
 fn try_open(path: &Path) -> Result<Connection, OpenError> {
     let conn = Connection::open(path)?;
+    // A file locked by another instance costs startup at most this long.
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     // The first read fails with "not a database" on garbage files.
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
@@ -237,7 +242,10 @@ mod tests {
                 .pragma_update(None, "locking_mode", "EXCLUSIVE")
                 .unwrap();
             other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+            let start = std::time::Instant::now();
             let store = SessionStore::open(&path);
+            // A locked file must not hold up startup for long.
+            assert!(start.elapsed() < std::time::Duration::from_secs(1));
             assert_eq!(store.load(), None);
             other.execute_batch("ROLLBACK").unwrap();
         }
