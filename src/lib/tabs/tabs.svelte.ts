@@ -331,8 +331,8 @@ export class TabsStore {
     } else if (result.kind === "error") {
       tab.connectError = t("explorer.connectFailed", { error: result.error });
     } else if (result.kind === "ok") {
-      // Bound to a database now: why Ctrl+S could not save no longer holds.
-      this.clearSaveNotice(pane);
+      // Bound to a database now: "pick a database" no longer holds.
+      if (pane.notice === t("queries.pickDatabase")) this.clearSaveNotice(pane);
       const p = this.pending.get(id);
       this.pending.delete(id);
       if (p?.run && p.sql) void pane.run(p.sql, p.lineOffset ?? 0);
@@ -483,7 +483,7 @@ export class TabsStore {
     if (tab.pane) this.clearSaveNotice(tab.pane);
   }
 
-  /** Why Ctrl+S did not save, shown above the editor until a save or a connect succeeds. */
+  /** Why the tab is not saved, shown above the editor until it is saved. */
   private saveNotice(pane: PaneState, text: string) {
     pane.notice = text;
     this.saveNotices.set(pane, text);
@@ -547,11 +547,15 @@ export class TabsStore {
     }
   }
 
-  /** Deletes a saved query. A tab showing it keeps its text, now unsaved: Ctrl+S writes it again. */
+  /** Deletes a saved query. A tab showing it keeps its text, now unsaved, and says Ctrl+S writes it again. */
   async deleteSavedQuery(database: string, name: string): Promise<void> {
     await queries.remove(database, name);
+    const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+    const notice = t("queries.deleted", { key: t(isMac ? "queries.saveKey.mac" : "queries.saveKey.other") });
     for (const tab of this.list) {
-      if (tab.savedQuery?.database === database && tab.savedQuery.name === name) tab.dirty = true;
+      if (tab.savedQuery?.database !== database || tab.savedQuery.name !== name) continue;
+      tab.dirty = true;
+      if (tab.pane) this.saveNotice(tab.pane, notice);
     }
   }
 

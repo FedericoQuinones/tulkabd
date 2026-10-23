@@ -270,6 +270,7 @@
   "queries.pickDatabase": "Pick a database to save this query under.",
   "queries.saveTitle": "Save query in {database}",
   "queries.saveFailed": "Could not save: {error}",
+  "queries.deleted": "This saved query was deleted. Press {key} to save it again.",
   "queries.name": "Name",
   "queries.save": "Save",
   "queries.cancel": "Cancel",

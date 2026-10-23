@@ -263,6 +263,11 @@ test("renaming a saved query renames its open tab; deleting it marks the tab uns
   await tabs.deleteSavedQuery("Ventas", "Reporte 2024");
   expect(ipc.deleteSavedQuery).toHaveBeenCalledWith("Ventas", "Reporte 2024");
   expect(tab.dirty).toBe(true);
+  expect(tab.savedQuery).toEqual({ database: "Ventas", name: "Reporte 2024" });
+  expect(tab.pane!.notice).toBe("This saved query was deleted. Press Ctrl S to save it again.");
+  await tabs.saveActive();
+  expect(ipc.saveQuery).toHaveBeenCalledWith("Ventas", "Reporte 2024", "SELECT 1;", true);
+  expect(tab.pane!.notice).toBeNull();
 });
 
 test("queries.list reads the cache by database", async () => {
