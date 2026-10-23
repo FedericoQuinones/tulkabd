@@ -38,6 +38,8 @@
   }
 
   function onkeydown(e: KeyboardEvent) {
+    // Enter, Esc and the arrows belong to the IME while it composes.
+    if (e.isComposing) return;
     // Ctrl+P again keeps the palette (and stops the webview from printing).
     if ((isMac ? e.metaKey : e.ctrlKey) && e.key.toLowerCase() === "p") {
       e.preventDefault();

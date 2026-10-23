@@ -194,6 +194,25 @@ test("a cancelled password prompt opens nothing", async () => {
   expect(open).not.toHaveBeenCalled();
 });
 
+test("keys during IME composition do nothing", async () => {
+  const open = vi.spyOn(tabs, "open").mockReturnValue("t");
+  vi.mocked(ipc.searchObjects).mockResolvedValue(response([hit({ name: "Pedidos" })]));
+  palette.show();
+  cmp = mount(Palette, { target: document.body });
+  await palette.search("ped");
+  flushSync();
+  const input = document.querySelector("input")!;
+  for (const key of ["Enter", "Escape", "ArrowDown"]) {
+    const e = new KeyboardEvent("keydown", { key, isComposing: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(e);
+    expect(e.defaultPrevented).toBe(false);
+  }
+  await flush();
+  expect(open).not.toHaveBeenCalled();
+  expect(palette.isOpen).toBe(true);
+  expect(palette.selected).toBe(0);
+});
+
 test("the footer counts matches and databases, and says when databases are indexing", async () => {
   vi.mocked(ipc.searchObjects).mockResolvedValue(response([hit({ name: "Pedidos" }), hit({ name: "Pagos", database: "Hist" })], 3));
   palette.show();
