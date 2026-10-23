@@ -48,8 +48,9 @@ pub async fn delete_saved_query(
     tulka_app::delete_saved_query(&state, database, name).await
 }
 
-/// Shows the query's `.sql` file in the system file manager. Called from
-/// Rust, so the UI needs no opener permission.
+/// Shows the query's `.sql` file in the system file manager. Uses the
+/// opener's free function from Rust: the plugin is not registered, so the
+/// webview gets no opener commands.
 #[tauri::command]
 pub async fn reveal_saved_query(
     state: State<'_, AppState>,

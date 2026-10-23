@@ -37,9 +37,6 @@ pub fn run() {
     let _ = STARTED.set(Instant::now());
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
-        // Used from Rust only (`reveal_saved_query`); the UI has no opener
-        // permission.
-        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // The state needs the AppHandle (to emit events), so it is built
             // here. Tauri runs setup before the webview can invoke a command.
