@@ -213,6 +213,17 @@ test("keys during IME composition do nothing", async () => {
   expect(palette.selected).toBe(0);
 });
 
+test("Ctrl+P inside the palette is swallowed on a Cyrillic layout too", () => {
+  palette.show();
+  cmp = mount(Palette, { target: document.body });
+  flushSync();
+  const input = document.querySelector("input")!;
+  const e = new KeyboardEvent("keydown", { key: "з", code: "KeyP", ctrlKey: true, bubbles: true, cancelable: true });
+  input.dispatchEvent(e);
+  expect(e.defaultPrevented).toBe(true);
+  expect(palette.isOpen).toBe(true);
+});
+
 test("the footer counts matches and databases, and says when databases are indexing", async () => {
   vi.mocked(ipc.searchObjects).mockResolvedValue(response([hit({ name: "Pedidos" }), hit({ name: "Pagos", database: "Hist" })], 3));
   palette.show();

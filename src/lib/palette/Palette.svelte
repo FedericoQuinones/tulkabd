@@ -4,6 +4,7 @@
   import { t } from "../i18n/t";
   import { highlight, paletteKey } from "./hits";
   import { palette } from "./palette.svelte";
+  import { shortcutLetter } from "../tabs/shortcuts";
 
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
@@ -41,7 +42,7 @@
     // Enter, Esc and the arrows belong to the IME while it composes.
     if (e.isComposing) return;
     // Ctrl+P again keeps the palette (and stops the webview from printing).
-    if ((isMac ? e.metaKey : e.ctrlKey) && e.key.toLowerCase() === "p") {
+    if ((isMac ? e.metaKey : e.ctrlKey) && shortcutLetter(e) === "p") {
       e.preventDefault();
       return;
     }
