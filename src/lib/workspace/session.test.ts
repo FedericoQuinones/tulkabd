@@ -305,3 +305,40 @@ test("an unedited definition saves no text and reloads fresh text", async () => 
 
   expect(tabs.list[0].pane!.text()).toBe("CREATE VIEW v AS SELECT 3");
 });
+
+test("closing the window is never blocked by a snapshot that throws or a save that fails or hangs", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const id = tabs.open({ kind: "query" });
+  const pane = tabs.list.find((x) => x.id === id)!.pane!;
+
+  pane.liveDoc = () => {
+    throw new Error("editor gone");
+  };
+  const save = vi.fn(async (_json: string) => {});
+  let stop = tabs.startAutosave(save);
+  await Promise.resolve();
+  await expect(closeRequested!()).resolves.toBeUndefined();
+  expect(save).not.toHaveBeenCalled();
+  stop();
+
+  pane.liveDoc = null;
+  const failing = vi.fn(async (_json: string) => {
+    throw "disk full";
+  });
+  stop = tabs.startAutosave(failing);
+  await Promise.resolve();
+  await expect(closeRequested!()).resolves.toBeUndefined();
+  expect(failing).toHaveBeenCalledTimes(1);
+  stop();
+
+  const hanging = vi.fn((_json: string) => new Promise<void>(() => {}));
+  stop = tabs.startAutosave(hanging);
+  await Promise.resolve();
+  let closed = false;
+  void closeRequested!().then(() => (closed = true));
+  await vi.advanceTimersByTimeAsync(1999);
+  expect(closed).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(closed).toBe(true);
+  stop();
+});

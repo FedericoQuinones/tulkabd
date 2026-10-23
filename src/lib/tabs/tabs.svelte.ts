@@ -59,6 +59,19 @@ interface Pending {
 
 /** Wait after the last change before the session is saved. */
 export const AUTOSAVE_MS = 1000;
+/** Longest a save may hold up the next one, or the window close. */
+export const SAVE_TIMEOUT_MS = 2000;
+
+/** Resolves when `p` settles or after `ms`, whichever comes first; never rejects. */
+function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    p.catch(() => {}).finally(() => {
+      clearTimeout(t);
+      resolve();
+    });
+  });
+}
 
 /** True when a command rejected because the Explorer has no session for the connection. */
 export function isNotConnected(e: unknown): boolean {
@@ -394,11 +407,17 @@ export class TabsStore {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
     let unlisten: (() => void) | null = null;
-    // A failed save must not keep the window from closing (the close waits for this promise).
-    const flush = () => {
+    // Never rejects and never hangs: the window close waits for this promise.
+    const flush = (): Promise<void> => {
       clearTimeout(timer);
       timer = undefined;
-      return save(JSON.stringify(snapshot(this))).catch(() => {});
+      let saving: Promise<unknown>;
+      try {
+        saving = save(JSON.stringify(snapshot(this)));
+      } catch {
+        return Promise.resolve();
+      }
+      return settleWithin(saving, SAVE_TIMEOUT_MS);
     };
     let first = true;
     const stopEffect = $effect.root(() => {
