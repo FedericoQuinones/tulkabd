@@ -342,3 +342,31 @@ test("closing the window is never blocked by a snapshot that throws or a save th
   expect(closed).toBe(true);
   stop();
 });
+
+test("typing without a pause still saves every 5 s", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const id = tabs.open({ kind: "query" });
+  const pane = tabs.list.find((x) => x.id === id)!.pane!;
+  const save = vi.fn(async (_json: string) => {});
+  const stop = tabs.startAutosave(save);
+  flushSync();
+  const type = (times: number) => {
+    for (let i = 0; i < times; i++) {
+      pane.edits++;
+      flushSync();
+      vi.advanceTimersByTime(500);
+    }
+  };
+  type(9); // t = 4.5 s
+  expect(save).not.toHaveBeenCalled();
+  type(1); // t = 5 s
+  expect(save).toHaveBeenCalledTimes(1);
+  type(9); // t = 9.5 s
+  expect(save).toHaveBeenCalledTimes(1);
+  type(1); // t = 10 s: 5 s after the first unsaved change
+  expect(save).toHaveBeenCalledTimes(2);
+  // That save already holds the last change: nothing is pending.
+  vi.advanceTimersByTime(1000);
+  expect(save).toHaveBeenCalledTimes(2);
+  stop();
+});

@@ -59,6 +59,8 @@ interface Pending {
 
 /** Wait after the last change before the session is saved. */
 export const AUTOSAVE_MS = 1000;
+/** Longest a change waits to be saved while changes keep coming. */
+export const AUTOSAVE_MAX_WAIT_MS = 5000;
 /** Longest a save may hold up the next one, or the window close. */
 export const SAVE_TIMEOUT_MS = 2000;
 
@@ -405,12 +407,15 @@ export class TabsStore {
    */
   startAutosave(save: (json: string) => Promise<void>): () => void {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // Started by the first unsaved change, so continuous typing still saves.
+    let maxTimer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
     let unlisten: (() => void) | null = null;
     // Never rejects and never hangs: the window close waits for this promise.
     const flush = (): Promise<void> => {
       clearTimeout(timer);
-      timer = undefined;
+      clearTimeout(maxTimer);
+      timer = maxTimer = undefined;
       let saving: Promise<unknown>;
       try {
         saving = save(JSON.stringify(snapshot(this)));
@@ -429,6 +434,7 @@ export class TabsStore {
         }
         clearTimeout(timer);
         timer = setTimeout(() => void flush(), AUTOSAVE_MS);
+        maxTimer ??= setTimeout(() => void flush(), AUTOSAVE_MAX_WAIT_MS);
       });
     });
     getCurrentWindow()
@@ -443,6 +449,7 @@ export class TabsStore {
     return () => {
       stopped = true;
       clearTimeout(timer);
+      clearTimeout(maxTimer);
       stopEffect();
       unlisten?.();
     };
