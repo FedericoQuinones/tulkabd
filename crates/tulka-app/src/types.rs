@@ -149,7 +149,8 @@ pub struct SavedQueryHit {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedQuery {
-    /// The database it belongs to (exact, case-sensitive).
+    /// The database it belongs to, compared exactly where the file system
+    /// allows (see [`crate::queries`]).
     pub database: String,
     pub name: String,
     /// Last modification of the file, Unix milliseconds (0 if unknown).

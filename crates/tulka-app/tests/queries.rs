@@ -143,10 +143,24 @@ fn save_then_list_shows_it() {
 }
 
 #[test]
-fn database_names_are_case_sensitive() {
-    let (_dir, s) = store();
-    s.save("Ventas", "q", "SELECT 1", false).unwrap();
-    assert!(s.list(Some("ventas")).is_empty());
+fn database_names_follow_the_file_system_case() {
+    let (dir, s) = store();
+    s.save("Ventas", "Reporte", "SELECT 1", false).unwrap();
+    let probe = dir.path().join("Probe");
+    std::fs::write(&probe, "x").unwrap();
+    let case_sensitive = !dir.path().join("probe").exists();
+    if case_sensitive {
+        assert!(s.list(Some("ventas")).is_empty());
+        s.save("ventas", "Reporte", "SELECT 2", false).unwrap();
+        assert_eq!(s.read("Ventas", "Reporte").unwrap(), "SELECT 1");
+    } else {
+        // Windows, macOS: one folder for both, and nothing is overwritten.
+        assert_eq!(
+            s.save("ventas", "Reporte", "SELECT 2", false),
+            Err("exists".into())
+        );
+        assert_eq!(s.read("Ventas", "Reporte").unwrap(), "SELECT 1");
+    }
 }
 
 #[test]

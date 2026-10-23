@@ -169,7 +169,7 @@ export interface SavedQueryHit {
 }
 /** A query saved as `<data dir>/queries/<database>/<name>.sql`. */
 export interface SavedQuery {
-  /** Exact (case-sensitive) database name. */
+  /** The database, compared exactly; on a case-insensitive file system names differing only in case share one folder. */
   database: string;
   name: string;
   /** Last change of the file, Unix milliseconds (0 if unknown). */

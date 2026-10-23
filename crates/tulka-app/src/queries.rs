@@ -12,7 +12,11 @@
 //! an encoded name is never empty, `.`, `..` or a path with separators:
 //! every path stays one directory below the root. [`decode_component`]
 //! accepts only the exact output of [`encode_component`]; files with any
-//! other name are ignored. Names are compared exactly (case-sensitive).
+//! other name are ignored. Names are compared exactly (case-sensitive), as
+//! far as the file system allows: on a case-insensitive one (Windows,
+//! macOS) names that differ only in case share one folder or file, as SQL
+//! Server's default collation would, and saving without `overwrite` fails
+//! with `"exists"` instead of overwriting the other one.
 //!
 //! # Writes and the index
 //!
