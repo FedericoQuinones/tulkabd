@@ -186,7 +186,7 @@ class TabsStore {
       pane.notice = null;
       pane.loadText(text);
     } catch (e) {
-      pane.notice = isNotConnected(e) ? t("tabs.notConnected") : t("tabs.loadFailed", { error: String(e) });
+      pane.notice = isNotConnected(e) ? t("tabs.definitionNotConnected") : t("tabs.loadFailed", { error: String(e) });
     }
   }
 

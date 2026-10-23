@@ -106,6 +106,7 @@
   "tabs.newKey.mac": "⌘ T",
   "tabs.emptyHint": "Or pick a connection in the Explorer.",
   "tabs.notConnected": "Connect this server in the Explorer to load its structure.",
+  "tabs.definitionNotConnected": "Connect this server in the Explorer to load its definition.",
   "tabs.loadFailed": "Could not load: {error}",
   "tabs.retry": "Retry",
   "structure.columns": "Columns",

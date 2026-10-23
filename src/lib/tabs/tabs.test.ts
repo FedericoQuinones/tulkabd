@@ -105,7 +105,7 @@ test("a definition that needs the Explorer shows an inline notice and retries", 
   vi.mocked(ipc.objectDefinition).mockRejectedValueOnce("not_connected").mockResolvedValueOnce("CREATE VIEW v");
   const id = tabs.open({ kind: "definition", connectionId: "c1", database: "Sales", schema: "dbo", name: "v" });
   await flush();
-  expect(tabs.list[0].pane!.notice).not.toBeNull();
+  expect(tabs.list[0].pane!.notice).toBe("Connect this server in the Explorer to load its definition.");
   await tabs.retry(id);
   expect(tabs.list[0].pane!.notice).toBeNull();
   expect(tabs.list[0].pane!.initialDoc).toBe("CREATE VIEW v");
