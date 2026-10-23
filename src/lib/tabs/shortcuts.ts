@@ -13,8 +13,8 @@ export function shortcutLetter(e: KeyboardEvent): string {
 
 /**
  * Maps a keydown to an app shortcut (Ctrl+T / Ctrl+W / Ctrl+P / Ctrl+S / Ctrl+\\ / Ctrl+Shift+\\, Cmd on
- * macOS). Plain inputs keep their keys; the code editor is allowed, so Ctrl+W closes with the caret
- * in it. Ctrl+P and Ctrl+S work from anywhere: no input uses them.
+ * macOS). Plain inputs keep their keys; the code editor is allowed, so Ctrl+W closes and Ctrl+S saves
+ * with the caret in it. Ctrl+P works from anywhere: no input uses it.
  */
 export function shortcutAction(e: KeyboardEvent, isMac: boolean): ShortcutAction | null {
   if (e.repeat || e.defaultPrevented) return null;
@@ -25,11 +25,10 @@ export function shortcutAction(e: KeyboardEvent, isMac: boolean): ShortcutAction
   if (e.shiftKey && !backslash) return null;
   const key = shortcutLetter(e);
   if (key === "p") return "palette";
-  if (key === "s") return "save";
   const el = e.target as HTMLElement | null;
   if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) {
     if (!el.closest?.(".cm-editor")) return null;
   }
   if (backslash) return e.shiftKey ? "splitDown" : "splitRight";
-  return key === "t" ? "new" : key === "w" ? "close" : null;
+  return key === "t" ? "new" : key === "w" ? "close" : key === "s" ? "save" : null;
 }
