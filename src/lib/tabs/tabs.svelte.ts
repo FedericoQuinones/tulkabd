@@ -411,18 +411,34 @@ export class TabsStore {
     let maxTimer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
     let unlisten: (() => void) | null = null;
+    const write = (json: string): Promise<void> => {
+      let saving: Promise<unknown>;
+      try {
+        saving = save(json);
+      } catch {
+        return Promise.resolve();
+      }
+      return settleWithin(saving, SAVE_TIMEOUT_MS);
+    };
+    // Saves run one after another, so an older one never lands after a newer one.
+    let queue: Promise<void> | null = null;
     // Never rejects and never hangs: the window close waits for this promise.
     const flush = (): Promise<void> => {
       clearTimeout(timer);
       clearTimeout(maxTimer);
       timer = maxTimer = undefined;
-      let saving: Promise<unknown>;
+      let json: string;
       try {
-        saving = save(JSON.stringify(snapshot(this)));
+        json = JSON.stringify(snapshot(this));
       } catch {
-        return Promise.resolve();
+        return queue ?? Promise.resolve();
       }
-      return settleWithin(saving, SAVE_TIMEOUT_MS);
+      const next: Promise<void> = queue ? queue.then(() => write(json)) : write(json);
+      queue = next;
+      void next.then(() => {
+        if (queue === next) queue = null;
+      });
+      return next;
     };
     let first = true;
     const stopEffect = $effect.root(() => {

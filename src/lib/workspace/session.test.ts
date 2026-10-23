@@ -350,23 +350,53 @@ test("typing without a pause still saves every 5 s", async () => {
   const save = vi.fn(async (_json: string) => {});
   const stop = tabs.startAutosave(save);
   flushSync();
-  const type = (times: number) => {
+  const type = async (times: number) => {
     for (let i = 0; i < times; i++) {
       pane.edits++;
       flushSync();
-      vi.advanceTimersByTime(500);
+      await vi.advanceTimersByTimeAsync(500);
     }
   };
-  type(9); // t = 4.5 s
+  await type(9); // t = 4.5 s
   expect(save).not.toHaveBeenCalled();
-  type(1); // t = 5 s
+  await type(1); // t = 5 s
   expect(save).toHaveBeenCalledTimes(1);
-  type(9); // t = 9.5 s
+  await type(9); // t = 9.5 s
   expect(save).toHaveBeenCalledTimes(1);
-  type(1); // t = 10 s: 5 s after the first unsaved change
+  await type(1); // t = 10 s: 5 s after the first unsaved change
   expect(save).toHaveBeenCalledTimes(2);
   // That save already holds the last change: nothing is pending.
-  vi.advanceTimersByTime(1000);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(save).toHaveBeenCalledTimes(2);
+  stop();
+});
+
+test("the close save waits for a save already in flight, so it lands last", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const id = tabs.open({ kind: "query", sql: "SELECT old" });
+  const pane = tabs.list.find((x) => x.id === id)!.pane!;
+  const done: (() => void)[] = [];
+  const save = vi.fn((_json: string) => new Promise<void>((r) => done.push(r)));
+  const stop = tabs.startAutosave(save);
+  await Promise.resolve();
+  pane.edits++;
+  flushSync();
+  vi.advanceTimersByTime(1000);
+  expect(save).toHaveBeenCalledTimes(1);
+
+  pane.initialDoc = "SELECT new";
+  let closed = false;
+  void closeRequested!().then(() => (closed = true));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(save).toHaveBeenCalledTimes(1);
+
+  done[0]();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(save).toHaveBeenCalledTimes(2);
+  expect(parseSession(save.mock.calls[1][0])!.tabs[0]).toMatchObject({ text: "SELECT new" });
+  expect(closed).toBe(false);
+  done[1]();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(closed).toBe(true);
   stop();
 });
