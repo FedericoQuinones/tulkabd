@@ -43,7 +43,9 @@
 //!
 //! The Explorer (sessions, background indexing, metadata cache and search
 //! index) has its own state and locks; see [`crate::explorer`]. So do the
-//! saved queries; see [`crate::queries`].
+//! saved queries; see [`crate::queries`]. The paths of `.sql` files from
+//! disk the file commands may touch sit behind their own short-held mutex;
+//! see [`crate::files`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +59,7 @@ use tulka_mssql::MssqlDriver;
 use tulka_store::{MetaCache, SessionStore};
 
 use crate::explorer::Explorer;
+use crate::files::AllowedFiles;
 use crate::queries::{QueriesStore, SavedQueries};
 use crate::results::ResultBuffer;
 use crate::types::AppEvents;
@@ -81,6 +84,8 @@ pub struct AppState {
     pub(crate) session: Arc<SessionStore>,
     /// The saved `.sql` files and their palette index.
     pub(crate) queries: Arc<SavedQueries>,
+    /// The `.sql` files from disk the file commands may read and write.
+    pub(crate) files: AllowedFiles,
 }
 
 /// A result buffer shared between the run that fills it and the commands
@@ -135,6 +140,7 @@ impl AppState {
             explorer: Explorer::empty(),
             session: Arc::new(SessionStore::in_memory()),
             queries: SavedQueries::unavailable(),
+            files: AllowedFiles::default(),
         })
     }
 
@@ -158,6 +164,7 @@ impl AppState {
             explorer: Explorer::empty(),
             session: Arc::new(SessionStore::in_memory()),
             queries: SavedQueries::unavailable(),
+            files: AllowedFiles::default(),
         }
     }
 

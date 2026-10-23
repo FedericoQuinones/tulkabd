@@ -1,0 +1,429 @@
+//! `.sql` files from disk (plan D7): decoding and encoding, the allowed
+//! paths and the read and write commands.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use tempfile::TempDir;
+use tulka_app::*;
+use tulka_core::{ConfigStore, MemoryStore};
+
+/// `s` as UTF-16 LE with a BOM, the way SSMS saves.
+fn utf16le_bom(s: &str) -> Vec<u8> {
+    let mut out = vec![0xFF, 0xFE];
+    out.extend(s.encode_utf16().flat_map(u16::to_le_bytes));
+    out
+}
+
+fn utf16be_bom(s: &str) -> Vec<u8> {
+    let mut out = vec![0xFE, 0xFF];
+    out.extend(s.encode_utf16().flat_map(u16::to_be_bytes));
+    out
+}
+
+fn utf8_bom(s: &str) -> Vec<u8> {
+    [&[0xEF, 0xBB, 0xBF][..], s.as_bytes()].concat()
+}
+
+/// Non-ASCII, a character outside the BMP (a surrogate pair in UTF-16) and
+/// CRLF line endings.
+const SSMS: &str = "SELECT N'Año ✓ 😀'\r\nFROM dbo.Pedidos\r\nGO\r\n";
+const SSMS_TEXT: &str = "SELECT N'Año ✓ 😀'\nFROM dbo.Pedidos\nGO\n";
+
+// ------------------------------------------------------------ decoding
+
+#[test]
+fn utf16_le_with_bom_and_crlf_decodes_and_encodes_back_to_the_same_bytes() {
+    let bytes = utf16le_bom(SSMS);
+    let file = decode_text(&bytes).unwrap();
+    assert_eq!(file.text, SSMS_TEXT);
+    assert_eq!(file.encoding, FileEncoding::Utf16Le);
+    assert_eq!(file.line_ending, LineEnding::Crlf);
+    assert_eq!(
+        encode_text(&file.text, file.encoding, file.line_ending),
+        bytes
+    );
+}
+
+#[test]
+fn utf16_be_with_bom_round_trips() {
+    let bytes = utf16be_bom(SSMS);
+    let file = decode_text(&bytes).unwrap();
+    assert_eq!(file.text, SSMS_TEXT);
+    assert_eq!(file.encoding, FileEncoding::Utf16Be);
+    assert_eq!(file.line_ending, LineEnding::Crlf);
+    assert_eq!(
+        encode_text(&file.text, file.encoding, file.line_ending),
+        bytes
+    );
+}
+
+#[test]
+fn utf8_with_bom_round_trips() {
+    let bytes = utf8_bom(SSMS);
+    let file = decode_text(&bytes).unwrap();
+    assert_eq!(file.text, SSMS_TEXT);
+    assert_eq!(file.encoding, FileEncoding::Utf8Bom);
+    assert_eq!(file.line_ending, LineEnding::Crlf);
+    assert_eq!(
+        encode_text(&file.text, file.encoding, file.line_ending),
+        bytes
+    );
+}
+
+#[test]
+fn utf8_without_bom_round_trips() {
+    let bytes = SSMS_TEXT.as_bytes();
+    let file = decode_text(bytes).unwrap();
+    assert_eq!(file.text, SSMS_TEXT);
+    assert_eq!(file.encoding, FileEncoding::Utf8);
+    assert_eq!(file.line_ending, LineEnding::Lf);
+    assert_eq!(
+        encode_text(&file.text, file.encoding, file.line_ending),
+        bytes
+    );
+
+    let crlf = decode_text(SSMS.as_bytes()).unwrap();
+    assert_eq!(crlf.text, SSMS_TEXT);
+    assert_eq!(
+        (crlf.encoding, crlf.line_ending),
+        (FileEncoding::Utf8, LineEnding::Crlf)
+    );
+    assert_eq!(
+        encode_text(&crlf.text, crlf.encoding, crlf.line_ending),
+        SSMS.as_bytes()
+    );
+}
+
+#[test]
+fn empty_files_are_text() {
+    let empty = decode_text(b"").unwrap();
+    assert_eq!(
+        (empty.text.as_str(), empty.encoding, empty.line_ending),
+        ("", FileEncoding::Utf8, LineEnding::Lf)
+    );
+    let bom_only = decode_text(&[0xFF, 0xFE]).unwrap();
+    assert_eq!(
+        (bom_only.text.as_str(), bom_only.encoding),
+        ("", FileEncoding::Utf16Le)
+    );
+    assert_eq!(
+        encode_text("", FileEncoding::Utf16Le, LineEnding::Crlf),
+        [0xFF, 0xFE]
+    );
+}
+
+#[test]
+fn the_most_frequent_line_ending_wins_and_crlf_becomes_lf_inside() {
+    let file = decode_text(b"a\r\nb\r\nc\nd").unwrap();
+    assert_eq!(file.line_ending, LineEnding::Crlf);
+    assert_eq!(file.text, "a\nb\nc\nd");
+    let file = decode_text(b"a\nb\nc\r\nd").unwrap();
+    assert_eq!(file.line_ending, LineEnding::Lf);
+    assert_eq!(file.text, "a\nb\nc\nd");
+    // Written back, every line ends the same way.
+    assert_eq!(
+        encode_text("a\nb\n", FileEncoding::Utf8, LineEnding::Crlf),
+        b"a\r\nb\r\n"
+    );
+    assert_eq!(
+        encode_text("a\nb\n", FileEncoding::Utf8, LineEnding::Lf),
+        b"a\nb\n"
+    );
+}
+
+#[test]
+fn binary_bytes_are_not_text() {
+    // A PNG header: not UTF-8, no BOM.
+    let png = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+    ];
+    assert_eq!(decode_text(&png).unwrap_err(), NOT_TEXT);
+    // Valid UTF-8 with NUL bytes: UTF-16 without a BOM, or a binary file.
+    let no_bom: Vec<u8> = "SELECT 1"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    assert_eq!(decode_text(&no_bom).unwrap_err(), NOT_TEXT);
+    // UTF-8 after a UTF-8 BOM must still be valid.
+    assert_eq!(
+        decode_text(&[0xEF, 0xBB, 0xBF, 0xFF]).unwrap_err(),
+        NOT_TEXT
+    );
+}
+
+#[test]
+fn malformed_utf16_is_not_text() {
+    // An odd number of bytes after the BOM.
+    let mut odd = utf16le_bom("SELECT 1");
+    odd.push(0x41);
+    assert_eq!(decode_text(&odd).unwrap_err(), NOT_TEXT);
+    // An unpaired surrogate.
+    assert_eq!(
+        decode_text(&[0xFF, 0xFE, 0x00, 0xD8, 0x41, 0x00]).unwrap_err(),
+        NOT_TEXT
+    );
+    // UTF-32 LE starts like UTF-16 LE, then has NULs.
+    assert_eq!(
+        decode_text(&[0xFF, 0xFE, 0x00, 0x00, 0x41, 0x00, 0x00, 0x00]).unwrap_err(),
+        NOT_TEXT
+    );
+}
+
+#[test]
+fn encodings_and_line_endings_serialize_as_the_ui_expects() {
+    let names: Vec<String> = [
+        FileEncoding::Utf8,
+        FileEncoding::Utf8Bom,
+        FileEncoding::Utf16Le,
+        FileEncoding::Utf16Be,
+    ]
+    .iter()
+    .map(|e| serde_json::to_string(e).unwrap())
+    .collect();
+    assert_eq!(
+        names,
+        ["\"utf8\"", "\"utf8Bom\"", "\"utf16Le\"", "\"utf16Be\""]
+    );
+    assert_eq!(serde_json::to_string(&LineEnding::Lf).unwrap(), "\"lf\"");
+    assert_eq!(
+        serde_json::to_string(&LineEnding::Crlf).unwrap(),
+        "\"crlf\""
+    );
+    let back: FileEncoding = serde_json::from_str("\"utf16Le\"").unwrap();
+    assert_eq!(back, FileEncoding::Utf16Le);
+}
+
+// ------------------------------------------------------------ commands
+
+fn state(dir: &TempDir) -> AppState {
+    AppState::new(
+        ConfigStore::at(dir.path().join("connections.json")),
+        Arc::new(MemoryStore::default()),
+        vec![],
+    )
+    .unwrap()
+}
+
+fn path_string(p: &Path) -> String {
+    p.to_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn paths_that_were_not_allowed_are_neither_read_nor_written() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    let file = dir.path().join("q.sql");
+    std::fs::write(&file, "SELECT 1").unwrap();
+    let path = path_string(&file);
+
+    assert_eq!(
+        read_sql_file(&st, path.clone()).await.unwrap_err(),
+        NOT_ALLOWED
+    );
+    let err = write_sql_file(
+        &st,
+        path.clone(),
+        "DROP TABLE t".into(),
+        FileEncoding::Utf8,
+        LineEnding::Lf,
+    )
+    .await;
+    assert_eq!(err.unwrap_err(), NOT_ALLOWED);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 1");
+}
+
+#[tokio::test]
+async fn only_absolute_sql_paths_are_allowed() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    let sql = path_string(&dir.path().join("a.sql"));
+    let upper = path_string(&dir.path().join("B.SQL"));
+    let txt = path_string(&dir.path().join("notes.txt"));
+    let bare = path_string(&dir.path().join("sql"));
+    let allowed = allow_paths(
+        &st,
+        vec![
+            sql.clone(),
+            txt.clone(),
+            "relative.sql".into(),
+            upper.clone(),
+            bare,
+        ],
+    );
+    assert_eq!(allowed, [sql, upper]);
+
+    std::fs::write(&txt, "secret").unwrap();
+    assert_eq!(read_sql_file(&st, txt).await.unwrap_err(), NOT_ALLOWED);
+    assert_eq!(
+        read_sql_file(&st, "relative.sql".into()).await.unwrap_err(),
+        NOT_ALLOWED
+    );
+}
+
+#[tokio::test]
+async fn an_ssms_file_is_read_and_written_back_in_its_encoding_and_line_endings() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    let file = dir.path().join("Reporte mensual.sql");
+    std::fs::write(&file, utf16le_bom(SSMS)).unwrap();
+    let path = path_string(&file);
+    allow_paths(&st, vec![path.clone()]);
+
+    let opened = read_sql_file(&st, path.clone()).await.unwrap();
+    assert_eq!(opened.path, path);
+    assert_eq!(opened.name, "Reporte mensual.sql");
+    assert_eq!(opened.text, SSMS_TEXT);
+    assert_eq!(
+        (opened.encoding, opened.line_ending),
+        (FileEncoding::Utf16Le, LineEnding::Crlf)
+    );
+    let json = serde_json::to_value(&opened).unwrap();
+    assert_eq!(json["lineEnding"], "crlf");
+    assert_eq!(json["encoding"], "utf16Le");
+
+    let edited = format!("{SSMS_TEXT}SELECT 2\n");
+    write_sql_file(
+        &st,
+        path.clone(),
+        edited.clone(),
+        opened.encoding,
+        opened.line_ending,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        utf16le_bom(&format!("{SSMS}SELECT 2\r\n"))
+    );
+
+    let again = read_sql_file(&st, path).await.unwrap();
+    assert_eq!(again.text, edited);
+    assert_eq!(
+        (again.encoding, again.line_ending),
+        (FileEncoding::Utf16Le, LineEnding::Crlf)
+    );
+    // No temporary file is left next to it.
+    let entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+}
+
+#[tokio::test]
+async fn utf8_with_bom_is_written_back_with_its_bom() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    let file = dir.path().join("q.sql");
+    std::fs::write(&file, utf8_bom(SSMS)).unwrap();
+    let path = path_string(&file);
+    allow_paths(&st, vec![path.clone()]);
+
+    let opened = read_sql_file(&st, path.clone()).await.unwrap();
+    assert_eq!(
+        (opened.encoding, opened.line_ending),
+        (FileEncoding::Utf8Bom, LineEnding::Crlf)
+    );
+    write_sql_file(&st, path, opened.text, opened.encoding, opened.line_ending)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), utf8_bom(SSMS));
+}
+
+#[tokio::test]
+async fn a_deleted_file_is_written_again_at_the_same_path() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    let file = dir.path().join("q.sql");
+    std::fs::write(&file, "SELECT 1").unwrap();
+    let path = path_string(&file);
+    allow_paths(&st, vec![path.clone()]);
+    std::fs::remove_file(&file).unwrap();
+
+    assert_eq!(
+        read_sql_file(&st, path.clone()).await.unwrap_err(),
+        NOT_FOUND
+    );
+    write_sql_file(
+        &st,
+        path,
+        "SELECT 2\n".into(),
+        FileEncoding::Utf8,
+        LineEnding::Crlf,
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), b"SELECT 2\r\n");
+}
+
+#[tokio::test]
+async fn a_binary_file_is_not_opened_and_its_bytes_stay_out_of_the_error() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    let file = dir.path().join("image.sql");
+    std::fs::write(&file, [0x89, b'P', b'N', b'G', 0xFF, 0x00]).unwrap();
+    let path = path_string(&file);
+    allow_paths(&st, vec![path.clone()]);
+    assert_eq!(read_sql_file(&st, path).await.unwrap_err(), NOT_TEXT);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_read_only_file_is_not_overwritten() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    let file = dir.path().join("q.sql");
+    std::fs::write(&file, "SELECT 1").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let path = path_string(&file);
+    allow_paths(&st, vec![path.clone()]);
+
+    let err = write_sql_file(
+        &st,
+        path.clone(),
+        "SELECT 2".into(),
+        FileEncoding::Utf8,
+        LineEnding::Lf,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains(&path), "{err}");
+    assert!(!err.contains("SELECT"), "{err}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 1");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_write_keeps_the_file_permissions_and_symlinks() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    let real = dir.path().join("real.sql");
+    std::fs::write(&real, "SELECT 1").unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let link = dir.path().join("link.sql");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let path = path_string(&link);
+    allow_paths(&st, vec![path.clone()]);
+
+    write_sql_file(
+        &st,
+        path,
+        "SELECT 2".into(),
+        FileEncoding::Utf8,
+        LineEnding::Lf,
+    )
+    .await
+    .unwrap();
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), "SELECT 2");
+    assert_eq!(
+        std::fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+}

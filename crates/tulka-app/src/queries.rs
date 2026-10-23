@@ -243,7 +243,7 @@ impl QueriesStore {
         }
         let dir = path.parent().expect("a saved query is inside its database");
         fs::create_dir_all(dir).map_err(|e| io_error("save", e))?;
-        write_atomic(dir, &path, text.as_bytes()).map_err(|e| io_error("save", e))
+        write_atomic(dir, &path, text.as_bytes(), None).map_err(|e| io_error("save", e))
     }
 
     /// Renames query `name` of `database` to `new_name`. Fails with
@@ -351,8 +351,14 @@ fn list_dir(database: &str, dir: &Path, out: &mut Vec<SavedQuery>) {
 
 /// Writes `bytes` to `path` through a temporary file in `dir`, so `path`
 /// always holds either the old or the new text. The temporary name does
-/// not end in `.sql`, so a leftover one is never listed.
-fn write_atomic(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// not end in `.sql`, so a leftover one is never listed. With `permissions`
+/// the new file gets them before it replaces the old one.
+pub(crate) fn write_atomic(
+    dir: &Path,
+    path: &Path,
+    bytes: &[u8],
+    permissions: Option<fs::Permissions>,
+) -> std::io::Result<()> {
     let tmp = dir.join(format!(
         "{TEMP_PREFIX}{}{TEMP_SUFFIX}",
         uuid::Uuid::new_v4().simple()
@@ -361,6 +367,9 @@ fn write_atomic(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let mut file = fs::File::create_new(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
         drop(file);
         fs::rename(&tmp, path)
     })();

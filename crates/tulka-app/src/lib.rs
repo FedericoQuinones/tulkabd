@@ -1,16 +1,19 @@
 //! Application services of tulkabd, independent of Tauri: saved connections,
 //! one database session per query tab, script execution with streamed
 //! events, Rust-side result buffers and copying results, and the Explorer
-//! (metadata sessions, background indexing, the tree and the palette), and
-//! saved queries (`.sql` files per database).
+//! (metadata sessions, background indexing, the tree and the palette),
+//! saved queries (`.sql` files per database) and `.sql` files opened from
+//! disk.
 //!
 //! Every command of the UI is a plain async function taking [`AppState`];
 //! the Tauri layer only wraps them. Errors are plain strings, with the
-//! sentinels [`PASSWORD_REQUIRED`], [`DISCONNECTED`], [`BUSY`], [`CLOSED`]
-//! and [`NOT_CONNECTED`]. Background events go to [`AppEvents`].
+//! sentinels [`PASSWORD_REQUIRED`], [`DISCONNECTED`], [`BUSY`], [`CLOSED`],
+//! [`NOT_CONNECTED`], [`NOT_ALLOWED`] and [`NOT_TEXT`]. Background events go
+//! to [`AppEvents`].
 
 pub mod connections;
 pub mod explorer;
+pub mod files;
 pub mod queries;
 pub mod query;
 pub mod results;
@@ -28,6 +31,10 @@ pub use explorer::{
     completion_metadata, connect_explorer, disconnect_explorer, explorer_columns,
     explorer_databases, explorer_objects, object_definition, refresh_metadata, search_objects,
     table_structure,
+};
+pub use files::{
+    allow_paths, decode_text, encode_text, read_sql_file, write_sql_file, FileEncoding, LineEnding,
+    OpenedFile, TextFile,
 };
 pub use queries::{
     decode_component, delete_saved_query, encode_component, list_saved_queries, read_saved_query,
@@ -47,7 +54,7 @@ pub use types::{
     AppEvent, AppEvents, Clipboard, CompletionMetadata, ConnectionStatus, CopyMode, CopyOutcome,
     ExplorerInfo, NoopEvents, PaletteHit, RunOutcome, RunSummary, SaveConnectionResult, SavedQuery,
     SavedQueryHit, SearchResponse, SessionInfo, UiEvent, BUSY, CLOSED, CYCLE, DISCONNECTED,
-    EMPTY_NAME, EXISTS, NOT_CONNECTED, NOT_FOUND, PASSWORD_REQUIRED,
+    EMPTY_NAME, EXISTS, NOT_ALLOWED, NOT_CONNECTED, NOT_FOUND, NOT_TEXT, PASSWORD_REQUIRED,
 };
 
 /// The core types used in the command signatures (`ConnectionConfig`,

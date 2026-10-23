@@ -16,6 +16,11 @@ pub const NOT_FOUND: &str = "not_found";
 pub const EMPTY_NAME: &str = "empty_name";
 /// Saved-query command error: a query with that name already exists.
 pub const EXISTS: &str = "exists";
+/// File command error: the path was not picked in the open dialog, dropped
+/// on the window or restored with the session (plan D7).
+pub const NOT_ALLOWED: &str = "not_allowed";
+/// File command error: the file is neither UTF-8 nor UTF-16 with a BOM.
+pub const NOT_TEXT: &str = "not_text";
 /// Command error meaning the tab's connection was lost; only `open_session`
 /// gets the tab working again.
 pub const DISCONNECTED: &str = "disconnected";

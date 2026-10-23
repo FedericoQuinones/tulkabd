@@ -1,7 +1,7 @@
 mod commands;
 mod events;
 
-use commands::{connections as conn, explorer as ex, queries, query, session};
+use commands::{connections as conn, explorer as ex, files, queries, query, session};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tauri::Manager;
@@ -37,6 +37,9 @@ pub fn run() {
     let _ = STARTED.set(Instant::now());
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        // For the open dialog of `pick_sql_files` (from Rust). No capability
+        // grants the webview a dialog permission.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // The state needs the AppHandle (to emit events), so it is built
             // here. Tauri runs setup before the webview can invoke a command.
@@ -93,6 +96,10 @@ pub fn run() {
             queries::rename_saved_query,
             queries::delete_saved_query,
             queries::reveal_saved_query,
+            files::pick_sql_files,
+            files::allow_dropped_paths,
+            files::read_sql_file,
+            files::write_sql_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
