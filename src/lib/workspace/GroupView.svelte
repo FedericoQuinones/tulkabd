@@ -1,5 +1,6 @@
 <script lang="ts">
   import { t } from "../i18n/t";
+  import { connections } from "../connections/store.svelte";
   import QueryPane from "../pane/QueryPane.svelte";
   import StructureView from "../structure/StructureView.svelte";
   import TabStrip, { tabDrop } from "../tabs/TabStrip.svelte";
@@ -12,6 +13,8 @@
   // Only the active tab is mounted: one editor per group.
   const tab = $derived(tabs.activeIn(groupId));
   const focus = () => tabs.focusGroup(groupId);
+  // Only a definition tab reloads its text, and only while its connection still exists.
+  const canRetry = $derived(tab?.name !== undefined && connections.list.some((c) => c.id === tab?.connectionId));
 </script>
 
 <!-- Pointer and focus inside the group make it the active one (where Ctrl+T, the palette and the Explorer open tabs). -->
@@ -28,7 +31,7 @@
           autofocus={tabs.activeGroupId === groupId}
           connectError={tab.connectError}
           onreconnect={() => tabs.reconnect(tab.id)}
-          onretry={tab.name !== undefined ? () => tabs.retry(tab.id) : undefined}
+          onretry={canRetry ? () => tabs.retry(tab.id) : undefined}
           onrun={(sql, lineOffset) => tabs.run(tab.id, sql, lineOffset)}
         />
       {/key}

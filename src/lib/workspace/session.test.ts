@@ -400,3 +400,27 @@ test("the close save waits for a save already in flight, so it lands last", asyn
   expect(closed).toBe(true);
   stop();
 });
+
+test("a restored definition tab offers Retry only while its connection exists", async () => {
+  tabs.open({ kind: "definition", connectionId: "c1", database: "Sales", schema: "dbo", name: "v" });
+  await flush();
+  const json = JSON.stringify(snapshot(tabs));
+  const retry = () => [...document.querySelectorAll(".notice button")].filter((b) => b.textContent === t("tabs.retry"));
+
+  await tabs.reset();
+  restore(tabs, parseSession(json)!, known);
+  cmp = mount(Workspace, { target: document.body });
+  flushSync();
+  await flush();
+  flushSync();
+  expect(retry()).toHaveLength(1);
+  unmount(cmp);
+
+  await tabs.reset();
+  connections.list = [nopw];
+  restore(tabs, parseSession(json)!, { connectionIds: new Set(["c2"]) });
+  cmp = mount(Workspace, { target: document.body });
+  flushSync();
+  expect(document.querySelector(".notice")?.textContent).toContain(t("tabs.restoredWithoutConnection"));
+  expect(retry()).toHaveLength(0);
+});
