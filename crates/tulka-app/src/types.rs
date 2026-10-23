@@ -12,8 +12,10 @@ pub const PASSWORD_REQUIRED: &str = "password_required";
 pub const CYCLE: &str = "cycle";
 /// Folder command error: an unknown folder or connection id.
 pub const NOT_FOUND: &str = "not_found";
-/// Folder command error: the folder name is empty.
+/// Folder or saved-query command error: the name is empty.
 pub const EMPTY_NAME: &str = "empty_name";
+/// Saved-query command error: a query with that name already exists.
+pub const EXISTS: &str = "exists";
 /// Command error meaning the tab's connection was lost; only `open_session`
 /// gets the tab working again.
 pub const DISCONNECTED: &str = "disconnected";
@@ -127,6 +129,31 @@ pub struct SearchResponse {
     /// Databases of connected Explorers not indexed yet (queued or in
     /// progress); at least 1 while the startup index is still loading.
     pub indexing: usize,
+    /// The best saved queries whose name matches, at most 20 (their own
+    /// limit). Empty when the search is scoped to a folder.
+    pub queries: Vec<SavedQueryHit>,
+}
+
+/// One saved query matched by `search_objects`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedQueryHit {
+    pub database: String,
+    pub name: String,
+    /// Positions to highlight in `name`, in Unicode code points (see
+    /// [`PaletteHit::indices`]).
+    pub indices: Vec<u32>,
+}
+
+/// A query saved as `<data dir>/queries/<database>/<name>.sql`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedQuery {
+    /// The database it belongs to (exact, case-sensitive).
+    pub database: String,
+    pub name: String,
+    /// Last modification of the file, Unix milliseconds (0 if unknown).
+    pub modified_ms: i64,
 }
 
 /// Returned by `completion_metadata`, read from the cache.
@@ -483,6 +510,11 @@ mod tests {
             total_matches: 3,
             databases_matched: 2,
             indexing: 1,
+            queries: vec![SavedQueryHit {
+                database: "db".into(),
+                name: "Reporte".into(),
+                indices: vec![0],
+            }],
         };
         assert_eq!(
             to_json(&r),
@@ -498,7 +530,8 @@ mod tests {
                 }],
                 "totalMatches": 3,
                 "databasesMatched": 2,
-                "indexing": 1
+                "indexing": 1,
+                "queries": [{"database": "db", "name": "Reporte", "indices": [0]}]
             })
         );
         let m = CompletionMetadata {

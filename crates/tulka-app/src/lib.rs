@@ -1,7 +1,8 @@
 //! Application services of tulkabd, independent of Tauri: saved connections,
 //! one database session per query tab, script execution with streamed
 //! events, Rust-side result buffers and copying results, and the Explorer
-//! (metadata sessions, background indexing, the tree and the palette).
+//! (metadata sessions, background indexing, the tree and the palette), and
+//! saved queries (`.sql` files per database).
 //!
 //! Every command of the UI is a plain async function taking [`AppState`];
 //! the Tauri layer only wraps them. Errors are plain strings, with the
@@ -10,6 +11,7 @@
 
 pub mod connections;
 pub mod explorer;
+pub mod queries;
 pub mod query;
 pub mod results;
 pub mod session;
@@ -27,6 +29,10 @@ pub use explorer::{
     explorer_databases, explorer_objects, object_definition, refresh_metadata, search_objects,
     table_structure,
 };
+pub use queries::{
+    decode_component, delete_saved_query, encode_component, list_saved_queries, read_saved_query,
+    rename_saved_query, save_query, saved_query_path, QueriesStore,
+};
 pub use query::{
     cancel_query, close_session, copy_results, fetch_rows, open_session, run_query, use_database,
     MAX_FETCH_ROWS,
@@ -39,9 +45,9 @@ pub use session::{load_session, save_session};
 pub use state::{AppState, SharedBuffer, TabState};
 pub use types::{
     AppEvent, AppEvents, Clipboard, CompletionMetadata, ConnectionStatus, CopyMode, CopyOutcome,
-    ExplorerInfo, NoopEvents, PaletteHit, RunOutcome, RunSummary, SaveConnectionResult,
-    SearchResponse, SessionInfo, UiEvent, BUSY, CLOSED, CYCLE, DISCONNECTED, EMPTY_NAME,
-    NOT_CONNECTED, NOT_FOUND, PASSWORD_REQUIRED,
+    ExplorerInfo, NoopEvents, PaletteHit, RunOutcome, RunSummary, SaveConnectionResult, SavedQuery,
+    SavedQueryHit, SearchResponse, SessionInfo, UiEvent, BUSY, CLOSED, CYCLE, DISCONNECTED,
+    EMPTY_NAME, EXISTS, NOT_CONNECTED, NOT_FOUND, PASSWORD_REQUIRED,
 };
 
 /// The core types used in the command signatures (`ConnectionConfig`,

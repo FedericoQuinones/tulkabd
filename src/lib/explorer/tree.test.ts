@@ -96,7 +96,7 @@ beforeEach(async () => {
   vi.mocked(ipc.listFolders).mockResolvedValue(folders);
   vi.mocked(ipc.listExpanded).mockResolvedValue([]);
   vi.mocked(ipc.listConnections).mockResolvedValue([sales, local, billing]);
-  vi.mocked(ipc.searchObjects).mockResolvedValue({ hits: [], totalMatches: 0, databasesMatched: 0, indexing: 0 });
+  vi.mocked(ipc.searchObjects).mockResolvedValue({ hits: [], totalMatches: 0, databasesMatched: 0, indexing: 0, queries: [] });
   vi.mocked(ipc.onAppEvent).mockResolvedValue(() => {});
   vi.mocked(ipc.closeSession).mockResolvedValue();
   connections.list = [sales, local, billing];
@@ -171,7 +171,7 @@ const hit = (object: PaletteHit["object"], database = "Ventas", connectionId = "
   object,
   indices: [],
 });
-const response = (hits: PaletteHit[]): SearchResponse => ({ hits, totalMatches: hits.length, databasesMatched: 1, indexing: 0 });
+const response = (hits: PaletteHit[]): SearchResponse => ({ hits, totalMatches: hits.length, databasesMatched: 1, indexing: 0, queries: [] });
 
 test("with 2+ characters the filter shows cached objects under their database", async () => {
   vi.mocked(ipc.searchObjects).mockResolvedValue(response([hit({ schema: "dbo", name: "Pedidos", kind: "table" })]));

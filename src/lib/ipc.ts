@@ -158,6 +158,22 @@ export interface SearchResponse {
   databasesMatched: number;
   /** Databases still queued or being indexed (at least 1 while the startup index loads). */
   indexing: number;
+  /** Saved queries whose name matches, best first, at most 20. Empty for a folder-scoped search. */
+  queries: SavedQueryHit[];
+}
+export interface SavedQueryHit {
+  database: string;
+  name: string;
+  /** Matched positions in `name` as Unicode code points, not UTF-16 offsets: index `Array.from(name)`. */
+  indices: number[];
+}
+/** A query saved as `<data dir>/queries/<database>/<name>.sql`. */
+export interface SavedQuery {
+  /** Exact (case-sensitive) database name. */
+  database: string;
+  name: string;
+  /** Last change of the file, Unix milliseconds (0 if unknown). */
+  modifiedMs: number;
 }
 export interface CompletionMetadata {
   schemas: string[];
@@ -298,6 +314,25 @@ export const searchObjects = (query: string, limit: number) =>
   invoke<SearchResponse>("search_objects", { query, limit });
 export const completionMetadata = (connectionId: string, database: string) =>
   invoke<CompletionMetadata>("completion_metadata", { connectionId, database });
+
+/** Saved queries of `database`, or of every database, sorted by database and name. */
+export const listSavedQueries = (database?: string) =>
+  invoke<SavedQuery[]>("list_saved_queries", { database: database ?? null });
+/** Rejects with `"not_found"` when the query does not exist. */
+export const readSavedQuery = (database: string, name: string) =>
+  invoke<string>("read_saved_query", { database, name });
+/** Rejects with `"exists"` when the name is taken and `overwrite` is false, `"empty_name"` on a blank name. */
+export const saveQuery = (database: string, name: string, text: string, overwrite: boolean) =>
+  invoke<void>("save_query", { database, name, text, overwrite });
+/** Rejects with `"not_found"`, `"exists"` (the new name is taken) or `"empty_name"`. */
+export const renameSavedQuery = (database: string, name: string, newName: string) =>
+  invoke<void>("rename_saved_query", { database, name, newName });
+/** Rejects with `"not_found"` when the query does not exist. */
+export const deleteSavedQuery = (database: string, name: string) =>
+  invoke<void>("delete_saved_query", { database, name });
+/** Shows the query's `.sql` file in the system file manager. */
+export const revealSavedQuery = (database: string, name: string) =>
+  invoke<void>("reveal_saved_query", { database, name });
 
 /** Subscribes to the explorer and indexing events. Call the returned function to stop. */
 export const onAppEvent = (cb: (e: AppEvent) => void): Promise<UnlistenFn> =>

@@ -44,6 +44,7 @@ const response = (hits: PaletteHit[], indexing = 0): SearchResponse => ({
   totalMatches: hits.length,
   databasesMatched: new Set(hits.map((h) => `${h.connectionId}/${h.database}`)).size,
   indexing,
+  queries: [],
 });
 
 let cmp: ReturnType<typeof mount> | undefined;

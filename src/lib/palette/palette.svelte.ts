@@ -73,7 +73,7 @@ class PaletteStore {
     try {
       res = await ipc.searchObjects(query, LIMIT);
     } catch {
-      res = { hits: [], totalMatches: 0, databasesMatched: 0, indexing: 0 };
+      res = { hits: [], totalMatches: 0, databasesMatched: 0, indexing: 0, queries: [] };
     }
     if (token !== this.token || !this.isOpen) return;
     this.response = res;

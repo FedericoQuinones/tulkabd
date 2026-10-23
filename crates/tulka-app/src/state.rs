@@ -42,7 +42,8 @@
 //! `spawn_blocking`. The two mutexes are never held together.
 //!
 //! The Explorer (sessions, background indexing, metadata cache and search
-//! index) has its own state and locks; see [`crate::explorer`].
+//! index) has its own state and locks; see [`crate::explorer`]. So do the
+//! saved queries; see [`crate::queries`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,6 +57,7 @@ use tulka_mssql::MssqlDriver;
 use tulka_store::{MetaCache, SessionStore};
 
 use crate::explorer::Explorer;
+use crate::queries::{QueriesStore, SavedQueries};
 use crate::results::ResultBuffer;
 use crate::types::AppEvents;
 
@@ -77,6 +79,8 @@ pub struct AppState {
     /// The workspace session. Independent of the connections config: it
     /// works even when that file is read-only.
     pub(crate) session: Arc<SessionStore>,
+    /// The saved `.sql` files and their palette index.
+    pub(crate) queries: Arc<SavedQueries>,
 }
 
 /// A result buffer shared between the run that fills it and the commands
@@ -130,6 +134,7 @@ impl AppState {
             next_generation: AtomicU64::new(1),
             explorer: Explorer::empty(),
             session: Arc::new(SessionStore::in_memory()),
+            queries: SavedQueries::unavailable(),
         })
     }
 
@@ -152,6 +157,7 @@ impl AppState {
             next_generation: AtomicU64::new(1),
             explorer: Explorer::empty(),
             session: Arc::new(SessionStore::in_memory()),
+            queries: SavedQueries::unavailable(),
         }
     }
 
@@ -170,6 +176,14 @@ impl AppState {
     /// Persists the workspace session in `store` instead of memory.
     pub fn with_session(mut self, store: Arc<SessionStore>) -> Self {
         self.session = store;
+        self
+    }
+
+    /// Keeps saved queries in `store`; without it nothing is saved. The
+    /// palette index of their names loads on a background thread: this
+    /// returns at once.
+    pub fn with_queries(mut self, store: QueriesStore) -> Self {
+        self.queries = SavedQueries::start(store);
         self
     }
 
@@ -192,10 +206,11 @@ impl AppState {
     }
 
     /// The production state: the per-user config file, the OS keychain, the
-    /// SQL Server driver and the per-user metadata cache (see
-    /// [`MetaCache::open_default`]), with events sent to `events`. Never
-    /// fails, and does not wait for the search index (see
-    /// [`AppState::with_metadata`]).
+    /// SQL Server driver, the per-user metadata cache (see
+    /// [`MetaCache::open_default`]) and saved queries (see
+    /// [`QueriesStore::open_default`]), with events sent to `events`. Never
+    /// fails, and does not wait for the search indexes (see
+    /// [`AppState::with_metadata`] and [`AppState::with_queries`]).
     pub fn open_default(events: Arc<dyn AppEvents>) -> Self {
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore::new());
         let drivers: Vec<Arc<dyn Driver>> = vec![Arc::new(MssqlDriver)];
@@ -206,6 +221,7 @@ impl AppState {
         state
             .with_metadata(Arc::new(MetaCache::open_default()), events)
             .with_session(Arc::new(SessionStore::open_default()))
+            .with_queries(QueriesStore::open_default())
     }
 
     /// Fails when the state is read-only.
