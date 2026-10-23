@@ -410,9 +410,12 @@ export class TabsStore {
     const pane = tab.pane;
     try {
       const text = await ipc.objectDefinition(tab.connectionId, tab.database!, tab.schema!, tab.name);
+      // Saved as a query meanwhile: it is no longer a definition to reload.
+      if (tab.name === undefined) return;
       pane.notice = null;
       pane.loadText(text);
     } catch (e) {
+      if (tab.name === undefined) return;
       pane.notice = isNotConnected(e) ? t("tabs.definitionNotConnected") : t("tabs.loadFailed", { error: String(e) });
     }
   }
@@ -440,6 +443,9 @@ export class TabsStore {
       return;
     }
     // Task 10: a tab with `file` writes the file back here, in its encoding and line endings.
+    // A definition still loading (or that could not load) has nothing to save yet.
+    const definition = tab.name !== undefined;
+    if (definition && pane.text() === "") return;
     const database = this.binding(tab).database;
     if (!database) {
       this.saveNotice(pane, t("queries.pickDatabase"));
@@ -448,7 +454,7 @@ export class TabsStore {
     const id = tab.id;
     const request: NameRequest = {
       title: t("queries.saveTitle", { database }),
-      initial: "",
+      initial: definition ? tab.name! : "",
       onsubmit: async (name, overwrite) => {
         const x = this.list.find((y) => y.id === id);
         if (!x?.pane) {

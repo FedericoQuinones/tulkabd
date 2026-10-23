@@ -340,3 +340,26 @@ test("a tree click reuses only a tab bound to the clicked connection and databas
   expect(await tabs.openSavedQuery({ database: "Ventas", name: "Reporte" }, null)).toBe(prod);
   expect(ipc.readSavedQuery).toHaveBeenCalledTimes(2);
 });
+
+test("Ctrl+S on a definition tab waits for the definition and offers the object's name", async () => {
+  let load!: (text: string) => void;
+  vi.mocked(ipc.objectDefinition).mockReturnValueOnce(new Promise((r) => (load = r)));
+  const id = tabs.open({ kind: "definition", connectionId: "c1", database: "Ventas", schema: "dbo", name: "CerrarMes" });
+  await flush();
+  const tab = tabs.list.find((x) => x.id === id)!;
+  await tabs.saveActive();
+  expect(tabs.nameRequest).toBeNull();
+  load("CREATE PROCEDURE A");
+  await flush();
+  await tabs.saveActive();
+  expect(tabs.nameRequest?.initial).toBe("CerrarMes");
+  // A Retry still in flight when the tab becomes a saved query must not replace its text.
+  let reload!: (text: string) => void;
+  vi.mocked(ipc.objectDefinition).mockReturnValueOnce(new Promise((r) => (reload = r)));
+  const retry = tabs.retry(id);
+  await tabs.nameRequest!.onsubmit("CerrarMes", false);
+  expect(ipc.saveQuery).toHaveBeenCalledWith("Ventas", "CerrarMes", "CREATE PROCEDURE A", false);
+  reload("CREATE PROCEDURE B");
+  await retry;
+  expect(tab.pane!.text()).toBe("CREATE PROCEDURE A");
+});
