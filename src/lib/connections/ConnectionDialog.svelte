@@ -196,6 +196,7 @@
     try {
       const result = await connections.save(build(), password || undefined);
       savedConn = result.connection;
+      if (startsEdit) explorer.reconnectIfLive(id, password || undefined);
       if (result.keyringUnavailable) {
         // Keep the dialog open so the warning is seen; the connection itself is saved.
         keyringUnavailable = true;

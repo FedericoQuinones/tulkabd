@@ -242,6 +242,12 @@ class ExplorerStore {
     }
   }
 
+  /** After an edit is saved: a live session still reads the old server and database list, so reconnect it. */
+  reconnectIfLive(id: string, password?: string): void {
+    const status = this.state(id).status;
+    if (status === "connected" || status === "connecting") void this.connect(id, password);
+  }
+
   async submitPassword(password: string): Promise<void> {
     const req = this.passwordRequest;
     this.passwordRequest = null;

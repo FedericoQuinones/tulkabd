@@ -7,6 +7,9 @@ vi.mock("../ipc", () => ({
   saveConnection: vi.fn(),
   testConnection: vi.fn(),
   parseConnectionString: vi.fn(),
+  listConnections: vi.fn(),
+  connectExplorer: vi.fn(),
+  explorerDatabases: vi.fn(),
 }));
 
 import * as ipc from "../ipc";
@@ -196,6 +199,33 @@ test("Save sends the selected scope", async () => {
   await settle();
   const conn = vi.mocked(ipc.saveConnection).mock.calls[0][0];
   expect(conn.databases).toEqual({ kind: "selected", names: ["Ventas", "Gone"] });
+});
+
+test.each([
+  ["connected", 1],
+  ["connecting", 1],
+  ["offline", 0],
+] as const)("saving an edit of a %s connection reconnects its explorer: %i", async (status, calls) => {
+  vi.mocked(ipc.saveConnection).mockResolvedValue({ connection: base, keyringUnavailable: false });
+  vi.mocked(ipc.listConnections).mockResolvedValue([base]);
+  vi.mocked(ipc.connectExplorer).mockResolvedValue({ server: { version: "16", user: "sa", singleDatabase: false }, databases: [] });
+  vi.mocked(ipc.explorerDatabases).mockResolvedValue([]);
+  connections.list = [base];
+  explorer.state("c1").status = status;
+  open({ initial: base });
+  document.querySelector("form")!.requestSubmit();
+  await settle();
+  expect(ipc.connectExplorer).toHaveBeenCalledTimes(calls);
+  if (calls) expect(vi.mocked(ipc.connectExplorer).mock.calls[0][0]).toBe("c1");
+});
+
+test("saving a new connection does not connect its explorer", async () => {
+  vi.mocked(ipc.saveConnection).mockResolvedValue({ connection: base, keyringUnavailable: false });
+  vi.mocked(ipc.listConnections).mockResolvedValue([base]);
+  open({ initial: { ...base, id: "new" } });
+  document.querySelector("form")!.requestSubmit();
+  await settle();
+  expect(ipc.connectExplorer).not.toHaveBeenCalled();
 });
 
 // ---------------------------------------------------------- connection string
