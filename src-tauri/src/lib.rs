@@ -1,7 +1,7 @@
 mod commands;
 mod events;
 
-use commands::{connections as conn, explorer as ex, query};
+use commands::{connections as conn, explorer as ex, query, session};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tauri::Manager;
@@ -82,6 +82,8 @@ pub fn run() {
             query::fetch_rows,
             query::copy_results,
             query::close_session,
+            session::load_session,
+            session::save_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1774,3 +1774,25 @@ async fn closed_tab_generations_stay_bounded() {
     }
     assert_eq!(f.state.closed_tab_count(), 256);
 }
+
+#[tokio::test]
+async fn session_saves_even_when_the_config_is_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, "{ not json").unwrap();
+    let store = Arc::new(tulka_store::SessionStore::in_memory());
+    let state = AppState::open(
+        ConfigStore::at(&path),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakeDriver)],
+    )
+    .with_session(store);
+    assert!(state.startup_error().is_some());
+
+    assert_eq!(load_session(&state).await, None);
+    save_session(&state, r#"{"tabs":[]}"#.into()).await.unwrap();
+    assert_eq!(
+        load_session(&state).await.as_deref(),
+        Some(r#"{"tabs":[]}"#)
+    );
+}

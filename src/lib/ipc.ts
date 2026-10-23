@@ -302,3 +302,9 @@ export const completionMetadata = (connectionId: string, database: string) =>
 /** Subscribes to the explorer and indexing events. Call the returned function to stop. */
 export const onAppEvent = (cb: (e: AppEvent) => void): Promise<UnlistenFn> =>
   listen<AppEvent>("app-event", (ev) => cb(ev.payload));
+
+/** The saved workspace session (opaque JSON owned by the UI), or `null` when there is none. */
+export const loadSession = () => invoke<string | null>("load_session");
+
+/** Replaces the saved workspace session. Works even when the connections file is read-only. */
+export const saveSession = (json: string) => invoke<void>("save_session", { json });

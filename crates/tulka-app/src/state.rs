@@ -53,7 +53,7 @@ use tulka_core::{
     AppConfig, CancelHandle, ConfigStore, Driver, KeyringStore, SecretStore, Session,
 };
 use tulka_mssql::MssqlDriver;
-use tulka_store::MetaCache;
+use tulka_store::{MetaCache, SessionStore};
 
 use crate::explorer::Explorer;
 use crate::results::ResultBuffer;
@@ -74,6 +74,9 @@ pub struct AppState {
     /// Explorer sessions, the metadata cache, the search index and the
     /// event sink; shared with the background indexing tasks.
     pub(crate) explorer: Arc<Explorer>,
+    /// The workspace session. Independent of the connections config: it
+    /// works even when that file is read-only.
+    pub(crate) session: Arc<SessionStore>,
 }
 
 /// A result buffer shared between the run that fills it and the commands
@@ -126,6 +129,7 @@ impl AppState {
             tabs: std::sync::Mutex::new(Tabs::default()),
             next_generation: AtomicU64::new(1),
             explorer: Explorer::empty(),
+            session: Arc::new(SessionStore::in_memory()),
         })
     }
 
@@ -147,6 +151,7 @@ impl AppState {
             tabs: std::sync::Mutex::new(Tabs::default()),
             next_generation: AtomicU64::new(1),
             explorer: Explorer::empty(),
+            session: Arc::new(SessionStore::in_memory()),
         }
     }
 
@@ -159,6 +164,12 @@ impl AppState {
     /// [`AppEvent`]: crate::types::AppEvent
     pub fn with_metadata(mut self, cache: Arc<MetaCache>, events: Arc<dyn AppEvents>) -> Self {
         self.explorer = Explorer::start(cache, events);
+        self
+    }
+
+    /// Persists the workspace session in `store` instead of memory.
+    pub fn with_session(mut self, store: Arc<SessionStore>) -> Self {
+        self.session = store;
         self
     }
 
@@ -192,7 +203,9 @@ impl AppState {
             Ok(config) => Self::open(config, secrets, drivers),
             Err(e) => Self::new_read_only(e.to_string(), secrets, drivers),
         };
-        state.with_metadata(Arc::new(MetaCache::open_default()), events)
+        state
+            .with_metadata(Arc::new(MetaCache::open_default()), events)
+            .with_session(Arc::new(SessionStore::open_default()))
     }
 
     /// Fails when the state is read-only.

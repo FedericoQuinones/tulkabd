@@ -12,6 +12,7 @@ pub mod connections;
 pub mod explorer;
 pub mod query;
 pub mod results;
+pub mod session;
 pub mod state;
 pub mod types;
 
@@ -34,6 +35,7 @@ pub use results::{
     cap_cell, display_cell, ResultBuffer, Selection, CELLS_CAPPED_WARNING, DISPLAY_BYTES,
     DISPLAY_TEXT_CHARS, MAX_CELL_BYTES, MAX_ROWS,
 };
+pub use session::{load_session, save_session};
 pub use state::{AppState, SharedBuffer, TabState};
 pub use types::{
     AppEvent, AppEvents, Clipboard, CompletionMetadata, ConnectionStatus, CopyMode, CopyOutcome,
