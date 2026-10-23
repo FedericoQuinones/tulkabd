@@ -77,6 +77,8 @@ class ExplorerStore {
   private gen = 0;
   private searchToken = 0;
   private attempts = new Map<string, number>();
+  /** Connections the user disconnected, until they connect again: a late error there is stale. */
+  private userOffline = new Set<string>();
   private dbLoads = new Map<string, { again: boolean; done: Promise<void> }>();
   private objLoads = new Map<string, Promise<void>>();
   private colLoads = new Map<string, Promise<void>>();
@@ -115,7 +117,12 @@ class ExplorerStore {
   handleEvent(e: AppEvent): void {
     const st = this.state(e.connectionId);
     if (e.kind === "explorerStatus") {
+      if (e.status === "error" && st.status === "offline" && this.userOffline.has(e.connectionId)) {
+        // From the connect the user cancelled. A lost connection reports while connected.
+        return;
+      }
       if (e.status === "connecting") {
+        this.userOffline.delete(e.connectionId);
         st.status = "connecting";
         st.message = null;
       } else if (e.status === "connected") {
@@ -203,6 +210,7 @@ class ExplorerStore {
     const conn = connections.list.find((c) => c.id === id);
     if (!conn) return;
     const st = this.state(id);
+    this.userOffline.delete(id);
     const attempt = (this.attempts.get(id) ?? 0) + 1;
     this.attempts.set(id, attempt);
     const gen = this.gen;
@@ -249,6 +257,7 @@ class ExplorerStore {
 
   async disconnect(id: string): Promise<void> {
     this.attempts.set(id, (this.attempts.get(id) ?? 0) + 1);
+    this.userOffline.add(id);
     const st = this.state(id);
     st.status = "offline";
     st.message = null;
@@ -790,6 +799,7 @@ class ExplorerStore {
     this.toast = null;
     this.passwordRequest = null;
     this.attempts.clear();
+    this.userOffline.clear();
     this.dbLoads.clear();
     this.objLoads.clear();
     this.colLoads.clear();

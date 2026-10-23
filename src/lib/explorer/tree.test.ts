@@ -262,6 +262,23 @@ test("an error status shows the message in the node and Retry connects again", a
   expect(ipc.connectExplorer).toHaveBeenCalledWith("c2", undefined);
 });
 
+test("a late error after the user disconnected is ignored", async () => {
+  vi.mocked(ipc.disconnectExplorer).mockResolvedValue();
+  explorer.expanded.add("c2");
+  explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "connecting", message: null });
+  await explorer.disconnect("c2");
+  explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "disconnected", message: null });
+  // A stale failure of the cancelled connect.
+  explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "error", message: "connect timed out" });
+  expect(explorer.state("c2").status).toBe("offline");
+  expect(explorer.state("c2").message).toBeNull();
+
+  // A new connect reports its errors again.
+  explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "connecting", message: null });
+  explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "error", message: "Login failed" });
+  expect(explorer.state("c2").status).toBe("error");
+});
+
 test("a failed connect shows the error inline", async () => {
   vi.mocked(ipc.connectExplorer).mockRejectedValueOnce("authentication failed: bad login");
   await explorer.expand("c2");
