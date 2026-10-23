@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { t } from "./lib/i18n/t";
   import Rail from "./lib/shell/Rail.svelte";
@@ -37,11 +37,6 @@
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
   const activePane = $derived(tabs.activePane);
 
-  // Tells the backend the first frame is painted (it only prints with TULKA_STARTUP_PROBE=1).
-  onMount(() => {
-    requestAnimationFrame(() => void invoke("startup_probe").catch(() => {}));
-  });
-
   void explorer.init();
   void connections.loadStartupError();
 
@@ -68,6 +63,11 @@
     }
     restored = true;
     stopAutosave = tabs.startAutosave(saveSession);
+    // Tells the backend the restored workspace is painted (it only prints with TULKA_STARTUP_PROBE=1).
+    await tick();
+    requestAnimationFrame(() => {
+      if (!destroyed) void invoke("startup_probe").catch(() => {});
+    });
   }
   void restoreSession();
 

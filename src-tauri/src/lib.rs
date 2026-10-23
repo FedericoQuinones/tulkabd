@@ -9,8 +9,9 @@ use tulka_app::AppState;
 
 static STARTED: OnceLock<Instant> = OnceLock::new();
 
-/// Opt-in startup probe: with `TULKA_STARTUP_PROBE=1` the UI reports its first
-/// paint and the elapsed time since launch is printed to stdout. Local only.
+/// Opt-in startup probe: with `TULKA_STARTUP_PROBE=1` the UI reports the first
+/// paint of the restored workspace and the elapsed time since launch is printed
+/// to stdout. Local only.
 #[tauri::command]
 fn startup_probe() {
     if std::env::var_os("TULKA_STARTUP_PROBE").is_some_and(|v| v == "1")

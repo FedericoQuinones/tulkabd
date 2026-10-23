@@ -130,3 +130,27 @@ test("the saved session is restored before the workspace renders, without connec
     vi.mocked(invoke).mockImplementation(defaultInvoke);
   }
 });
+
+test("the startup probe fires only once the restored workspace is painted", async () => {
+  unmount(cmp!);
+  await tabs.reset();
+  let resolveSession: (json: string | null) => void = () => {};
+  const defaultInvoke = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) =>
+    cmd === "load_session" ? new Promise((r) => (resolveSession = r)) : defaultInvoke(cmd, args as never),
+  );
+  vi.mocked(invoke).mockClear();
+  const probed = () => vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "startup_probe");
+  try {
+    cmp = mount(App, { target: document.body });
+    flushSync();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(probed()).toBe(false);
+    resolveSession(null);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(document.querySelector(".group")).not.toBeNull();
+    expect(probed()).toBe(true);
+  } finally {
+    vi.mocked(invoke).mockImplementation(defaultInvoke);
+  }
+});
