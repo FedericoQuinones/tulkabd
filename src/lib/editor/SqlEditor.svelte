@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { EditorState } from "@codemirror/state";
+  import { EditorState, Transaction } from "@codemirror/state";
   import { EditorView, drawSelection, keymap, lineNumbers } from "@codemirror/view";
   import { defaultKeymap, history, historyField, historyKeymap } from "@codemirror/commands";
   import { HighlightStyle, bracketMatching, indentOnInput, syntaxHighlighting } from "@codemirror/language";
@@ -103,7 +103,12 @@
     const v = pane.docVersion;
     if (!view || v === shownVersion) return;
     shownVersion = v;
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: pane.initialDoc }, selection: { anchor: 0 } });
+    // Not undoable: Ctrl+Z must not empty a freshly loaded definition.
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: pane.initialDoc },
+      selection: { anchor: 0 },
+      annotations: Transaction.addToHistory.of(false),
+    });
     pane.editorState = null;
   });
 

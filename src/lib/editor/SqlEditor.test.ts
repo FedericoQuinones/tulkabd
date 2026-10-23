@@ -10,6 +10,8 @@ vi.mock("../ipc", () => ({
 }));
 
 import * as ipc from "../ipc";
+import { EditorView } from "@codemirror/view";
+import { undo } from "@codemirror/commands";
 
 import { PaneState } from "../pane/pane.svelte";
 import SqlEditor from "./SqlEditor.svelte";
@@ -36,6 +38,16 @@ test("loadText on a mounted empty editor shows the new text", () => {
   pane.loadText("CREATE VIEW v AS SELECT 2");
   flushSync();
   expect(text()).toBe("CREATE VIEW v AS SELECT 2");
+});
+
+test("undo does not take back the text loadText put in", () => {
+  const pane = new PaneState("t");
+  show(pane);
+  pane.loadText("CREATE VIEW v AS SELECT 1");
+  flushSync();
+  const view = EditorView.findFromDOM(document.querySelector<HTMLElement>(".cm-editor")!)!;
+  expect(undo(view)).toBe(false);
+  expect(text()).toBe("CREATE VIEW v AS SELECT 1");
 });
 
 test("loadText does not overwrite text the user typed", () => {
