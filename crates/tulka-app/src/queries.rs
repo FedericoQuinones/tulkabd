@@ -12,7 +12,8 @@
 //! an encoded name is never empty, `.`, `..` or a path with separators:
 //! every path stays one directory below the root. [`decode_component`]
 //! accepts only the exact output of [`encode_component`]; files with any
-//! other name are ignored. Names are compared exactly (case-sensitive), as
+//! other name are ignored. Scans of the root (listing, the index load, the
+//! temp file sweep) never follow symlinks, so they never leave it. Names are compared exactly (case-sensitive), as
 //! far as the file system allows: on a case-insensitive one (Windows,
 //! macOS) names that differ only in case share one folder or file, as SQL
 //! Server's default collation would, and saving without `overwrite` fails
@@ -189,13 +190,18 @@ impl QueriesStore {
         let mut out = Vec::new();
         match database {
             Some("") => {}
-            Some(db) => list_dir(db, &root.join(encode_component(db)), &mut out),
+            Some(db) => {
+                let dir = root.join(encode_component(db));
+                // Not through a symlink: it could point out of the root.
+                if fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+                    list_dir(db, &dir, &mut out);
+                }
+            }
             None => {
-                for entry in fs::read_dir(root).into_iter().flatten().flatten() {
-                    let path = entry.path();
+                for entry in database_dirs(root) {
                     let db = entry.file_name().to_str().and_then(decode_component);
-                    if let Some(db) = db.filter(|_| path.is_dir()) {
-                        list_dir(&db, &path, &mut out);
+                    if let Some(db) = db {
+                        list_dir(&db, &entry.path(), &mut out);
                     }
                 }
             }
@@ -266,13 +272,13 @@ impl QueriesStore {
             return;
         };
         let _guard = self.lock();
-        for db in fs::read_dir(root).into_iter().flatten().flatten() {
+        for db in database_dirs(root) {
             for entry in fs::read_dir(db.path()).into_iter().flatten().flatten() {
                 let name = entry.file_name();
                 let stale = name
                     .to_str()
                     .is_some_and(|n| n.starts_with(TEMP_PREFIX) && n.ends_with(TEMP_SUFFIX));
-                if stale && entry.path().is_file() {
+                if stale && is_regular_file(&entry) {
                     let _ = fs::remove_file(entry.path());
                 }
             }
@@ -296,7 +302,23 @@ impl QueriesStore {
     }
 }
 
-/// Adds the `.sql` files of `dir` as queries of `database`.
+/// The real folders directly under `root`. Symlinks (and junctions) are
+/// skipped, so no scan ever leaves the root.
+fn database_dirs(root: &Path) -> impl Iterator<Item = fs::DirEntry> {
+    fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+}
+
+/// A regular file, not a symlink to one.
+fn is_regular_file(entry: &fs::DirEntry) -> bool {
+    entry.file_type().is_ok_and(|t| t.is_file())
+}
+
+/// Adds the `.sql` files of `dir` as queries of `database`; symlinks are
+/// skipped.
 fn list_dir(database: &str, dir: &Path, out: &mut Vec<SavedQuery>) {
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         let file_name = entry.file_name();
@@ -307,12 +329,13 @@ fn list_dir(database: &str, dir: &Path, out: &mut Vec<SavedQuery>) {
         else {
             continue;
         };
-        let Ok(meta) = entry.path().metadata() else {
-            continue;
-        };
-        if !meta.is_file() {
+        if !is_regular_file(&entry) {
             continue;
         }
+        // Does not follow links, and `entry` is a regular file.
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
         let modified_ms = meta
             .modified()
             .ok()

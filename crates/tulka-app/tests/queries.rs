@@ -500,3 +500,60 @@ async fn startup_sweeps_temp_files_left_by_a_crash() {
         "SELECT 1"
     );
 }
+
+/// `queries/Linked` → a folder outside the root holding a query and a
+/// temp-like file, and `queries/Ventas/link.sql` → a file outside.
+#[cfg(unix)]
+fn with_outside_links(dir: &TempDir) -> (QueriesStore, PathBuf) {
+    let root = dir.path().join("queries");
+    let store = QueriesStore::at(root.clone());
+    store
+        .save("Ventas", "Reporte mensual", "SELECT 1", false)
+        .unwrap();
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("q.sql"), "SELECT 'outside'").unwrap();
+    std::fs::write(outside.join(".tulka-0123456789abcdef.tmp"), "keep me").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("Linked")).unwrap();
+    std::os::unix::fs::symlink(outside.join("q.sql"), root.join("Ventas").join("link.sql"))
+        .unwrap();
+    (store, outside)
+}
+
+#[cfg(unix)]
+#[test]
+fn list_never_follows_symlinks_out_of_the_root() {
+    let dir = TempDir::new().unwrap();
+    let (store, _outside) = with_outside_links(&dir);
+    assert_eq!(names(&store.list(None)), [("Ventas", "Reporte mensual")]);
+    assert!(store.list(Some("Linked")).is_empty());
+    assert_eq!(
+        names(&store.list(Some("Ventas"))),
+        [("Ventas", "Reporte mensual")]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_never_follows_symlinks_out_of_the_root() {
+    let dir = TempDir::new().unwrap();
+    let (_store, outside) = with_outside_links(&dir);
+    let st = state(&dir);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while search_objects(&st, "rep".into(), 50)
+            .await
+            .queries
+            .is_empty()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the startup index never loaded");
+    assert!(outside.join(".tulka-0123456789abcdef.tmp").exists());
+    assert!(search_objects(&st, "q".into(), 50)
+        .await
+        .queries
+        .iter()
+        .all(|q| q.database != "Linked" && q.name != "link"));
+}
