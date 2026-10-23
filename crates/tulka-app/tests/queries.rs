@@ -459,3 +459,44 @@ fn json_shapes() {
         serde_json::json!({"database": "Ventas", "name": "q", "indices": [0]})
     );
 }
+
+#[tokio::test]
+async fn startup_sweeps_temp_files_left_by_a_crash() {
+    let dir = TempDir::new().unwrap();
+    let store = QueriesStore::at(dir.path().join("queries"));
+    store
+        .save("Ventas", "Reporte mensual", "SELECT 1", false)
+        .unwrap();
+    let db = store
+        .path_of("Ventas", "Reporte mensual")
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let stale = db.join(".tulka-0123456789abcdef.tmp");
+    std::fs::write(&stale, "half written").unwrap();
+    // Not ours: kept.
+    let other = db.join("notes.tmp");
+    std::fs::write(&other, "x").unwrap();
+
+    let st = state(&dir);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while search_objects(&st, "rep".into(), 50)
+            .await
+            .queries
+            .is_empty()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the startup index never loaded");
+    assert!(!stale.exists());
+    assert!(other.exists());
+    assert_eq!(
+        read_saved_query(&st, "Ventas".into(), "Reporte mensual".into())
+            .await
+            .unwrap(),
+        "SELECT 1"
+    );
+}

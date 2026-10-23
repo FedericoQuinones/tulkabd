@@ -24,7 +24,8 @@
 //! rename) and serialized by the store. The palette index of the names is
 //! built from the disk on a background thread at startup and rebuilt after
 //! every save, rename and delete; rebuilds and writes share one lock, so a
-//! slower startup load never replaces a newer index. Errors are plain
+//! slower startup load never replaces a newer index. The startup load first
+//! removes the temporary files a crash may have left. Errors are plain
 //! strings and never contain the query text.
 
 use std::fmt::Write as _;
@@ -44,6 +45,10 @@ use crate::types::{SavedQuery, SavedQueryHit, EMPTY_NAME, EXISTS, NOT_FOUND};
 pub(crate) const SAVED_QUERY_HITS: usize = 20;
 
 const EXTENSION: &str = ".sql";
+
+/// Temporary files of [`write_atomic`]: `.tulka-<uuid>.tmp`.
+const TEMP_PREFIX: &str = ".tulka-";
+const TEMP_SUFFIX: &str = ".tmp";
 
 /// Characters Windows forbids in file names, besides control characters.
 const FORBIDDEN: &str = "<>:\"/\\|?*";
@@ -254,6 +259,26 @@ impl QueriesStore {
         fs::rename(&from, &to).map_err(|e| io_error("rename", e))
     }
 
+    /// Removes the temporary files a crash left in the database folders
+    /// (never listed, but they would pile up). Call it before any write.
+    fn sweep_temp_files(&self) {
+        let Some(root) = &self.root else {
+            return;
+        };
+        let _guard = self.lock();
+        for db in fs::read_dir(root).into_iter().flatten().flatten() {
+            for entry in fs::read_dir(db.path()).into_iter().flatten().flatten() {
+                let name = entry.file_name();
+                let stale = name
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(TEMP_PREFIX) && n.ends_with(TEMP_SUFFIX));
+                if stale && entry.path().is_file() {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
     /// Deletes query `name` of `database` (`"not_found"` if there is none),
     /// and its database folder once empty.
     pub fn delete(&self, database: &str, name: &str) -> Result<(), String> {
@@ -305,7 +330,10 @@ fn list_dir(database: &str, dir: &Path, out: &mut Vec<SavedQuery>) {
 /// always holds either the old or the new text. The temporary name does
 /// not end in `.sql`, so a leftover one is never listed.
 fn write_atomic(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = dir.join(format!(".tulka-{}.tmp", uuid::Uuid::new_v4().simple()));
+    let tmp = dir.join(format!(
+        "{TEMP_PREFIX}{}{TEMP_SUFFIX}",
+        uuid::Uuid::new_v4().simple()
+    ));
     let result = (|| {
         let mut file = fs::File::create_new(&tmp)?;
         file.write_all(bytes)?;
@@ -371,7 +399,9 @@ impl SavedQueries {
         let _ = std::thread::Builder::new()
             .name("tulka-queries-load".into())
             .spawn(move || {
+                // Before any write: every write holds the reload lock.
                 let _guard = loader.reload_lock();
+                loader.store.sweep_temp_files();
                 loader.rebuild();
             });
         queries
