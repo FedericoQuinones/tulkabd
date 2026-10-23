@@ -113,6 +113,8 @@ export class TabsStore {
   private counter = 0;
   private pending = new Map<string, Pending>();
   private saveNotices = new WeakMap<PaneState, string>();
+  /** Binding a saved query tab was opened for, while its pane has none yet (see `tabOf`). */
+  private wanted = new Map<string, { connectionId: string; database: string }>();
 
   get passwordRequest(): PasswordRequest | null {
     return this.passwordRequests[0] ?? null;
@@ -298,6 +300,7 @@ export class TabsStore {
     const g = this.group(this.groupOf(id));
     const [tab] = this.list.splice(i, 1);
     this.pending.delete(id);
+    this.wanted.delete(id);
     this.dropRequest(id);
     if (tab.pane) tab.pane.onedit = null;
     if (g) {
@@ -356,6 +359,7 @@ export class TabsStore {
       if (tab.pane?.connectionId !== connectionId) continue;
       this.dropRequest(tab.id);
       this.pending.delete(tab.id);
+      this.wanted.delete(tab.id);
       tab.connectError = null;
       tab.pane.unbind();
       tab.pane.notice = t("tabs.connectionDeleted");
@@ -491,8 +495,18 @@ export class TabsStore {
     this.saveNotices.delete(pane);
   }
 
-  private tabOf(q: { database: string; name: string }): Tab | undefined {
-    return this.list.find((x) => x.savedQuery?.database === q.database && x.savedQuery.name === q.name);
+  /**
+   * The open tab of a saved query. With `connectionId` (a tree click), only one bound to that
+   * connection and the query's database, or still connecting to them; any one otherwise.
+   */
+  private tabOf(q: { database: string; name: string }, connectionId: string | null = null): Tab | undefined {
+    return this.list.find((x) => {
+      if (x.savedQuery?.database !== q.database || x.savedQuery.name !== q.name) return false;
+      if (connectionId === null) return true;
+      const bound = this.binding(x);
+      const b = bound.connectionId !== null ? bound : (this.wanted.get(x.id) ?? bound);
+      return b.connectionId === connectionId && b.database === q.database;
+    });
   }
 
   /**
@@ -500,19 +514,22 @@ export class TabsStore {
    * null); when it is already open, shows that tab instead. Rejects when the file cannot be read.
    */
   async openSavedQuery(q: { database: string; name: string }, connectionId: string | null): Promise<string> {
-    let open = this.tabOf(q);
+    let open = this.tabOf(q, connectionId);
     if (!open) {
       const text = await ipc.readSavedQuery(q.database, q.name);
       // Opened by another click while reading.
-      open = this.tabOf(q);
+      open = this.tabOf(q, connectionId);
       if (!open) {
-        return this.open({
+        const id = this.open({
           kind: "query",
           connectionId: connectionId ?? undefined,
           database: connectionId ? q.database : undefined,
           sql: text,
           savedQuery: { database: q.database, name: q.name },
         });
+        // Its session opens in the background; until then the binding it asked for counts.
+        if (connectionId) this.wanted.set(id, { connectionId, database: q.database });
+        return id;
       }
     }
     this.activate(open.id);
@@ -552,6 +569,7 @@ export class TabsStore {
     this.passwordRequests = [];
     this.nameRequest = null;
     this.pending.clear();
+    this.wanted.clear();
     for (const tab of w.list) this.track(tab);
     this.counter = Math.max(0, ...w.list.map((x) => Number(/^untitled-(\d+)$/.exec(x.title)?.[1] ?? 0)));
     for (const p of old) void p?.close();
@@ -638,6 +656,7 @@ export class TabsStore {
     this.passwordRequests = [];
     this.nameRequest = null;
     this.pending.clear();
+    this.wanted.clear();
     this.counter = 0;
     await Promise.all(panes.map((p) => p?.close()));
   }

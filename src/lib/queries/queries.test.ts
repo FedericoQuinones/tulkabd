@@ -317,3 +317,21 @@ test("the notice of a failed Ctrl+S goes away once a save succeeds", async () =>
   await tabs.saveActive();
   expect(tab.pane!.notice).toBeNull();
 });
+
+test("a tree click reuses only a tab bound to the clicked connection and database", async () => {
+  const prod = await tabs.openSavedQuery({ database: "Ventas", name: "Reporte" }, "c1");
+  // Clicked again while its session is still opening: the same tab.
+  expect(await tabs.openSavedQuery({ database: "Ventas", name: "Reporte" }, "c1")).toBe(prod);
+  await flush();
+  expect(await tabs.openSavedQuery({ database: "Ventas", name: "Reporte" }, "c1")).toBe(prod);
+  const test = await tabs.openSavedQuery({ database: "Ventas", name: "Reporte" }, "c2");
+  expect(test).not.toBe(prod);
+  await flush();
+  const tab = tabs.list.find((x) => x.id === test)!;
+  expect(tab.pane!.connectionId).toBe("c2");
+  expect(tab.pane!.database).toBe("Ventas");
+  expect(tabs.activeId).toBe(test);
+  // Without a connection (palette, Rail) any open tab of the query is reused: the first one.
+  expect(await tabs.openSavedQuery({ database: "Ventas", name: "Reporte" }, null)).toBe(prod);
+  expect(ipc.readSavedQuery).toHaveBeenCalledTimes(2);
+});
