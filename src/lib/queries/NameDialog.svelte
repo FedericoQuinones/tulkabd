@@ -21,9 +21,13 @@
   let busy = $state(false);
   let input: HTMLInputElement;
 
+  // Focus goes back where it was (the editor, usually) when the dialog closes.
+  const before = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
+
   onMount(() => {
     input.focus();
     input.select();
+    return () => before?.focus?.();
   });
 
   async function submit(overwrite: boolean) {

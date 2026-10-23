@@ -363,3 +363,14 @@ test("Ctrl+S on a definition tab waits for the definition and offers the object'
   await retry;
   expect(tab.pane!.text()).toBe("CREATE PROCEDURE A");
 });
+
+test("NameDialog gives the focus back when it closes", () => {
+  const before = document.createElement("button");
+  document.body.append(before);
+  before.focus();
+  const dialog = mount(NameDialog, { target: document.body, props: { title: "Save query", initial: "", onsubmit: vi.fn(), oncancel: vi.fn() } });
+  flushSync();
+  expect(document.activeElement?.tagName).toBe("INPUT");
+  unmount(dialog);
+  expect(document.activeElement).toBe(before);
+});
