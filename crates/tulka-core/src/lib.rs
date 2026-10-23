@@ -13,8 +13,8 @@ pub mod secrets;
 pub mod value;
 
 pub use config::{
-    AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope, Environment, Folder,
-    GuardLevel,
+    clamp_zoom, AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope, Environment,
+    Folder, GuardLevel, Preferences,
 };
 pub use connstr::{
     format_connection_string, parse_connection_string, ConnStrError, ParsedConnection,

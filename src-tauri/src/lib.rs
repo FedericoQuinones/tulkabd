@@ -62,6 +62,8 @@ pub fn run() {
             conn::move_folder,
             conn::list_expanded,
             conn::set_expanded,
+            conn::get_preferences,
+            conn::set_zoom,
             conn::list_server_databases,
             conn::parse_connection_string,
             conn::duplicate_connection,

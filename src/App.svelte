@@ -17,6 +17,7 @@
   import SavedQueriesPanel from "./lib/queries/SavedQueriesPanel.svelte";
   import { queries } from "./lib/queries/queries.svelte";
   import { shortcutAction } from "./lib/tabs/shortcuts";
+  import { zoom } from "./lib/zoom.svelte";
   import { tabs } from "./lib/tabs/tabs.svelte";
   import Workspace from "./lib/workspace/Workspace.svelte";
   import { parseSession, restore } from "./lib/workspace/session";
@@ -43,6 +44,7 @@
   void explorer.init();
   void queries.reload();
   void connections.loadStartupError();
+  zoom.init();
 
   // The saved session is restored before the workspace first renders (a mounting editor takes the
   // focus only in the active group). Nothing connects. Autosave starts after, so an empty
@@ -124,7 +126,8 @@
     const action = shortcutAction(e, isMac);
     if (!action) return;
     e.preventDefault();
-    if (action === "palette") palette.show();
+    if (action === "zoomIn" || action === "zoomOut" || action === "zoomReset") zoom.apply(action);
+    else if (action === "palette") palette.show();
     else if (action === "save") void tabs.saveActive();
     else if (action === "new") tabs.newTab();
     else if (action === "splitRight") tabs.splitActive("row");

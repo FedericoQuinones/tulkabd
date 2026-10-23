@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use tulka_core::{
-    format_connection_string, AppConfig, ConnectParams, ConnectionConfig, Folder, ParsedConnection,
-    SecretError, SecretStore, ServerInfo,
+    clamp_zoom, format_connection_string, AppConfig, ConnectParams, ConnectionConfig, Folder,
+    ParsedConnection, Preferences, SecretError, SecretStore, ServerInfo,
 };
 
 use crate::explorer;
@@ -403,6 +403,22 @@ pub async fn set_expanded(state: &AppState, ids: Vec<String>) -> Result<(), Stri
         let mut seen = std::collections::HashSet::new();
         config.expanded = ids.into_iter().filter(|i| seen.insert(i.clone())).collect();
         Ok(())
+    })
+    .await
+}
+
+/// The saved preferences.
+pub async fn get_preferences(state: &AppState) -> Preferences {
+    state.connections.lock().await.preferences.clone()
+}
+
+/// Stores the zoom of the editor and the grid, brought into 70 to 200, and
+/// returns the stored value.
+pub async fn set_zoom(state: &AppState, zoom: u16) -> Result<u16, String> {
+    let zoom = clamp_zoom(zoom);
+    mutate(state, |config| {
+        config.preferences.zoom = zoom;
+        Ok(zoom)
     })
     .await
 }

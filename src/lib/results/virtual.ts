@@ -1,3 +1,11 @@
+/** Row height of the result grid at 100 % zoom, in px. */
+export const BASE_ROW_HEIGHT = 34;
+
+/** Row height of the result grid at `zoom` percent, rounded to whole pixels. */
+export function rowHeight(zoom: number): number {
+  return Math.round((BASE_ROW_HEIGHT * zoom) / 100);
+}
+
 /** Rows of the window requested from `fetch_rows`. */
 export const WINDOW_SIZE = 200;
 

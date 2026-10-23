@@ -27,6 +27,9 @@
   --radius-card: 6px;
   --radius-control: 999px;
   --font: "Public Sans", Inter, system-ui, sans-serif;
+  /* Editor and grid text: 100 % size and the zoom (percent, set from preferences). */
+  --code-size: 13px;
+  --code-zoom: 100;
   --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
 }
 

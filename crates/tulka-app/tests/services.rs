@@ -1390,6 +1390,24 @@ async fn folders_move_connection_and_expanded_persist() {
 }
 
 #[tokio::test]
+async fn set_zoom_clamps_and_persists() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    assert_eq!(get_preferences(&f.state).await.zoom, 100);
+    assert_eq!(set_zoom(&f.state, 500).await.unwrap(), 200);
+    assert_eq!(set_zoom(&f.state, 20).await.unwrap(), 70);
+    assert_eq!(set_zoom(&f.state, 130).await.unwrap(), 130);
+    assert_eq!(get_preferences(&f.state).await.zoom, 130);
+    assert_eq!(
+        ConfigStore::at(f._dir.path().join("config.json"))
+            .load()
+            .unwrap()
+            .preferences
+            .zoom,
+        130
+    );
+}
+
+#[tokio::test]
 async fn folders_read_only_mode_rejects_everything() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.json");
@@ -1410,6 +1428,10 @@ async fn folders_read_only_mode_rejects_everything() {
     ro(move_folder(&state, "x".into(), None).await);
     ro(move_connection(&state, "x".into(), None).await);
     ro(set_expanded(&state, vec!["x".into()]).await);
+    assert!(set_zoom(&state, 150)
+        .await
+        .unwrap_err()
+        .contains("read-only"));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
 }
 

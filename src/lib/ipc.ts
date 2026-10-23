@@ -276,6 +276,14 @@ export const moveFolder = (id: string, parentId: string | null) =>
 export const listExpanded = () => invoke<string[]>("list_expanded");
 /** Replaces the set of expanded folder and connection ids. */
 export const setExpanded = (ids: string[]) => invoke<void>("set_expanded", { ids });
+/** Interface preferences kept in `config.json`. */
+export interface Preferences {
+  /** Zoom of the editor and the result grid, in percent (70 to 200). */
+  zoom: number;
+}
+export const getPreferences = () => invoke<Preferences>("get_preferences");
+/** Stores the zoom (percent); resolves to the value kept, brought into 70 to 200. */
+export const setZoom = (zoom: number) => invoke<number>("set_zoom", { zoom });
 /**
  * Parses an ADO.NET, ODBC, JDBC or `sqlserver://` connection string. Errors are codes that never
  * contain the text: `"empty"`, `"no_server"`, `"bad_port"`, `"bad_value:<key>"`, `"unsupported_auth"`,

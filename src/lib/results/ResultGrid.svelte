@@ -6,7 +6,8 @@
   import type { PaneResult } from "../pane/reduce";
   import { cellText } from "./cellText";
   import { isSelected, type GridSelection } from "./selection";
-  import { visibleRange } from "./virtual";
+  import { rowHeight, visibleRange } from "./virtual";
+  import { zoom } from "../zoom.svelte";
   import { WindowCache } from "./windowCache";
 
   interface Props {
@@ -18,7 +19,6 @@
   }
   let { tabId, resultIndex, result, final }: Props = $props();
 
-  const ROW_HEIGHT = 34;
   const HEADER_HEIGHT = 36;
   const ID_WIDTH = 56;
   const NUMERIC = new Set(["int", "bigint", "smallint", "tinyint", "decimal", "numeric", "float", "real", "money", "smallmoney"]);
@@ -44,7 +44,8 @@
   const numeric = $derived(columns.map((c) => NUMERIC.has(c.typeName.toLowerCase())));
   const colWidth = (i: number) => widths[i] ?? (numeric[i] ? 120 : 180);
   const totalWidth = $derived(columns.reduce((sum, _, i) => sum + colWidth(i), ID_WIDTH));
-  const range = $derived(visibleRange(scrollTop, Math.max(viewportHeight - HEADER_HEIGHT, 0), ROW_HEIGHT, total));
+  const rowH = $derived(rowHeight(zoom.level));
+  const range = $derived(visibleRange(scrollTop, Math.max(viewportHeight - HEADER_HEIGHT, 0), rowH, total));
   const indexes = $derived(Array.from({ length: range.end - range.start }, (_, i) => range.start + i));
 
   export function getSelection(): GridSelection | null {
@@ -110,7 +111,7 @@
   bind:clientHeight={viewportHeight}
   onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}
 >
-  <div class="inner" style:width="{totalWidth}px" style:height="{HEADER_HEIGHT + total * ROW_HEIGHT}px">
+  <div class="inner" style:width="{totalWidth}px" style:height="{HEADER_HEIGHT + total * rowH}px">
     <div class="head" style:height="{HEADER_HEIGHT}px" role="row">
       <div class="id" style:width="{ID_WIDTH}px" role="columnheader">{t("results.rowNumber")}</div>
       {#each columns as c, i (i)}
@@ -123,7 +124,7 @@
     </div>
     {#each indexes as i (i)}
       {@const row = rowAt(i)}
-      <div class="row" style:top="{HEADER_HEIGHT + i * ROW_HEIGHT}px" style:height="{ROW_HEIGHT}px" role="row">
+      <div class="row" style:top="{HEADER_HEIGHT + i * rowH}px" style:height="{rowH}px" role="row">
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <div
           class="id num"
@@ -249,10 +250,14 @@
     font-size: 12px;
     cursor: pointer;
   }
+  .row .id {
+    font-size: calc(12px * var(--code-zoom) / 100);
+  }
   .head .id {
     cursor: default;
   }
   .row {
+    font-size: calc(var(--code-size) * var(--code-zoom) / 100);
     position: absolute;
     left: 0;
     display: flex;

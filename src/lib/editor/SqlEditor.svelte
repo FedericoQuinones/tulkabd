@@ -12,6 +12,7 @@
   import { runTarget } from "./runTarget";
   import { completionSource, sharedMetadata } from "./completion";
   import type { CompletionMetadata } from "../ipc";
+  import { zoom } from "../zoom.svelte";
 
   interface Props {
     /** Supplies the starting text and keeps the editor state across tab switches. */
@@ -29,9 +30,9 @@
 
   const theme = EditorView.theme(
     {
-      "&": { height: "100%", color: "#ffffff", backgroundColor: "transparent", fontSize: "13px" },
+      "&": { height: "100%", color: "#ffffff", backgroundColor: "transparent", fontSize: "calc(var(--code-size) * var(--code-zoom) / 100)" },
       "&.cm-focused": { outline: "none" },
-      ".cm-scroller": { fontFamily: "var(--mono)", lineHeight: "22px", overflow: "auto" },
+      ".cm-scroller": { fontFamily: "var(--mono)", lineHeight: "calc(22px * var(--code-zoom) / 100)", overflow: "auto" },
       ".cm-content": { padding: "12px 0", caretColor: "#ffffff" },
       ".cm-line": { padding: "0 14px 0 0" },
       ".cm-gutters": { backgroundColor: "transparent", color: "#55565b", border: "none" },
@@ -98,6 +99,12 @@
     if (built?.meta !== meta) built = { meta, source: completionSource(meta) };
     return built.source(ctx);
   }
+
+  // The zoom changes the font and line height through CSS: CodeMirror re-measures its lines.
+  $effect(() => {
+    void zoom.level;
+    view?.requestMeasure();
+  });
 
   let shownVersion = -1;
   // True while `loadText`'s content goes in, which is not an edit by the user.

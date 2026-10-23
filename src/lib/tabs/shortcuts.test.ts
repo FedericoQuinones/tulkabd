@@ -77,3 +77,24 @@ test("ctrl+s saves from the code editor, but not from a plain input", () => {
   expect(shortcutAction(ev("s", { ctrlKey: true }, rename), false)).toBeNull();
   expect(shortcutAction(ev("s", { ctrlKey: true, shiftKey: true }), false)).toBeNull();
 });
+
+test("ctrl with plus, minus and zero zoom, including in the code editor", () => {
+  const cm = { tagName: "DIV", isContentEditable: true, closest: (s: string) => (s === ".cm-editor" ? {} : null) } as unknown as HTMLElement;
+  expect(shortcutAction(ev("=", { ctrlKey: true }), false)).toBe("zoomIn");
+  expect(shortcutAction(ev("+", { ctrlKey: true }), false)).toBe("zoomIn");
+  expect(shortcutAction(ev("+", { ctrlKey: true, shiftKey: true, code: "Equal" }), false)).toBe("zoomIn");
+  expect(shortcutAction(ev("-", { ctrlKey: true }), false)).toBe("zoomOut");
+  expect(shortcutAction(ev("0", { ctrlKey: true }), false)).toBe("zoomReset");
+  expect(shortcutAction(ev("=", { metaKey: true }, cm), true)).toBe("zoomIn");
+  expect(shortcutAction(ev("-", { ctrlKey: true }, cm), false)).toBe("zoomOut");
+});
+test("zoom falls back to the physical key and keeps plain inputs", () => {
+  expect(shortcutAction(ev("¿", { ctrlKey: true, code: "Equal" }), false)).toBe("zoomIn");
+  expect(shortcutAction(ev("x", { ctrlKey: true, code: "NumpadAdd" }), false)).toBe("zoomIn");
+  expect(shortcutAction(ev("x", { ctrlKey: true, code: "NumpadSubtract" }), false)).toBe("zoomOut");
+  expect(shortcutAction(ev("x", { ctrlKey: true, code: "Numpad0" }), false)).toBe("zoomReset");
+  expect(shortcutAction(ev("x", { ctrlKey: true, code: "Digit0" }), false)).toBe("zoomReset");
+  const input = { tagName: "INPUT", isContentEditable: false, closest: () => null } as unknown as HTMLElement;
+  expect(shortcutAction(ev("=", { ctrlKey: true }, input), false)).toBeNull();
+  expect(shortcutAction(ev("-", { ctrlKey: true, shiftKey: true }), false)).toBeNull();
+});
