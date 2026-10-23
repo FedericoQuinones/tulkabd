@@ -2,6 +2,7 @@ import { t } from "../i18n/t";
 import * as ipc from "../ipc";
 import type { ConnectionConfig } from "../ipc";
 import { connections } from "../connections/store.svelte";
+import { queries, type NameRequest } from "../queries/queries.svelte";
 import { ENVIRONMENTS } from "../connections/env";
 import { PaneState } from "../pane/pane.svelte";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -9,7 +10,15 @@ import { groups, removeGroup, split, type Layout } from "../workspace/layout";
 import { snapshot, watchSession } from "../workspace/session";
 
 export type TabSpec =
-  | { kind: "query"; connectionId?: string; database?: string; sql?: string; run?: boolean }
+  | {
+      kind: "query";
+      connectionId?: string;
+      database?: string;
+      sql?: string;
+      run?: boolean;
+      /** The saved query `sql` was read from: the tab takes its name. */
+      savedQuery?: { database: string; name: string };
+    }
   | { kind: "structure"; connectionId: string; database: string; schema: string; name: string }
   | { kind: "definition"; connectionId: string; database: string; schema: string; name: string };
 
@@ -27,7 +36,7 @@ export interface Tab {
   name?: string;
   /** Why the last connect of this tab failed; shown in the tab's own toolbar. */
   connectError: string | null;
-  /** Query tabs: the text differs from the saved query or file it was opened from. */
+  /** Query tabs: edited since opened, or since last saved (as a saved query or file). */
   dirty: boolean;
   /** Query tabs opened from (or saved as) a saved query. */
   savedQuery?: { database: string; name: string };
@@ -98,9 +107,12 @@ export class TabsStore {
   activeGroupId = $state(this.tabGroups[0].id);
   /** Tabs waiting for a password, oldest first; App shows the prompt for the first. */
   passwordRequests = $state<PasswordRequest[]>([]);
+  /** The name dialog App shows (Ctrl+S on a tab not saved yet). */
+  nameRequest = $state.raw<NameRequest | null>(null);
 
   private counter = 0;
   private pending = new Map<string, Pending>();
+  private saveNotices = new WeakMap<PaneState, string>();
 
   get passwordRequest(): PasswordRequest | null {
     return this.passwordRequests[0] ?? null;
@@ -153,8 +165,20 @@ export class TabsStore {
     return { connectionId: tab.connectionId ?? null, database: tab.database ?? null };
   }
 
+  /** An edit by the user in a query tab marks it unsaved. */
+  private track(tab: Tab) {
+    const id = tab.id;
+    if (tab.pane) {
+      tab.pane.onedit = () => {
+        const x = this.list.find((y) => y.id === id);
+        if (x && !x.dirty) x.dirty = true;
+      };
+    }
+  }
+
   /** Adds the tab to the active group and shows it there. */
   private add(tab: Tab) {
+    this.track(tab);
     this.list.push(tab);
     const g = this.group(this.activeGroupId)!;
     g.tabIds.push(tab.id);
@@ -178,9 +202,11 @@ export class TabsStore {
       return id;
     }
     const pane = new PaneState(id);
-    const title = spec.kind === "definition" ? spec.name : `untitled-${++this.counter}`;
+    const saved = spec.kind === "query" ? spec.savedQuery : undefined;
+    const title = spec.kind === "definition" ? spec.name : saved ? saved.name : `untitled-${++this.counter}`;
     if (spec.kind === "query" && spec.sql) pane.initialDoc = spec.sql;
     const tab: Tab = { id, kind: "query", title, pane, connectError: null, dirty: false };
+    if (saved) tab.savedQuery = { database: saved.database, name: saved.name };
     if (spec.kind === "definition") {
       tab.connectionId = spec.connectionId;
       tab.database = spec.database;
@@ -273,6 +299,7 @@ export class TabsStore {
     const [tab] = this.list.splice(i, 1);
     this.pending.delete(id);
     this.dropRequest(id);
+    if (tab.pane) tab.pane.onedit = null;
     if (g) {
       this.detach(g, id);
       this.dropIfEmpty(g);
@@ -301,6 +328,8 @@ export class TabsStore {
     } else if (result.kind === "error") {
       tab.connectError = t("explorer.connectFailed", { error: result.error });
     } else if (result.kind === "ok") {
+      // Bound to a database now: why Ctrl+S could not save no longer holds.
+      this.clearSaveNotice(pane);
       const p = this.pending.get(id);
       this.pending.delete(id);
       if (p?.run && p.sql) void pane.run(p.sql, p.lineOffset ?? 0);
@@ -385,6 +414,131 @@ export class TabsStore {
   }
 
   /**
+   * Ctrl+S on the active query tab. A saved query is overwritten in place. A tab not saved yet asks
+   * for a name (through `nameRequest`) and is saved under its database; without one it says so.
+   */
+  async saveActive(): Promise<void> {
+    const tab = this.active;
+    const pane = tab?.pane;
+    if (!tab || !pane) return;
+    if (tab.savedQuery) {
+      const { database, name } = tab.savedQuery;
+      const edits = pane.edits;
+      try {
+        await queries.save(database, name, pane.text(), true);
+      } catch (e) {
+        this.saveNotice(pane, t("queries.saveFailed", { error: String(e) }));
+        return;
+      }
+      // Typing while the save was in flight leaves the tab unsaved.
+      if (pane.edits === edits) tab.dirty = false;
+      this.clearSaveNotice(pane);
+      return;
+    }
+    // Task 10: a tab with `file` writes the file back here, in its encoding and line endings.
+    const database = this.binding(tab).database;
+    if (!database) {
+      this.saveNotice(pane, t("queries.pickDatabase"));
+      return;
+    }
+    const id = tab.id;
+    const request: NameRequest = {
+      title: t("queries.saveTitle", { database }),
+      initial: "",
+      onsubmit: async (name, overwrite) => {
+        const x = this.list.find((y) => y.id === id);
+        if (!x?.pane) {
+          this.nameRequest = null;
+          return null;
+        }
+        const edits = x.pane.edits;
+        try {
+          await queries.save(database, name, x.pane.text(), overwrite);
+        } catch (e) {
+          return String(e);
+        }
+        if (this.nameRequest === request) this.nameRequest = null;
+        this.markSaved(x, { database, name });
+        if (x.pane.edits === edits) x.dirty = false;
+        return null;
+      },
+      oncancel: () => {
+        if (this.nameRequest === request) this.nameRequest = null;
+      },
+    };
+    this.nameRequest = request;
+  }
+
+  /** The tab now holds a saved query: it takes its name, and a definition tab stops being one. */
+  private markSaved(tab: Tab, q: { database: string; name: string }) {
+    tab.savedQuery = { database: q.database, name: q.name };
+    tab.title = q.name;
+    if (tab.name !== undefined) {
+      tab.connectionId = tab.database = tab.schema = tab.name = undefined;
+    }
+    if (tab.pane) this.clearSaveNotice(tab.pane);
+  }
+
+  /** Why Ctrl+S did not save, shown above the editor until a save or a connect succeeds. */
+  private saveNotice(pane: PaneState, text: string) {
+    pane.notice = text;
+    this.saveNotices.set(pane, text);
+  }
+
+  /** Clears the pane's notice only when it is still the one `saveNotice` put there. */
+  private clearSaveNotice(pane: PaneState) {
+    if (pane.notice !== null && pane.notice === this.saveNotices.get(pane)) pane.notice = null;
+    this.saveNotices.delete(pane);
+  }
+
+  private tabOf(q: { database: string; name: string }): Tab | undefined {
+    return this.list.find((x) => x.savedQuery?.database === q.database && x.savedQuery.name === q.name);
+  }
+
+  /**
+   * Opens a saved query in a new tab bound to `connectionId` and the query's database (unbound when
+   * null); when it is already open, shows that tab instead. Rejects when the file cannot be read.
+   */
+  async openSavedQuery(q: { database: string; name: string }, connectionId: string | null): Promise<string> {
+    let open = this.tabOf(q);
+    if (!open) {
+      const text = await ipc.readSavedQuery(q.database, q.name);
+      // Opened by another click while reading.
+      open = this.tabOf(q);
+      if (!open) {
+        return this.open({
+          kind: "query",
+          connectionId: connectionId ?? undefined,
+          database: connectionId ? q.database : undefined,
+          sql: text,
+          savedQuery: { database: q.database, name: q.name },
+        });
+      }
+    }
+    this.activate(open.id);
+    return open.id;
+  }
+
+  /** Renames a saved query and the tabs showing it. Rejects with the backend's error code. */
+  async renameSavedQuery(database: string, name: string, newName: string): Promise<void> {
+    await queries.rename(database, name, newName);
+    for (const tab of this.list) {
+      if (tab.savedQuery?.database === database && tab.savedQuery.name === name) {
+        tab.savedQuery = { database, name: newName };
+        tab.title = newName;
+      }
+    }
+  }
+
+  /** Deletes a saved query. A tab showing it keeps its text, now unsaved: Ctrl+S writes it again. */
+  async deleteSavedQuery(database: string, name: string): Promise<void> {
+    await queries.remove(database, name);
+    for (const tab of this.list) {
+      if (tab.savedQuery?.database === database && tab.savedQuery.name === name) tab.dirty = true;
+    }
+  }
+
+  /**
    * Replaces the whole workspace with a restored one (see `restore` in workspace/session). Nothing
    * connects: a bound tab opens its session on its first Run. Untitled numbering continues after
    * the highest restored `untitled-N`.
@@ -396,7 +550,9 @@ export class TabsStore {
     this.layout = w.layout;
     this.activeGroupId = w.activeGroupId;
     this.passwordRequests = [];
+    this.nameRequest = null;
     this.pending.clear();
+    for (const tab of w.list) this.track(tab);
     this.counter = Math.max(0, ...w.list.map((x) => Number(/^untitled-(\d+)$/.exec(x.title)?.[1] ?? 0)));
     for (const p of old) void p?.close();
   }
@@ -480,6 +636,7 @@ export class TabsStore {
     this.layout = { kind: "group", id: g.id };
     this.activeGroupId = g.id;
     this.passwordRequests = [];
+    this.nameRequest = null;
     this.pending.clear();
     this.counter = 0;
     await Promise.all(panes.map((p) => p?.close()));

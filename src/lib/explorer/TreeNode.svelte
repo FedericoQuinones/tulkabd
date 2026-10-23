@@ -26,10 +26,12 @@
     table: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 6.5h12M6 6.5V13"/>',
     view: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 6.5h12" stroke-dasharray="2 1.5"/>',
     procedure: '<path d="M5 3 2 8l3 5M11 3l3 5-3 5"/>',
+    saved: '<path d="M8 1.8l1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.6l-3.8 2 .7-4.3-3.1-3 4.3-.6z"/>',
+    savedQuery: '<path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13M6.5 8.5h4M6.5 11h4"/>',
   };
 
   const name = $derived(
-    row.kind === "folder" ? row.folder.name : row.kind === "connection" ? row.conn.name : "",
+    row.kind === "folder" ? row.folder.name : row.kind === "connection" ? row.conn.name : row.kind === "savedQuery" ? row.name : "",
   );
   const movable = $derived((row.kind === "folder" || row.kind === "connection") && !renaming);
   const dimmed = $derived(
@@ -90,13 +92,19 @@
     <svg class="i ic" viewBox="0 0 16 16" aria-hidden="true">{@html icons.database}</svg>
   {:else if row.kind === "group"}
     <svg class="i ic" viewBox="0 0 16 16" aria-hidden="true">{@html icons[row.objectKind]}</svg>
+  {:else if row.kind === "saved" || row.kind === "savedQuery"}
+    <svg class="i ic" viewBox="0 0 16 16" aria-hidden="true">{@html icons[row.kind]}</svg>
   {/if}
 
   {#if renaming}
     <input
       bind:this={input}
       bind:value
-      aria-label={row.kind === "folder" ? t("explorer.renameFolder") : t("connection.rename.label")}
+      aria-label={row.kind === "folder"
+        ? t("explorer.renameFolder")
+        : row.kind === "savedQuery"
+          ? t("queries.rename.label")
+          : t("connection.rename.label")}
       onclick={(e) => e.stopPropagation()}
       onblur={() => finish(true)}
       onkeydown={(e) => {
@@ -118,6 +126,11 @@
   {:else if row.kind === "group"}
     <span class="lab">{t(`explorer.group.${row.objectKind}`)}</span>
     {#if row.count !== null}<span class="tail num">{row.count}</span>{/if}
+  {:else if row.kind === "saved"}
+    <span class="lab">{t("explorer.group.saved")}</span>
+    <span class="tail num">{row.count}</span>
+  {:else if row.kind === "savedQuery"}
+    <span class="lab">{row.name}</span>
   {:else if row.kind === "object"}
     <span class="lab">{row.object.schema}.{row.object.name}</span>
   {:else if row.kind === "column"}

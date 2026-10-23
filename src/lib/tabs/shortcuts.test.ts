@@ -65,3 +65,10 @@ test("split shortcuts do not fire from a plain input, but do from the code edito
   const cm = { tagName: "DIV", isContentEditable: true, closest: (s: string) => (s === ".cm-editor" ? {} : null) } as unknown as HTMLElement;
   expect(shortcutAction(ev("|", { ctrlKey: true, shiftKey: true, code: "Backslash" }, cm), false)).toBe("splitDown");
 });
+test("ctrl+s saves, also from a plain input", () => {
+  expect(shortcutAction(ev("s", { ctrlKey: true }), false)).toBe("save");
+  expect(shortcutAction(ev("s", { metaKey: true }), true)).toBe("save");
+  const input = { tagName: "INPUT", isContentEditable: false, closest: () => null } as unknown as HTMLElement;
+  expect(shortcutAction(ev("s", { ctrlKey: true }, input), false)).toBe("save");
+  expect(shortcutAction(ev("s", { ctrlKey: true, shiftKey: true }), false)).toBeNull();
+});

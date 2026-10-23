@@ -8,6 +8,7 @@ import * as ipc from "../ipc";
 import type { AppEvent, CachedDatabase, ColumnInfo, ConnectionConfig, DbObject, Folder, ObjectKind, PaletteHit } from "../ipc";
 import { connections } from "../connections/store.svelte";
 import { tabs } from "../tabs/tabs.svelte";
+import { pickConnection, queries, queryError } from "../queries/queries.svelte";
 import {
   actionError,
   buildMenu,
@@ -163,7 +164,8 @@ class ExplorerStore {
       return;
     }
     const k = parseKey(key);
-    if (k?.[0] === "g") await this.loadObjects(k[1], k[2], k[3] as ObjectKind);
+    if (k?.[0] === "q") await queries.reload();
+    else if (k?.[0] === "g") await this.loadObjects(k[1], k[2], k[3] as ObjectKind);
     else if (k?.[0] === "o") {
       const [, c, d, kind, schema, name] = k;
       await this.loadColumns(c, d, { schema, name, kind: kind as ObjectKind });
@@ -576,6 +578,7 @@ class ExplorerStore {
     const { fs, out } = ctx;
     const parent = keyOf.db(c, db.name);
     const counts: Record<ObjectKind, number> = { table: db.tables, view: db.views, procedure: db.procedures };
+    this.savedRows(ctx, c, db.name, level, inMatch);
     for (const kind of OBJECT_KINDS) {
       const key = keyOf.group(c, db.name, kind);
       if (!this.visible(fs, key, inMatch)) continue;
@@ -614,6 +617,32 @@ class ExplorerStore {
         objects = fs?.hits.get(key) ?? [];
       }
       for (const o of objects) this.objectRow(out, c, db.name, o, level + 1, key);
+    }
+  }
+
+  /** "Saved queries (N)" first under a database, and the queries when it is open. */
+  private savedRows(ctx: { fs: FilterSets | null; out: Row[] }, c: string, database: string, level: number, inMatch: boolean) {
+    const { fs, out } = ctx;
+    const key = keyOf.saved(c, database);
+    if (!this.visible(fs, key, inMatch)) return;
+    const list = queries.list(database);
+    const open = this.open(fs, key);
+    const parent = keyOf.db(c, database);
+    out.push({ key, level, parent, expandable: true, expanded: open, kind: "saved", connectionId: c, database, count: list.length });
+    if (!open) return;
+    if (list.length === 0) out.push(this.notice(key, "empty", level + 1, "muted", t("explorer.none")));
+    for (const q of list) {
+      out.push({
+        key: keyOf.savedQuery(c, database, q.name),
+        level: level + 1,
+        parent: key,
+        expandable: false,
+        expanded: false,
+        kind: "savedQuery",
+        connectionId: c,
+        database,
+        name: q.name,
+      });
     }
   }
 
@@ -744,6 +773,37 @@ class ExplorerStore {
     if (target) {
       this.expanded.add(target);
       this.schedulePersist();
+    }
+  }
+
+  // ---- saved queries -----------------------------------------------------
+
+  /** The connection a saved query of `database` opens on, outside the tree (plan D6). */
+  savedQueryConnection(database: string): string | null {
+    const active = tabs.active;
+    const activeId = tabs.binding(active).connectionId;
+    const candidates = connections.list.map((c) => {
+      const databases = (this.conns[c.id]?.databases ?? []).map((d) => d.name);
+      if (c.id === activeId && active?.pane?.session) databases.push(...active.pane.session.databases);
+      return { id: c.id, connected: this.conns[c.id]?.status === "connected", databases };
+    });
+    return pickConnection(database, activeId, candidates);
+  }
+
+  /** Opens a saved query from the tree, on the connection it was clicked under. */
+  async openSavedQuery(connectionId: string, database: string, name: string): Promise<void> {
+    try {
+      await tabs.openSavedQuery({ database, name }, connectionId);
+    } catch (e) {
+      this.error = queryError(e);
+    }
+  }
+
+  async revealSavedQuery(database: string, name: string): Promise<void> {
+    try {
+      await ipc.revealSavedQuery(database, name);
+    } catch (e) {
+      this.error = queryError(e);
     }
   }
 

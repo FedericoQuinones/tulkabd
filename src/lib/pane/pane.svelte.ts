@@ -53,8 +53,10 @@ export class PaneState {
   initialDoc = $state("");
   /** Bumped when `loadText` replaces the document; a mounted editor swaps its content. */
   docVersion = $state(0);
-  /** Bumped by the mounted editor on every document change; the session autosave watches it. */
+  /** Bumped on every edit by the user (see `edited`); the session autosave watches it. */
   edits = $state(0);
+  /** Set by the tabs store: hears every edit by the user, to mark the tab as unsaved. */
+  onedit: (() => void) | null = null;
   /** Inline notice shown above the editor (e.g. a definition that could not load). */
   notice = $state<string | null>(null);
   /** CodeMirror state saved when the editor unmounts, so text, cursor and undo survive tab switches. */
@@ -74,6 +76,12 @@ export class PaneState {
   /** The last text `loadText` put in (a definition), or null; differing text means the user edited it. */
   get lastLoaded(): string | null {
     return this.loadedText;
+  }
+
+  /** The mounted editor reports an edit by the user (not text put in by `loadText`). */
+  edited(): void {
+    this.edits++;
+    this.onedit?.();
   }
 
   /** The editor text right now: the mounted editor's, else the state saved on unmount, else `initialDoc`. */

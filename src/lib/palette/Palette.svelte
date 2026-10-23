@@ -16,6 +16,8 @@
   onMount(() => input.focus());
 
   const res = $derived(palette.response);
+  // Saved queries come first: object rows are numbered after them.
+  const queryRows = $derived(palette.items.length - palette.flat.length);
   const count = (n: number, one: string, many: string) => (n === 1 ? t(one) : t(many, { count: n }));
 
   // Keystroke -> rendered results, logged by the backend only under TULKA_STARTUP_PROBE=1.
@@ -49,9 +51,9 @@
     const atEnd = input.selectionStart === input.value.length && input.selectionEnd === input.value.length;
     const key = paletteKey(e, isMac, atEnd);
     if (!key) return;
-    const hit = palette.flat[palette.selected];
-    // ArrowRight on a table, or with nothing selected, keeps moving the caret.
-    if (key === "definition" && (!hit || hit.object.kind === "table")) return;
+    const item = palette.items[palette.selected];
+    // ArrowRight on a table or a saved query, or with nothing selected, keeps moving the caret.
+    if (key === "definition" && (item?.kind !== "object" || item.hit.object.kind === "table")) return;
     e.preventDefault();
     e.stopPropagation();
     if (key === "close") close();
@@ -81,7 +83,7 @@
       role="combobox"
       aria-expanded="true"
       aria-controls="palette-list"
-      aria-activedescendant={palette.flat.length > 0 ? `palette-${palette.selected}` : undefined}
+      aria-activedescendant={palette.items.length > 0 ? `palette-${palette.selected}` : undefined}
       aria-autocomplete="list"
       placeholder={t("palette.placeholder")}
       spellcheck="false"
@@ -92,13 +94,38 @@
     />
     {#if palette.error}<p class="error" role="alert">{palette.error}</p>{/if}
     <div class="list" id="palette-list" role="listbox" aria-label={t("palette.results")} bind:this={list}>
+      {#each palette.queryGroups as group (group.key)}
+        <div class="group" role="presentation">
+          <span class="path">{t("palette.savedQueries")} › {group.database}</span>
+        </div>
+        {#each group.queries as query (query)}
+          {@const i = palette.items.findIndex((x) => x.kind === "query" && x.query === query)}
+          <div
+            id="palette-{i}"
+            class="row"
+            class:on={i === palette.selected}
+            role="option"
+            tabindex="-1"
+            aria-selected={i === palette.selected}
+            onmousemove={() => (palette.selected = i)}
+            onclick={() => void palette.choose("open", i)}
+          >
+            <span class="kind">{t("palette.kind.query")}</span>
+            <span class="name">
+              {#each highlight(query.name, query.indices) as seg, j (j)}
+                {#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}
+              {/each}
+            </span>
+          </div>
+        {/each}
+      {/each}
       {#each palette.groups as group (group.key)}
         <div class="group" role="presentation" class:off={!group.connected}>
           <span class="path">{group.path.join(" › ")}</span>
           {#if !group.connected}<span class="state">{t("palette.notConnected")}</span>{/if}
         </div>
         {#each group.hits as hit (hit)}
-          {@const i = palette.flat.indexOf(hit)}
+          {@const i = queryRows + palette.flat.indexOf(hit)}
           <div
             id="palette-{i}"
             class="row"
@@ -119,7 +146,7 @@
           </div>
         {/each}
       {/each}
-      {#if res && palette.query.trim() !== "" && res.hits.length === 0}
+      {#if res && palette.query.trim() !== "" && res.hits.length === 0 && res.queries.length === 0}
         <p class="none">{t("palette.none")}</p>
       {/if}
     </div>

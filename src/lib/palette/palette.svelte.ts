@@ -5,7 +5,9 @@ import * as ipc from "../ipc";
 import type { PaletteHit, SearchResponse } from "../ipc";
 import { explorer } from "../explorer/tree.svelte";
 import { objectTabs, type ObjectTarget } from "../explorer/tree";
-import { canRun, groupHits, type PaletteAction, type PaletteGroup } from "./hits";
+import { queryError } from "../queries/queries.svelte";
+import { tabs } from "../tabs/tabs.svelte";
+import { canRun, groupHits, groupQueries, type PaletteAction, type PaletteGroup, type PaletteItem, type QueryGroup } from "./hits";
 
 /** Rows shown; the footer still counts every match. */
 const LIMIT = 50;
@@ -19,8 +21,15 @@ class PaletteStore {
   error = $state<string | null>(null);
 
   readonly groups: PaletteGroup[] = $derived(groupHits(this.response?.hits ?? []));
-  /** Hits in display order, which the selection indexes. */
+  /** Object hits in display order. */
   readonly flat: PaletteHit[] = $derived(this.groups.flatMap((g) => g.hits));
+  /** Saved query hits by database; shown above the objects. */
+  readonly queryGroups: QueryGroup[] = $derived(groupQueries(this.response?.queries ?? []));
+  /** Every row in display order (saved queries, then objects), which the selection indexes. */
+  readonly items: PaletteItem[] = $derived([
+    ...this.queryGroups.flatMap((g) => g.queries.map((query): PaletteItem => ({ kind: "query", query }))),
+    ...this.flat.map((hit): PaletteItem => ({ kind: "object", hit })),
+  ]);
 
   private token = 0;
   /** Bumped on every show and hide, so a late subscription from a closed palette is dropped. */
@@ -77,11 +86,11 @@ class PaletteStore {
     }
     if (token !== this.token || !this.isOpen) return;
     this.response = res;
-    this.selected = refresh ? Math.min(this.selected, Math.max(res.hits.length - 1, 0)) : 0;
+    this.selected = refresh ? Math.min(this.selected, Math.max(res.hits.length + res.queries.length - 1, 0)) : 0;
   }
 
   move(delta: number): void {
-    const n = this.flat.length;
+    const n = this.items.length;
     if (n > 0) this.selected = (this.selected + delta + n) % n;
   }
 
@@ -92,8 +101,13 @@ class PaletteStore {
    * Select top 10 opens a query tab, which connects on its own.
    */
   async choose(action: PaletteAction, index = this.selected): Promise<void> {
-    const hit = this.flat[index];
-    if (!hit) return;
+    const item = this.items[index];
+    if (!item) return;
+    if (item.kind === "query") {
+      if (action === "open") await this.openQuery(item.query.database, item.query.name);
+      return;
+    }
+    const hit = item.hit;
     const kind = hit.object.kind;
     if (!canRun(action, kind)) return;
     this.hide();
@@ -119,6 +133,16 @@ class PaletteStore {
       if (error === null) open();
       else this.fail(t("palette.connectFailed", { name: hit.connectionName, error }));
     });
+  }
+
+  /** Opens a saved query in a tab bound as plan D6 says (see `explorer.savedQueryConnection`). */
+  private async openQuery(database: string, name: string): Promise<void> {
+    this.hide();
+    try {
+      await tabs.openSavedQuery({ database, name }, explorer.savedQueryConnection(database));
+    } catch (e) {
+      this.fail(t("palette.openFailed", { name, error: queryError(e) }));
+    }
   }
 
   private fail(message: string): void {

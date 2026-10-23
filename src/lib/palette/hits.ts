@@ -1,5 +1,5 @@
 // Pure parts of the object palette: grouping, match highlighting and keys.
-import type { PaletteHit } from "../ipc";
+import type { PaletteHit, SavedQueryHit } from "../ipc";
 
 export interface PaletteGroup {
   key: string;
@@ -23,6 +23,26 @@ export function groupHits(hits: PaletteHit[]): PaletteGroup[] {
   }
   return [...groups.values()];
 }
+
+export interface QueryGroup {
+  key: string;
+  database: string;
+  queries: SavedQueryHit[];
+}
+
+/** Groups saved query hits by database ("Saved queries › <database>", plan D6), keeping the ranking order. */
+export function groupQueries(queries: SavedQueryHit[]): QueryGroup[] {
+  const groups = new Map<string, QueryGroup>();
+  for (const q of queries) {
+    let g = groups.get(q.database);
+    if (!g) groups.set(q.database, (g = { key: JSON.stringify(["q", q.database]), database: q.database, queries: [] }));
+    g.queries.push(q);
+  }
+  return [...groups.values()];
+}
+
+/** A row of the palette: a saved query or a database object. */
+export type PaletteItem = { kind: "query"; query: SavedQueryHit } | { kind: "object"; hit: PaletteHit };
 
 export interface Segment {
   text: string;

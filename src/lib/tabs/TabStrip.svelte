@@ -88,6 +88,7 @@
         <button type="button" role="tab" aria-selected={on} class="main" onclick={() => tabs.activate(tab.id)}>
           <span class="dot" style:background={envColor(tab)}></span>
           <span class="lab">{tab.title}</span>
+          {#if tab.dirty}<span class="mod" title={t("tabs.unsaved")}><span class="sr">{t("tabs.unsaved")}</span></span>{/if}
         </button>
         <button type="button" class="x" aria-label={t("tabs.close", { title: tab.title })} onclick={() => tabs.close(tab.id)}>
           <svg viewBox="0 0 16 16" width="10" height="10"><path d="M3 3l10 10M13 3L3 13" /></svg>
@@ -208,6 +209,23 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
+  }
+  /* Unsaved changes: a hollow ring, so it never reads as the environment dot. */
+  .mod {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    margin-left: -2px;
+    border: 1.5px solid var(--soft);
+    border-radius: 50%;
+  }
+  .sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .x {
     display: grid;

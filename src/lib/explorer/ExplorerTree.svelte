@@ -8,8 +8,10 @@
   import ContextMenu from "./ContextMenu.svelte";
   import FolderDialog, { type FolderDialogMode } from "./FolderDialog.svelte";
   import TreeNode from "./TreeNode.svelte";
-  import { canMoveFolder, navigate, type DragItem, type MenuActions, type MenuItem, type Row } from "./tree";
+  import { canMoveFolder, keyOf, navigate, type DragItem, type MenuActions, type MenuItem, type Row } from "./tree";
   import { explorer, menuFor } from "./tree.svelte";
+  import { queryError } from "../queries/queries.svelte";
+  import { tabs } from "../tabs/tabs.svelte";
 
   interface Props {
     onnewconnection: (folderId?: string | null) => void;
@@ -81,6 +83,15 @@
           confirm: t("explorer.menu.delete"),
           run: () => explorer.deleteFolder(f.id),
         };
+      } else if (row.kind === "savedQuery") {
+        const { database, name } = row;
+        dialog = {
+          kind: "confirm",
+          title: t("queries.delete.title"),
+          message: t("queries.delete.message", { name, database }),
+          confirm: t("explorer.menu.delete"),
+          run: () => tabs.deleteSavedQuery(database, name).catch((e) => (explorer.error = queryError(e))),
+        };
       }
     },
     newSubfolder: (folder: Folder) => (dialog = { kind: "create", parent: folder }),
@@ -98,6 +109,8 @@
         return row.db.name;
       case "object":
         return `${row.object.schema}.${row.object.name}`;
+      case "savedQuery":
+        return row.name;
       default:
         return "";
     }
@@ -135,6 +148,7 @@
   function onrowclick(row: Row) {
     explorer.focusKey = row.key;
     if (row.expandable) explorer.toggle(row.key);
+    else if (row.kind === "savedQuery") void explorer.openSavedQuery(row.connectionId, row.database, row.name);
   }
 
   async function onrename(row: Row, value: string | null) {
@@ -144,6 +158,14 @@
     if (name === "") return;
     if (row.kind === "folder" && name !== row.folder.name) await explorer.renameFolder(row.folder.id, name);
     else if (row.kind === "connection" && name !== row.conn.name) await explorer.renameConnection(row.conn, name);
+    else if (row.kind === "savedQuery" && name !== row.name) {
+      try {
+        await tabs.renameSavedQuery(row.database, row.name, name);
+        explorer.focusKey = keyOf.savedQuery(row.connectionId, row.database, name);
+      } catch (e) {
+        explorer.error = queryError(e);
+      }
+    }
   }
 
   function onkeydown(e: KeyboardEvent) {
@@ -156,7 +178,7 @@
       openMenu(row, r.left + 24, r.bottom);
       return;
     }
-    if (row && e.key === "F2" && (row.kind === "folder" || row.kind === "connection")) {
+    if (row && e.key === "F2" && (row.kind === "folder" || row.kind === "connection" || row.kind === "savedQuery")) {
       e.preventDefault();
       renaming = row.key;
       return;
@@ -170,6 +192,7 @@
     else {
       const target = rows.find((r) => r.key === nav.activate);
       if (target?.kind === "notice") void target.action?.run();
+      else if (target?.kind === "savedQuery") void explorer.openSavedQuery(target.connectionId, target.database, target.name);
     }
   }
 

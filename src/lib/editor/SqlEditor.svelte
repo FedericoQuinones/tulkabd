@@ -100,17 +100,24 @@
   }
 
   let shownVersion = -1;
+  // True while `loadText`'s content goes in, which is not an edit by the user.
+  let loading = false;
   // `pane.loadText` swapped the document while the editor is mounted: show it.
   $effect(() => {
     const v = pane.docVersion;
     if (!view || v === shownVersion) return;
     shownVersion = v;
-    // Not undoable: Ctrl+Z must not empty a freshly loaded definition.
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: pane.initialDoc },
-      selection: { anchor: 0 },
-      annotations: Transaction.addToHistory.of(false),
-    });
+    // Not undoable: Ctrl+Z must not empty a freshly loaded definition. Not an edit either.
+    loading = true;
+    try {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: pane.initialDoc },
+        selection: { anchor: 0 },
+        annotations: Transaction.addToHistory.of(false),
+      });
+    } finally {
+      loading = false;
+    }
     pane.editorState = null;
   });
 
@@ -141,7 +148,7 @@
           ]),
           EditorView.updateListener.of((u) => {
             if (u.selectionSet || u.docChanged) report(u.view);
-            if (u.docChanged) pane.edits++;
+            if (u.docChanged && !loading) pane.edited();
           }),
     ];
     // Restore from the JSON saved on unmount: it carries text, selection and undo history, while

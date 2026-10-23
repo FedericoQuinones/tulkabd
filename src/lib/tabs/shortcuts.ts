@@ -1,4 +1,4 @@
-export type ShortcutAction = "new" | "close" | "palette" | "splitRight" | "splitDown";
+export type ShortcutAction = "new" | "close" | "palette" | "save" | "splitRight" | "splitDown";
 
 /**
  * The lowercase key of a shortcut. A non-ASCII key (Cyrillic, Greek…) falls back to the physical
@@ -12,9 +12,9 @@ export function shortcutLetter(e: KeyboardEvent): string {
 }
 
 /**
- * Maps a keydown to an app shortcut (Ctrl+T / Ctrl+W / Ctrl+P / Ctrl+\\ / Ctrl+Shift+\\, Cmd on macOS).
- * Plain inputs keep their keys; the code editor is allowed, so Ctrl+W closes with the caret in it.
- * Ctrl+P works from anywhere: no input uses it.
+ * Maps a keydown to an app shortcut (Ctrl+T / Ctrl+W / Ctrl+P / Ctrl+S / Ctrl+\\ / Ctrl+Shift+\\, Cmd on
+ * macOS). Plain inputs keep their keys; the code editor is allowed, so Ctrl+W closes with the caret
+ * in it. Ctrl+P and Ctrl+S work from anywhere: no input uses them.
  */
 export function shortcutAction(e: KeyboardEvent, isMac: boolean): ShortcutAction | null {
   if (e.repeat || e.defaultPrevented) return null;
@@ -25,6 +25,7 @@ export function shortcutAction(e: KeyboardEvent, isMac: boolean): ShortcutAction
   if (e.shiftKey && !backslash) return null;
   const key = shortcutLetter(e);
   if (key === "p") return "palette";
+  if (key === "s") return "save";
   const el = e.target as HTMLElement | null;
   if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) {
     if (!el.closest?.(".cm-editor")) return null;

@@ -78,6 +78,10 @@ function label(r: Row): string {
       return `db:${r.db.name}`;
     case "group":
       return `group:${r.objectKind}`;
+    case "saved":
+      return `saved:${r.count}`;
+    case "savedQuery":
+      return `query:${r.name}`;
     case "object":
       return `${r.object.schema}.${r.object.name}`;
     case "column":

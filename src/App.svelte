@@ -13,6 +13,9 @@
   import { clampWidth, loadLayout, saveLayout, MAX_WIDTH, MIN_WIDTH } from "./lib/shell/layout";
   import Palette from "./lib/palette/Palette.svelte";
   import { palette } from "./lib/palette/palette.svelte";
+  import NameDialog from "./lib/queries/NameDialog.svelte";
+  import SavedQueriesPanel from "./lib/queries/SavedQueriesPanel.svelte";
+  import { queries } from "./lib/queries/queries.svelte";
   import { shortcutAction } from "./lib/tabs/shortcuts";
   import { tabs } from "./lib/tabs/tabs.svelte";
   import Workspace from "./lib/workspace/Workspace.svelte";
@@ -38,6 +41,7 @@
   const activePane = $derived(tabs.activePane);
 
   void explorer.init();
+  void queries.reload();
   void connections.loadStartupError();
 
   // The saved session is restored before the workspace first renders (a mounting editor takes the
@@ -74,12 +78,19 @@
   const layout = loadLayout();
   let explorerWidth = $state(layout.width);
   let explorerHidden = $state(layout.hidden);
+  // What the left panel shows: the Explorer tree or the saved queries (Rail icons).
+  let leftPanel = $state<"rail.explorer" | "rail.saved">("rail.explorer");
   const remember = () => saveLayout({ width: explorerWidth, hidden: explorerHidden });
 
+  /** A panel icon shows its panel; pressed again while shown, it hides the left panel. */
   function onrail(key: string) {
     if (key === "rail.search") palette.show();
-    if (key !== "rail.explorer") return;
-    explorerHidden = !explorerHidden;
+    if (key !== "rail.explorer" && key !== "rail.saved") return;
+    if (!explorerHidden && leftPanel !== key) leftPanel = key;
+    else {
+      leftPanel = key;
+      explorerHidden = !explorerHidden;
+    }
     remember();
   }
 
@@ -114,6 +125,7 @@
     if (!action) return;
     e.preventDefault();
     if (action === "palette") palette.show();
+    else if (action === "save") void tabs.saveActive();
     else if (action === "new") tabs.newTab();
     else if (action === "splitRight") tabs.splitActive("row");
     else if (action === "splitDown") tabs.splitActive("column");
@@ -125,9 +137,12 @@
 
 <div class="win">
   <div class="cols" class:no-explorer={explorerHidden}>
-    <Rail active={explorerHidden ? null : "rail.explorer"} onselect={onrail} />
+    <Rail active={explorerHidden ? null : leftPanel} onselect={onrail} />
     {#if !explorerHidden}
       <aside class="explorer" style:width="{explorerWidth}px">
+        {#if leftPanel === "rail.saved"}
+          <SavedQueriesPanel />
+        {:else}
         {#if connections.startupError}
           <p class="error" role="alert">{t("explorer.startupError", { error: connections.startupError })}</p>
         {/if}
@@ -139,6 +154,7 @@
           onedit={(c) => openDialog(c)}
           onnewfromstring={(folderId, parsed) => openDialog(null, folderId, parsed ?? undefined, parsed === null)}
         />
+        {/if}
         <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="resize"
@@ -185,6 +201,11 @@
 {/if}
 {#if palette.isOpen}
   <Palette />
+{/if}
+{#if tabs.nameRequest}
+  {#key tabs.nameRequest}
+    <NameDialog {...tabs.nameRequest} />
+  {/key}
 {/if}
 {#if tabs.passwordRequest}
   {#key tabs.passwordRequest.tabId}
