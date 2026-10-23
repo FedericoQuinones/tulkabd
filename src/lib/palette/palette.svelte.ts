@@ -2,7 +2,7 @@
 // selection. Palette.svelte only renders it; grouping and keys live in hits.ts.
 import { t } from "../i18n/t";
 import * as ipc from "../ipc";
-import type { PaletteHit, SearchResponse } from "../ipc";
+import type { PaletteHit, SavedQueryHit, SearchResponse } from "../ipc";
 import { explorer } from "../explorer/tree.svelte";
 import { objectTabs, type ObjectTarget } from "../explorer/tree";
 import { queryError } from "../queries/queries.svelte";
@@ -23,13 +23,26 @@ class PaletteStore {
   readonly groups: PaletteGroup[] = $derived(groupHits(this.response?.hits ?? []));
   /** Object hits in display order. */
   readonly flat: PaletteHit[] = $derived(this.groups.flatMap((g) => g.hits));
-  /** Saved query hits by database; shown above the objects. */
+  /** Saved query hits by database; shown below the objects. */
   readonly queryGroups: QueryGroup[] = $derived(groupQueries(this.response?.queries ?? []));
-  /** Every row in display order (saved queries, then objects), which the selection indexes. */
+  /** Saved query hits in display order. */
+  readonly queryHits: SavedQueryHit[] = $derived(this.queryGroups.flatMap((g) => g.queries));
+  /** Every row in display order (objects, then saved queries), which the selection indexes. */
   readonly items: PaletteItem[] = $derived([
-    ...this.queryGroups.flatMap((g) => g.queries.map((query): PaletteItem => ({ kind: "query", query }))),
     ...this.flat.map((hit): PaletteItem => ({ kind: "object", hit })),
+    ...this.queryHits.map((query): PaletteItem => ({ kind: "query", query })),
   ]);
+  /**
+   * The footer's counts: the backend's object matches and databases, plus the saved query hits and
+   * their databases that no shown object already counts (saved queries belong to a database name).
+   */
+  readonly counts = $derived.by(() => {
+    const res = this.response;
+    if (!res) return { matches: 0, databases: 0 };
+    const counted = new Set(res.hits.map((h) => h.database));
+    const extra = new Set(res.queries.map((q) => q.database).filter((d) => !counted.has(d)));
+    return { matches: res.totalMatches + res.queries.length, databases: res.databasesMatched + extra.size };
+  });
 
   private token = 0;
   /** Bumped on every show and hide, so a late subscription from a closed palette is dropped. */

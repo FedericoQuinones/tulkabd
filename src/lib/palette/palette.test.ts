@@ -268,3 +268,47 @@ test("a connect that fails after the password prompt reopens the palette with th
   expect(palette.query).toBe("ped");
   expect(palette.error).toBe("Could not connect to Local: Login failed");
 });
+
+test("saved queries come after the objects, so Enter on the first row opens the best object", async () => {
+  vi.mocked(ipc.searchObjects).mockResolvedValue({
+    ...response([hit({ name: "Reportes" })]),
+    queries: [{ database: "Ventas", name: "Reporte", indices: [0] }],
+  });
+  palette.show();
+  cmp = mount(Palette, { target: document.body });
+  await palette.search("rep");
+  flushSync();
+  expect(palette.items.map((i) => i.kind)).toEqual(["object", "query"]);
+  const rows = [...document.querySelectorAll('[role="option"]')];
+  expect(rows.map((r) => r.id)).toEqual(["palette-0", "palette-1"]);
+  expect(rows[1].textContent).toContain("Reporte");
+  expect(document.querySelectorAll(".group .path")[1].textContent).toBe("Saved queries › Ventas");
+});
+
+test("the footer counts saved query matches too", async () => {
+  vi.mocked(ipc.searchObjects).mockResolvedValue({
+    ...response([]),
+    queries: [
+      { database: "Ventas", name: "Reporte", indices: [] },
+      { database: "Ventas", name: "Reporte mensual", indices: [] },
+    ],
+  });
+  palette.show();
+  cmp = mount(Palette, { target: document.body });
+  await palette.search("rep");
+  flushSync();
+  expect(document.querySelector(".foot")!.textContent).toContain("2 matches in 1 database");
+  expect(document.querySelector(".none")).toBeNull();
+
+  vi.mocked(ipc.searchObjects).mockResolvedValue({
+    ...response([hit({ name: "Reportes" }), hit({ name: "Pagos", database: "Hist" })]),
+    queries: [
+      { database: "Ventas", name: "Reporte", indices: [] },
+      { database: "Otra", name: "x", indices: [] },
+    ],
+  });
+  await palette.search("repo");
+  flushSync();
+  // Ventas already counts through its objects; Otra is one more database.
+  expect(document.querySelector(".foot")!.textContent).toContain("4 matches in 3 databases");
+});
