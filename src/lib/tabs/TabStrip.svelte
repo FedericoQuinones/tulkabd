@@ -1,4 +1,13 @@
+<script lang="ts" module>
+  /**
+   * Where the tab being dragged would land: a slot of a group's strip (0 = before its first tab), or
+   * `slot: null` for the group's editor area, which puts it last. Each strip and group shows its own.
+   */
+  export const tabDrop = $state<{ over: { groupId: string; slot: number | null } | null }>({ over: null });
+</script>
+
 <script lang="ts">
+  import { startDrag } from "../drag/pointerDrag";
   import { t } from "../i18n/t";
   import { groups, MAX_GROUPS } from "../workspace/layout";
   import { envColor, tabs } from "./tabs.svelte";
@@ -6,18 +15,76 @@
   let { groupId }: { groupId: string } = $props();
 
   const full = $derived(groups(tabs.layout).length >= MAX_GROUPS);
+  const list = $derived(tabs.tabsIn(groupId));
+  const mark = $derived(tabDrop.over?.groupId === groupId ? tabDrop.over.slot : null);
 
   function splitFrom(dir: "row" | "column") {
     tabs.focusGroup(groupId);
     tabs.splitActive(dir);
   }
+
+  /** The slot of a strip a tab dropped at `x` takes: how many of its tabs have their middle left of `x`. */
+  function slotAt(strip: Element, x: number): number {
+    let slot = 0;
+    for (const el of strip.querySelectorAll(".tab")) {
+      const r = el.getBoundingClientRect();
+      if (r.left + r.width / 2 < x) slot++;
+    }
+    return slot;
+  }
+
+  /**
+   * Where a tab dropped on `el` goes: a strip (`tabs:<group>`) at the slot under `x`, or a group's
+   * editor area (`group:<group>`), except its own group's. Null for anything else.
+   */
+  function dropAt(el: Element | null, x: number, tabId: string): { groupId: string; slot: number | null } | null {
+    const v = el?.getAttribute("data-drop") ?? "";
+    if (v.startsWith("tabs:")) return { groupId: v.slice("tabs:".length), slot: slotAt(el!, x) };
+    if (v.startsWith("group:")) {
+      const id = v.slice("group:".length);
+      return id === tabs.groupOf(tabId) ? null : { groupId: id, slot: null };
+    }
+    return null;
+  }
+
+  function ondragpress(tabId: string, e: PointerEvent) {
+    let x = e.clientX;
+    startDrag(e, {
+      payload: { kind: "tab", tabId },
+      onover: (el, px) => {
+        x = px;
+        tabDrop.over = dropAt(el, px, tabId);
+      },
+      ondrop: (el) => {
+        tabDrop.over = null;
+        const to = dropAt(el, x, tabId);
+        if (!to) return;
+        if (to.slot === null) {
+          tabs.moveTab(tabId, to.groupId, tabs.tabsIn(to.groupId).length);
+          return;
+        }
+        // The slot counts the dragged tab itself when it is in that strip; moveTab wants its final index.
+        const from = tabs.tabsIn(to.groupId).findIndex((tab) => tab.id === tabId);
+        tabs.moveTab(tabId, to.groupId, from >= 0 && from < to.slot ? to.slot - 1 : to.slot);
+      },
+      oncancel: () => (tabDrop.over = null),
+    });
+  }
 </script>
 
 <div class="bar">
-  <div class="tabs" role="tablist" aria-label={t("tabs.label")}>
-    {#each tabs.tabsIn(groupId) as tab (tab.id)}
+  <div class="tabs" role="tablist" aria-label={t("tabs.label")} data-drop="tabs:{groupId}">
+    {#each list as tab, i (tab.id)}
       {@const on = tab.id === tabs.activeIn(groupId)?.id}
-      <div class="tab" class:on style:--env={envColor(tab)}>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="tab"
+        class:on
+        class:mark-before={mark === i}
+        class:mark-after={mark === list.length && i === list.length - 1}
+        style:--env={envColor(tab)}
+        onpointerdown={(e) => ondragpress(tab.id, e)}
+      >
         <button type="button" role="tab" aria-selected={on} class="main" onclick={() => tabs.activate(tab.id)}>
           <span class="dot" style:background={envColor(tab)}></span>
           <span class="lab">{tab.title}</span>
@@ -101,6 +168,13 @@
   }
   .tab.on {
     color: var(--text);
+  }
+  /* Where a dragged tab would land. */
+  .tab.mark-before {
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .tab.mark-after {
+    box-shadow: inset -2px 0 0 var(--accent);
   }
   .tab.on::after {
     content: "";

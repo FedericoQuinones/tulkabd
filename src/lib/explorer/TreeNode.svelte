@@ -14,13 +14,10 @@
     onclick: (row: Row) => void;
     onmenu: (row: Row, x: number, y: number) => void;
     onrename: (row: Row, name: string | null) => void;
-    ondragstart: (row: Row, e: DragEvent) => void;
-    ondragover: (row: Row, e: DragEvent) => void;
-    ondrop: (row: Row, e: DragEvent) => void;
-    ondragend: () => void;
+    /** A press on a folder or connection row that is not being renamed: it may become a drag. */
+    ondragpress: (row: Row, e: PointerEvent) => void;
   }
-  let { row, focused, env, renaming, dropTarget, onclick, onmenu, onrename, ondragstart, ondragover, ondrop, ondragend }: Props =
-    $props();
+  let { row, focused, env, renaming, dropTarget, onclick, onmenu, onrename, ondragpress }: Props = $props();
 
   // 16x16 icons drawn with the 1.5px stroke of svg.i (theme.css).
   const icons = {
@@ -34,7 +31,7 @@
   const name = $derived(
     row.kind === "folder" ? row.folder.name : row.kind === "connection" ? row.conn.name : "",
   );
-  const draggable = $derived((row.kind === "folder" || row.kind === "connection") && !renaming);
+  const movable = $derived((row.kind === "folder" || row.kind === "connection") && !renaming);
   const dimmed = $derived(
     (row.kind === "connection" && row.status !== "connected") || (row.kind === "database" && row.db.noAccess),
   );
@@ -74,16 +71,15 @@
   class:drop={dropTarget}
   style:padding-left="{6 + (row.level - 1) * 14}px"
   style:--env={env ?? "var(--accent)"}
-  draggable={draggable ? "true" : undefined}
+  data-drop="tree:{row.key}"
   onclick={() => onclick(row)}
   oncontextmenu={(e) => {
     e.preventDefault();
     onmenu(row, e.clientX, e.clientY);
   }}
-  ondragstart={(e) => ondragstart(row, e)}
-  ondragover={(e) => ondragover(row, e)}
-  ondrop={(e) => ondrop(row, e)}
-  {ondragend}
+  onpointerdown={(e) => {
+    if (movable) ondragpress(row, e);
+  }}
 >
   <span class="c" aria-hidden="true">{row.expandable ? (row.expanded ? "▾" : "▸") : ""}</span>
   {#if row.kind === "folder"}

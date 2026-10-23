@@ -120,3 +120,94 @@ test("after a group closes, the group the store picks stays active even though r
   expect(tabs.activeGroupId).toBe(c);
   expect(groupEls().map((g) => g.classList.contains("active"))).toEqual([false, true]);
 });
+
+// ---- dragging tabs (pointer events) ----
+
+const pointer = (type: string, x: number, y: number) =>
+  new PointerEvent(type, { clientX: x, clientY: y, button: 0, pointerId: 1, bubbles: true, cancelable: true });
+const tabEl = (title: string) => [...document.querySelectorAll<HTMLElement>(".tab")].find((el) => el.querySelector(".lab")!.textContent === title)!;
+const strip = (g: HTMLElement) => g.querySelector<HTMLElement>('[role="tablist"]')!;
+
+/** jsdom has no layout: lays each group's tabs out 100 px wide from x = 0. */
+function layOut() {
+  for (const g of groupEls()) {
+    g.querySelectorAll<HTMLElement>(".tab").forEach((el, i) => {
+      el.getBoundingClientRect = () => ({ left: i * 100, width: 100, right: i * 100 + 100, top: 0, bottom: 36, height: 36, x: i * 100, y: 0, toJSON: () => ({}) });
+    });
+  }
+}
+
+/** Drags the tab titled `title` to x on `over` (the element under the pointer) and releases it. */
+function dragTab(title: string, over: Element, x: number, release = true) {
+  layOut();
+  tabEl(title).querySelector('[role="tab"]')!.dispatchEvent(pointer("pointerdown", 20, 10));
+  document.elementFromPoint = () => over;
+  document.body.dispatchEvent(pointer("pointermove", x, 10));
+  flushSync();
+  if (release) {
+    document.body.dispatchEvent(pointer("pointerup", x, 10));
+    flushSync();
+  }
+}
+
+/** Opens `n` query tabs in the active group and returns their titles (the untitled counter is never reset). */
+function openTabs(n: number): string[] {
+  return Array.from({ length: n }, () => {
+    const id = tabs.open({ kind: "query" });
+    return tabs.list.find((x) => x.id === id)!.title;
+  });
+}
+
+/** Two groups side by side: [a, b] | [c, d]. */
+function twoGroups(): string[] {
+  const [a, b] = openTabs(2);
+  tabs.splitActive("row");
+  const c = tabs.active!.title;
+  const [d] = openTabs(1);
+  flushSync();
+  return [a, b, c, d];
+}
+
+test("a tab dropped on another group's strip lands at the index of the x position", () => {
+  const [a, b, c, d] = twoGroups();
+  dragTab(a, strip(groupEls()[1]), 150);
+  expect(groupEls().map(titles)).toEqual([[b], [c, a, d]]);
+  expect(tabs.active?.title).toBe(a);
+
+  dragTab(b, tabEl(c), 10);
+  // Its group was left empty, so it went away.
+  expect(groupEls().map(titles)).toEqual([[b, c, a, d]]);
+});
+
+test("a tab dragged along its own strip moves to where it is dropped", () => {
+  const [a, b, c] = openTabs(3);
+  flushSync();
+  dragTab(a, strip(groupEls()[0]), 280);
+  expect(groupEls().map(titles)).toEqual([[b, c, a]]);
+  dragTab(a, strip(groupEls()[0]), 10);
+  expect(groupEls().map(titles)).toEqual([[a, b, c]]);
+  dragTab(a, strip(groupEls()[0]), 160);
+  expect(groupEls().map(titles)).toEqual([[b, a, c]]);
+});
+
+test("the strip marks where the dragged tab would land", () => {
+  const [a, b, c, d] = twoGroups();
+  dragTab(a, strip(groupEls()[1]), 150, false);
+  expect(tabEl(d).classList.contains("mark-before")).toBe(true);
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  flushSync();
+  expect(document.querySelectorAll(".mark-before, .mark-after")).toHaveLength(0);
+  expect(groupEls().map(titles)).toEqual([[a, b], [c, d]]);
+});
+
+test("a tab dropped on another group's editor area goes last in that group", () => {
+  const [a, b, c, d] = twoGroups();
+  dragTab(a, groupEls()[1].querySelector(".cm-content")!, 300);
+  expect(groupEls().map(titles)).toEqual([[b], [c, d, a]]);
+});
+
+test("a tab dropped outside any strip or group stays where it was", () => {
+  const [a, b, c, d] = twoGroups();
+  dragTab(a, document.body, 300);
+  expect(groupEls().map(titles)).toEqual([[a, b], [c, d]]);
+});

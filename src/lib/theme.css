@@ -46,6 +46,12 @@ body {
   overflow: hidden;
 }
 
+/* A tab or Explorer row is being dragged (src/lib/drag/pointerDrag.ts). */
+:root[data-dragging],
+:root[data-dragging] * {
+  cursor: grabbing !important;
+}
+
 .mono,
 .num {
   font-family: var(--mono);

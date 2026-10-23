@@ -2,7 +2,7 @@
   import { t } from "../i18n/t";
   import QueryPane from "../pane/QueryPane.svelte";
   import StructureView from "../structure/StructureView.svelte";
-  import TabStrip from "../tabs/TabStrip.svelte";
+  import TabStrip, { tabDrop } from "../tabs/TabStrip.svelte";
   import { envColor, tabs } from "../tabs/tabs.svelte";
 
   let { groupId }: { groupId: string } = $props();
@@ -18,7 +18,8 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="group" class:active={tabs.activeGroupId === groupId} style:--env={envColor(tab)} onpointerdowncapture={focus} onfocusin={focus}>
   <TabStrip {groupId} />
-  <div class="body">
+  <!-- A tab dropped on the editor area of another group goes last in it. -->
+  <div class="body" class:drop={tabDrop.over?.groupId === groupId && tabDrop.over.slot === null} data-drop="group:{groupId}">
     {#if tab?.pane}
       {#key tab.id}
         <!-- Several groups remount at once (a split collapses, a session restores): only the active one takes the focus. -->
@@ -66,6 +67,9 @@
   .body {
     min-height: 0;
     min-width: 0;
+  }
+  .body.drop {
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
   .blank {
     height: 100%;
