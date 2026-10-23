@@ -121,6 +121,8 @@
   "structure.col.references": "References",
   "structure.col.kind": "Kind",
   "structure.pk": "PK",
+  "structure.nullable.yes": "YES",
+  "structure.nullable.no": "NO",
   "structure.unique": "Unique",
   "structure.clustered": "Clustered",
   "structure.nonclustered": "Nonclustered",

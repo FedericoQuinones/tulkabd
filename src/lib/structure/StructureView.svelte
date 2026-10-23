@@ -59,7 +59,7 @@
           <tr>
             <td>{c.name}</td>
             <td class="mono">{c.typeName}</td>
-            <td>{c.nullable ? "YES" : "NO"}</td>
+            <td>{t(c.nullable ? "structure.nullable.yes" : "structure.nullable.no")}</td>
             <td>{c.primaryKey ? t("structure.pk") : ""}</td>
             <td class="mono">{c.default ?? ""}</td>
           </tr>
