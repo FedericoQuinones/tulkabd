@@ -109,6 +109,7 @@
   "tabs.definitionNotConnected": "Connect this server in the Explorer to load its definition.",
   "tabs.loadFailed": "Could not load: {error}",
   "tabs.retry": "Retry",
+  "tabs.connectionDeleted": "This connection was deleted.",
   "structure.columns": "Columns",
   "structure.foreignKeys": "Foreign keys",
   "structure.indexes": "Indexes",

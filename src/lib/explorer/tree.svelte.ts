@@ -7,6 +7,7 @@ import { t } from "../i18n/t";
 import * as ipc from "../ipc";
 import type { AppEvent, CachedDatabase, ColumnInfo, ConnectionConfig, DbObject, Folder, ObjectKind, PaletteHit } from "../ipc";
 import { connections } from "../connections/store.svelte";
+import { tabs } from "../tabs/tabs.svelte";
 import {
   actionError,
   buildMenu,
@@ -711,6 +712,7 @@ class ExplorerStore {
   async deleteConnection(id: string): Promise<boolean> {
     return this.attempt(async () => {
       await connections.remove(id);
+      tabs.unbindConnection(id);
       this.expanded.delete(id);
       delete this.conns[id];
       this.schedulePersist();

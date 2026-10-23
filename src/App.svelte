@@ -134,14 +134,10 @@
     {/if}
     <main class="workspace">
       <TabStrip />
-      <!-- A failed tab connect shows here so it stays visible with the Explorer hidden. -->
-      <div class="notices">
-        {#if tabs.connectError}<p class="error" role="alert">{tabs.connectError}</p>{/if}
-      </div>
       <div class="body">
         {#if activeTab?.pane}
           {#key activeTab.id}
-            <QueryPane pane={activeTab.pane} onreconnect={() => tabs.reconnectActive()} onretry={() => tabs.retry(activeTab.id)} />
+            <QueryPane pane={activeTab.pane} connectError={activeTab.connectError} onreconnect={() => tabs.reconnectActive()} onretry={() => tabs.retry(activeTab.id)} />
           {/key}
         {:else if activeTab?.kind === "structure"}
           {#key activeTab.id}
@@ -252,7 +248,7 @@
     min-width: 0;
     min-height: 0;
     display: grid;
-    grid-template-rows: 36px auto minmax(0, 1fr);
+    grid-template-rows: 36px minmax(0, 1fr);
   }
   .body {
     min-height: 0;

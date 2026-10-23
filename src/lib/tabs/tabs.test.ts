@@ -159,3 +159,40 @@ test("cancelling the password prompt drops the pending run", async () => {
   await flush();
   expect(ipc.runQuery).not.toHaveBeenCalled();
 });
+
+test("a failed connect leaves its error on that tab only, and closing the tab drops it", async () => {
+  vi.mocked(ipc.openSession).mockRejectedValueOnce("boom");
+  const a = tabs.open({ kind: "query", connectionId: "c1" });
+  await flush();
+  const b = tabs.open({ kind: "query" });
+  expect(tabs.list.find((x) => x.id === a)!.connectError).toContain("boom");
+  expect(tabs.list.find((x) => x.id === b)!.connectError).toBeNull();
+  tabs.close(a);
+  expect(tabs.list.some((x) => x.connectError)).toBe(false);
+});
+
+test("two tabs asking for a password queue in order and cancelling the first shows the second", async () => {
+  const a = tabs.open({ kind: "query", connectionId: "c2" });
+  const b = tabs.open({ kind: "query", connectionId: "c2" });
+  await flush();
+  expect(tabs.passwordRequests.map((r) => r.tabId)).toEqual([a, b]);
+  expect(tabs.passwordRequest?.tabId).toBe(a);
+  tabs.cancelPassword();
+  expect(tabs.passwordRequest?.tabId).toBe(b);
+  await tabs.submitPassword("pw");
+  expect(ipc.openSession).toHaveBeenCalledWith(b, "c2", undefined, "pw");
+  expect(tabs.passwordRequest).toBeNull();
+});
+
+test("unbindConnection leaves the tabs of that connection without a session and with a notice", async () => {
+  const a = tabs.open({ kind: "query", connectionId: "c1" });
+  const b = tabs.open({ kind: "query" });
+  await flush();
+  tabs.unbindConnection("c1");
+  const pa = tabs.list.find((x) => x.id === a)!.pane!;
+  expect(pa.connectionId).toBeNull();
+  expect(pa.session).toBeNull();
+  expect(pa.notice).toBe("This connection was deleted.");
+  expect(tabs.list.find((x) => x.id === b)!.pane!.notice).toBeNull();
+  expect(ipc.closeSession).toHaveBeenCalledWith(a);
+});

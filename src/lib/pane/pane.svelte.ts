@@ -91,6 +91,15 @@ export class PaneState {
     await ipc.closeSession(this.tabId).catch(() => {});
   }
 
+  /** Drops the session and the connection binding but keeps the editor text. */
+  unbind(): void {
+    void this.close();
+    this.session = null;
+    this.connectionId = null;
+    this.database = null;
+    this.status = "idle";
+  }
+
   private hasSession = false;
   // Run token: every run() takes a new id and open() bumps it, so a run that is still pending
   // (e.g. after a mid-run "disconnected") is stale once a reconnect starts and must not touch state.

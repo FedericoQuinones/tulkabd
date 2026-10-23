@@ -21,6 +21,8 @@ export interface Tab {
   database?: string;
   schema?: string;
   name?: string;
+  /** Why the last connect of this tab failed; shown in the tab's own toolbar. */
+  connectError: string | null;
 }
 
 export interface PasswordRequest {
@@ -44,12 +46,23 @@ export function isNotConnected(e: unknown): boolean {
 class TabsStore {
   list = $state<Tab[]>([]);
   activeId = $state<string | null>(null);
-  /** Set while a tab waits for a password; App shows the prompt. */
-  passwordRequest = $state<PasswordRequest | null>(null);
-  connectError = $state<string | null>(null);
+  /** Tabs waiting for a password, oldest first; App shows the prompt for the first. */
+  passwordRequests = $state<PasswordRequest[]>([]);
 
   private counter = 0;
   private pending = new Map<string, Pending>();
+
+  get passwordRequest(): PasswordRequest | null {
+    return this.passwordRequests[0] ?? null;
+  }
+
+  private request(req: PasswordRequest) {
+    this.passwordRequests = [...this.passwordRequests.filter((r) => r.tabId !== req.tabId), req];
+  }
+
+  private dropRequest(tabId: string) {
+    this.passwordRequests = this.passwordRequests.filter((r) => r.tabId !== tabId);
+  }
 
   get active(): Tab | null {
     return this.list.find((x) => x.id === this.activeId) ?? null;
@@ -77,6 +90,7 @@ class TabsStore {
         database: spec.database,
         schema: spec.schema,
         name: spec.name,
+        connectError: null,
       });
       this.activeId = id;
       return id;
@@ -84,7 +98,7 @@ class TabsStore {
     const pane = new PaneState(id);
     const title = spec.kind === "definition" ? spec.name : `untitled-${++this.counter}`;
     if (spec.kind === "query" && spec.sql) pane.initialDoc = spec.sql;
-    const tab: Tab = { id, kind: "query", title, pane };
+    const tab: Tab = { id, kind: "query", title, pane, connectError: null };
     if (spec.kind === "definition") {
       tab.connectionId = spec.connectionId;
       tab.database = spec.database;
@@ -117,7 +131,7 @@ class TabsStore {
     if (i < 0) return;
     const [tab] = this.list.splice(i, 1);
     this.pending.delete(id);
-    if (this.passwordRequest?.tabId === id) this.passwordRequest = null;
+    this.dropRequest(id);
     if (this.activeId === id) this.activeId = (this.list[i] ?? this.list[i - 1])?.id ?? null;
     void tab.pane?.close();
   }
@@ -127,9 +141,9 @@ class TabsStore {
     const tab = this.list.find((x) => x.id === id);
     const pane = tab?.pane;
     if (!pane || pane.status === "connecting" || pane.status === "running") return;
-    this.connectError = null;
+    tab.connectError = null;
     if (!conn.passwordSaved && password === undefined) {
-      this.passwordRequest = { tabId: id, conn, database };
+      this.request({ tabId: id, conn, database });
       return;
     }
     const result = await pane.open(conn, password, database);
@@ -139,9 +153,9 @@ class TabsStore {
       return;
     }
     if (result.kind === "passwordRequired") {
-      this.passwordRequest = { tabId: id, conn, database };
+      this.request({ tabId: id, conn, database });
     } else if (result.kind === "error") {
-      this.connectError = t("explorer.connectFailed", { error: result.error });
+      tab.connectError = t("explorer.connectFailed", { error: result.error });
     } else if (result.kind === "ok") {
       const p = this.pending.get(id);
       this.pending.delete(id);
@@ -151,14 +165,28 @@ class TabsStore {
 
   async submitPassword(password: string): Promise<void> {
     const req = this.passwordRequest;
-    this.passwordRequest = null;
+    if (req) this.dropRequest(req.tabId);
     if (req) await this.connectTab(req.tabId, req.conn, password, req.database);
   }
 
   cancelPassword() {
     // A later reconnect must not fire the run that was waiting for this password.
-    if (this.passwordRequest) this.pending.delete(this.passwordRequest.tabId);
-    this.passwordRequest = null;
+    const req = this.passwordRequest;
+    if (!req) return;
+    this.pending.delete(req.tabId);
+    this.dropRequest(req.tabId);
+  }
+
+  /** A connection was deleted: its tabs keep their text but lose the session and the binding. */
+  unbindConnection(connectionId: string): void {
+    for (const tab of this.list) {
+      if (tab.pane?.connectionId !== connectionId) continue;
+      this.dropRequest(tab.id);
+      this.pending.delete(tab.id);
+      tab.connectError = null;
+      tab.pane.unbind();
+      tab.pane.notice = t("tabs.connectionDeleted");
+    }
   }
 
   /** Binds a connection picked in the Explorer: reuses the active tab when it is an unbound query tab. */
@@ -195,8 +223,7 @@ class TabsStore {
     const panes = this.list.map((x) => x.pane);
     this.list = [];
     this.activeId = null;
-    this.passwordRequest = null;
-    this.connectError = null;
+    this.passwordRequests = [];
     this.pending.clear();
     await Promise.all(panes.map((p) => p?.close()));
   }
