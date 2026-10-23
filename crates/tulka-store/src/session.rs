@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 
 /// Bump when the table layout changes; a mismatching file is discarded.
 const SESSION_VERSION: i64 = 1;
@@ -23,15 +23,40 @@ pub struct SessionStore {
     conn: Mutex<Connection>,
 }
 
-fn try_open(path: &Path) -> rusqlite::Result<Connection> {
+/// Why a session file could not be opened.
+enum OpenError {
+    /// Not a database, corrupt, or another layout: the file can be replaced.
+    Unusable,
+    /// Locked by another process, unreadable, or an I/O error: the file may
+    /// hold the user's text and must be kept.
+    Unavailable,
+}
+
+impl From<rusqlite::Error> for OpenError {
+    fn from(e: rusqlite::Error) -> Self {
+        match e.sqlite_error_code() {
+            Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt) => OpenError::Unusable,
+            _ => OpenError::Unavailable,
+        }
+    }
+}
+
+fn try_open(path: &Path) -> Result<Connection, OpenError> {
     let conn = Connection::open(path)?;
     // The first read fails with "not a database" on garbage files.
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
     if version == SESSION_VERSION {
-        conn.query_row("SELECT count(*) FROM session", [], |r| r.get::<_, i64>(0))?;
+        let session: i64 = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'session'",
+            [],
+            |r| r.get(0),
+        )?;
+        if session != 1 {
+            return Err(OpenError::Unusable);
+        }
     } else if version != 0 || tables != 0 {
-        return Err(rusqlite::Error::InvalidQuery);
+        return Err(OpenError::Unusable);
     } else {
         init(&conn)?;
     }
@@ -55,17 +80,22 @@ fn remove_files(path: &Path) {
 }
 
 impl SessionStore {
-    /// Never fails. A file that cannot be opened, is not a valid database or
-    /// has another `user_version` is deleted (with its `-wal`/`-shm`
-    /// sidecars) and starts empty; if even that fails, falls back to memory.
+    /// Never fails. A file that is not a valid database or has another
+    /// `user_version` is deleted (with its `-wal`/`-shm` sidecars) and starts
+    /// empty. A file that cannot be opened right now (locked by another
+    /// instance, unreadable, an I/O error) is kept untouched and the session
+    /// lives in memory.
     pub fn open(path: &Path) -> SessionStore {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let conn = try_open(path).or_else(|_| {
-            remove_files(path);
-            try_open(path)
-        });
+        let conn = match try_open(path) {
+            Err(OpenError::Unusable) => {
+                remove_files(path);
+                try_open(path)
+            }
+            other => other,
+        };
         match conn {
             Ok(conn) => SessionStore {
                 conn: Mutex::new(conn),
@@ -174,6 +204,63 @@ mod tests {
         assert_eq!(store.load(), None);
         store.save("new").unwrap();
         assert_eq!(store.load().as_deref(), Some("new"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        SessionStore::open(&path).save("text").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            // Running as root: permissions do not stop reads, nothing to test.
+            return;
+        }
+        let store = SessionStore::open(&path);
+        assert_eq!(store.load(), None);
+        store.save("memory").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(SessionStore::open(&path).load().as_deref(), Some("text"));
+    }
+
+    #[test]
+    fn locked_file_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        SessionStore::open(&path).save("text").unwrap();
+        {
+            // Another instance holding an exclusive lock on the file.
+            let other = Connection::open(&path).unwrap();
+            other
+                .pragma_update(None, "locking_mode", "EXCLUSIVE")
+                .unwrap();
+            other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+            let store = SessionStore::open(&path);
+            assert_eq!(store.load(), None);
+            other.execute_batch("ROLLBACK").unwrap();
+        }
+        assert_eq!(SessionStore::open(&path).load().as_deref(), Some("text"));
+    }
+
+    #[test]
+    fn failed_save_keeps_the_previous_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let store = SessionStore::open(&path);
+        store.save("first").unwrap();
+        store
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER fail BEFORE UPDATE ON session WHEN NEW.json = 'second'
+                 BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+            .unwrap();
+        assert!(store.save("second").is_err());
+        assert_eq!(store.load().as_deref(), Some("first"));
+        drop(store);
+        assert_eq!(SessionStore::open(&path).load().as_deref(), Some("first"));
     }
 
     #[test]
