@@ -133,7 +133,8 @@
                 return true;
               },
             },
-            ...defaultKeymap,
+            // Ctrl+Shift+\ is the app's "split down", not "go to matching bracket".
+            ...defaultKeymap.filter((b) => b.key !== "Shift-Mod-\\"),
             ...historyKeymap,
           ]),
           EditorView.updateListener.of((u) => {

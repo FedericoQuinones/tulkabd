@@ -11,13 +11,11 @@
   import ExplorerTree from "./lib/explorer/ExplorerTree.svelte";
   import { explorer } from "./lib/explorer/tree.svelte";
   import { clampWidth, loadLayout, saveLayout, MAX_WIDTH, MIN_WIDTH } from "./lib/shell/layout";
-  import QueryPane from "./lib/pane/QueryPane.svelte";
-  import StructureView from "./lib/structure/StructureView.svelte";
-  import TabStrip from "./lib/tabs/TabStrip.svelte";
   import Palette from "./lib/palette/Palette.svelte";
   import { palette } from "./lib/palette/palette.svelte";
   import { shortcutAction } from "./lib/tabs/shortcuts";
   import { tabs } from "./lib/tabs/tabs.svelte";
+  import Workspace from "./lib/workspace/Workspace.svelte";
 
   // `undefined` = closed, `null` = new connection, otherwise edit this one.
   let dialog = $state<ConnectionConfig | null | undefined>(undefined);
@@ -36,8 +34,6 @@
   }
 
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
-  const newKey = t(isMac ? "tabs.newKey.mac" : "tabs.newKey.other");
-  const activeTab = $derived(tabs.active);
   const activePane = $derived(tabs.activePane);
 
   // Tells the backend the first frame is painted (it only prints with TULKA_STARTUP_PROBE=1).
@@ -92,6 +88,8 @@
     e.preventDefault();
     if (action === "palette") palette.show();
     else if (action === "new") tabs.newTab();
+    else if (action === "splitRight") tabs.splitActive("row");
+    else if (action === "splitDown") tabs.splitActive("column");
     else if (tabs.activeId) tabs.close(tabs.activeId);
   }
 </script>
@@ -133,28 +131,7 @@
       </aside>
     {/if}
     <main class="workspace">
-      <TabStrip />
-      <div class="body">
-        {#if activeTab?.pane}
-          {#key activeTab.id}
-            <QueryPane pane={activeTab.pane} connectError={activeTab.connectError} onreconnect={() => tabs.reconnectActive()} onretry={() => tabs.retry(activeTab.id)} />
-          {/key}
-        {:else if activeTab?.kind === "structure"}
-          {#key activeTab.id}
-            <StructureView
-              connectionId={activeTab.connectionId!}
-              database={activeTab.database!}
-              schema={activeTab.schema!}
-              name={activeTab.name!}
-            />
-          {/key}
-        {:else}
-          <div class="blank">
-            <p>{t("tabs.empty", { key: newKey })}</p>
-            <p class="sub">{t("tabs.emptyHint")}</p>
-          </div>
-        {/if}
-      </div>
+      <Workspace />
     </main>
   </div>
   <StatusBar
@@ -249,25 +226,5 @@
     background: var(--ground);
     min-width: 0;
     min-height: 0;
-    display: grid;
-    grid-template-rows: 36px minmax(0, 1fr);
-  }
-  .body {
-    min-height: 0;
-  }
-  .blank {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    color: var(--muted);
-  }
-  .blank p {
-    margin: 0;
-  }
-  .blank .sub {
-    font-size: 12px;
   }
 </style>

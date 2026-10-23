@@ -83,3 +83,16 @@ test("completion metadata is fetched per connection and database, not per mount"
   expect(ipc.completionMetadata).toHaveBeenLastCalledWith("c-meta", "Hist");
   expect(ipc.completionMetadata).toHaveBeenCalledTimes(2);
 });
+
+test("ctrl+shift+\\ next to a bracket is left to the app (split down)", () => {
+  const pane = new PaneState("t");
+  pane.initialDoc = "(1)";
+  show(pane);
+  const content = document.querySelector<HTMLElement>(".cm-content")!;
+  const view = EditorView.findFromDOM(document.querySelector<HTMLElement>(".cm-editor")!)!;
+  view.dispatch({ selection: { anchor: 0 } });
+  const e = new KeyboardEvent("keydown", { key: "|", code: "Backslash", keyCode: 220, ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true });
+  content.dispatchEvent(e);
+  expect(e.defaultPrevented).toBe(false);
+  expect(view.state.selection.main.head).toBe(0);
+});

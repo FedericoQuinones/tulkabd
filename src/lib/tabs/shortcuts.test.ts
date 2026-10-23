@@ -48,3 +48,20 @@ test("Latin layouts keep the typed letter", () => {
   expect(shortcutLetter(ev("Enter", { code: "Enter" }))).toBe("enter");
   expect(shortcutLetter(ev("ж", { code: "Semicolon" }))).toBe("ж");
 });
+test("ctrl+\\ splits right and ctrl+shift+\\ splits down", () => {
+  expect(shortcutAction(ev("\\", { ctrlKey: true, code: "Backslash" }), false)).toBe("splitRight");
+  expect(shortcutAction(ev("|", { ctrlKey: true, shiftKey: true, code: "Backslash" }), false)).toBe("splitDown");
+  expect(shortcutAction(ev("\\", { metaKey: true, code: "Backslash" }), true)).toBe("splitRight");
+  expect(shortcutAction(ev("\\", { ctrlKey: true, altKey: true, code: "Backslash" }), false)).toBeNull();
+  // A layout where the backslash key types something else still splits by the physical key...
+  expect(shortcutAction(ev("ç", { ctrlKey: true, code: "Backslash" }), false)).toBe("splitRight");
+  // ...and one where \ sits on another key (with AltGr) splits by the typed key.
+  expect(shortcutAction(ev("\\", { ctrlKey: true, code: "Backquote" }), false)).toBe("splitRight");
+});
+test("split shortcuts do not fire from a plain input, but do from the code editor", () => {
+  const input = { tagName: "INPUT", isContentEditable: false, closest: () => null } as unknown as HTMLElement;
+  expect(shortcutAction(ev("\\", { ctrlKey: true, code: "Backslash" }, input), false)).toBeNull();
+  expect(shortcutAction(ev("|", { ctrlKey: true, shiftKey: true, code: "Backslash" }, input), false)).toBeNull();
+  const cm = { tagName: "DIV", isContentEditable: true, closest: (s: string) => (s === ".cm-editor" ? {} : null) } as unknown as HTMLElement;
+  expect(shortcutAction(ev("|", { ctrlKey: true, shiftKey: true, code: "Backslash" }, cm), false)).toBe("splitDown");
+});
