@@ -596,8 +596,9 @@ mod tests {
             .iter()
             .map(|m| (m.database.as_str(), m.name.as_str()))
             .collect();
-        assert_eq!(got.len(), 3);
-        assert_eq!(got[2..], [("b", "rep")]);
+        // Same score and length: name case-insensitively, then exact name,
+        // then database; the longer `rep2` is cut by the limit.
+        assert_eq!(got, [("a", "Rep"), ("a", "rep"), ("b", "rep")]);
     }
 
     fn lcg(s: &mut u64) -> usize {
