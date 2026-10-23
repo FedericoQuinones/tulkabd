@@ -271,3 +271,37 @@ test("Run on a restored tab without a saved password asks for it, then runs", as
   expect(ipc.openSession).toHaveBeenCalledWith(id, "c2", undefined, "pw");
   expect(vi.mocked(ipc.runQuery).mock.calls[0][1]).toBe("SELECT 2");
 });
+
+test("an edited definition keeps its text across a restore and the reload", async () => {
+  vi.mocked(ipc.objectDefinition).mockResolvedValue("CREATE VIEW v AS SELECT 1");
+  const id = tabs.open({ kind: "definition", connectionId: "c1", database: "Sales", schema: "dbo", name: "v" });
+  await flush();
+  const pane = tabs.list.find((x) => x.id === id)!.pane!;
+  expect(pane.text()).toBe("CREATE VIEW v AS SELECT 1");
+  pane.editorState = { doc: "CREATE VIEW v AS SELECT 2 -- mine" };
+  const saved = snapshot(tabs);
+  expect(saved.tabs[0]).toMatchObject({ kind: "definition", text: "CREATE VIEW v AS SELECT 2 -- mine" });
+  await tabs.reset();
+
+  vi.mocked(ipc.objectDefinition).mockResolvedValue("CREATE VIEW v AS SELECT 3");
+  restore(tabs, parseSession(JSON.stringify(saved))!, known);
+  await flush();
+
+  expect(ipc.objectDefinition).toHaveBeenCalledTimes(2);
+  expect(tabs.list[0].pane!.text()).toBe("CREATE VIEW v AS SELECT 2 -- mine");
+});
+
+test("an unedited definition saves no text and reloads fresh text", async () => {
+  vi.mocked(ipc.objectDefinition).mockResolvedValue("CREATE VIEW v AS SELECT 1");
+  tabs.open({ kind: "definition", connectionId: "c1", database: "Sales", schema: "dbo", name: "v" });
+  await flush();
+  const saved = snapshot(tabs);
+  expect(saved.tabs[0]).not.toHaveProperty("text");
+  await tabs.reset();
+
+  vi.mocked(ipc.objectDefinition).mockResolvedValue("CREATE VIEW v AS SELECT 3");
+  restore(tabs, parseSession(JSON.stringify(saved))!, known);
+  await flush();
+
+  expect(tabs.list[0].pane!.text()).toBe("CREATE VIEW v AS SELECT 3");
+});

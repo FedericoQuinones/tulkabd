@@ -71,6 +71,11 @@ export class PaneState {
   liveDoc: (() => string) | null = null;
   private loadedText: string | null = null;
 
+  /** The last text `loadText` put in (a definition), or null; differing text means the user edited it. */
+  get lastLoaded(): string | null {
+    return this.loadedText;
+  }
+
   /** The editor text right now: the mounted editor's, else the state saved on unmount, else `initialDoc`. */
   text(): string {
     if (this.liveDoc) return this.liveDoc();

@@ -29,13 +29,26 @@ export type SessionTab =
       dirty: boolean;
     }
   | { id: string; kind: "structure"; connectionId: string; database: string; schema: string; name: string }
-  | { id: string; kind: "definition"; connectionId: string; database: string; schema: string; name: string };
+  | {
+      id: string;
+      kind: "definition";
+      connectionId: string;
+      database: string;
+      schema: string;
+      name: string;
+      /** Only when the user edited the loaded definition; otherwise it reloads when connected. */
+      text?: string;
+    };
 
 function sessionTab(store: TabsStore, tab: Tab, text: (pane: PaneState) => string): SessionTab {
   const ref = { connectionId: tab.connectionId!, database: tab.database!, schema: tab.schema!, name: tab.name! };
   if (tab.kind === "structure") return { id: tab.id, kind: "structure", ...ref };
-  // Definition tabs reload their text when connected, so it is not saved.
-  if (tab.name !== undefined && tab.connectionId !== undefined) return { id: tab.id, kind: "definition", ...ref };
+  // Definition tabs reload their text when connected: it is saved only when the user edited it.
+  if (tab.name !== undefined && tab.connectionId !== undefined) {
+    const current = text(tab.pane!);
+    const edited = current !== (tab.pane!.lastLoaded ?? "");
+    return edited ? { id: tab.id, kind: "definition", ...ref, text: current } : { id: tab.id, kind: "definition", ...ref };
+  }
   const { connectionId, database } = store.binding(tab);
   const out: SessionTab = { id: tab.id, kind: "query", title: tab.title, connectionId, database, text: text(tab.pane!), dirty: tab.dirty };
   if (tab.savedQuery) out.savedQuery = { database: tab.savedQuery.database, name: tab.savedQuery.name };
@@ -96,6 +109,7 @@ function layoutGroups(l: unknown): string[] | null {
 function validTab(v: unknown): v is SessionTab {
   if (!isObject(v) || !isString(v.id)) return false;
   if (v.kind === "structure" || v.kind === "definition") {
+    if (v.kind === "definition" && v.text !== undefined && !isString(v.text)) return false;
     return isString(v.connectionId) && isString(v.database) && isString(v.schema) && isString(v.name);
   }
   if (v.kind !== "query") return false;
@@ -162,6 +176,8 @@ function restoredTab(s: SessionTab, known: { connectionIds: Set<string> }): Tab 
   };
   if (s.kind === "definition") {
     const { id, connectionId, database, schema, name } = s;
+    // Edited text wins over the reload: `loadText` does not replace text the user typed.
+    if (s.text !== undefined) pane.initialDoc = s.text;
     bind(connectionId, database);
     return { id, kind: "query", title: name, pane, connectionId, database, schema, name, connectError: null, dirty: false };
   }
