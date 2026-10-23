@@ -101,3 +101,22 @@ test("the separator resizes the groups from the keyboard, keeping 15 % per group
   flushSync();
   expect(tabs.layout.kind === "split" && tabs.layout.sizes[0]).toBeCloseTo(0.85);
 });
+
+test("after a group closes, the group the store picks stays active even though remounted editors focus", () => {
+  // [[A / B] column, C]: A and B stacked on the left, C on the right.
+  tabs.open({ kind: "query" });
+  const a = tabs.activeGroupId;
+  tabs.splitActive("row");
+  const c = tabs.activeGroupId;
+  tabs.focusGroup(a);
+  tabs.splitActive("column");
+  const b = tabs.activeGroupId;
+  flushSync();
+  expect(tabs.layout).toMatchObject({ kind: "split", dir: "row", children: [{ kind: "split", dir: "column" }, { kind: "group", id: c }] });
+
+  tabs.close(tabs.activeIn(b)!.id);
+  flushSync();
+  expect(groups(tabs.layout)).toEqual([a, c]);
+  expect(tabs.activeGroupId).toBe(c);
+  expect(groupEls().map((g) => g.classList.contains("active"))).toEqual([false, true]);
+});

@@ -14,8 +14,10 @@
     onretry?: () => void;
     /** Why the tab's last connect failed. */
     connectError?: string | null;
+    /** Focus the editor when it mounts. */
+    autofocus?: boolean;
   }
-  let { pane, onreconnect, onretry, connectError = null }: Props = $props();
+  let { pane, onreconnect, onretry, connectError = null, autofocus = true }: Props = $props();
 
   let editor = $state<SqlEditor>();
 
@@ -50,7 +52,7 @@
         {#if onretry}<button type="button" onclick={onretry}>{t("tabs.retry")}</button>{/if}
       </div>
     {/if}
-    <SqlEditor bind:this={editor} {pane} onrun={run} oncursor={(p) => (pane.cursor = p)} />
+    <SqlEditor bind:this={editor} {pane} {autofocus} onrun={run} oncursor={(p) => (pane.cursor = p)} />
   </div>
   <div class="res"><ResultsPanel {pane} onjump={(line) => editor?.jumpToLine(line)} /></div>
 </section>

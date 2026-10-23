@@ -19,8 +19,10 @@
     /** Ctrl/Cmd+Enter: receives the selection (or whole doc) to execute. */
     onrun: (target: { sql: string; lineOffset: number }) => void;
     oncursor: (pos: { line: number; col: number }) => void;
+    /** Takes the keyboard focus when mounted. */
+    autofocus?: boolean;
   }
-  let { pane, onrun, oncursor }: Props = $props();
+  let { pane, onrun, oncursor, autofocus = true }: Props = $props();
 
   let host: HTMLDivElement;
   let view: EditorView | undefined;
@@ -153,7 +155,7 @@
       state = EditorState.create({ doc: pane.initialDoc, extensions });
     }
     view = new EditorView({ parent: host, state });
-    view.focus();
+    if (autofocus) view.focus();
     report(view);
     pane.liveDoc = () => view?.state.doc.toString() ?? "";
     shownVersion = pane.docVersion;
