@@ -255,6 +255,12 @@ impl Explorer {
         epoch
     }
 
+    /// True while `epoch` is the latest connect attempt of `connection_id`
+    /// (no disconnect, delete or newer connect since).
+    fn is_current_attempt(&self, connection_id: &str, epoch: u64) -> bool {
+        self.attempts().get(connection_id) == Some(&epoch)
+    }
+
     /// Cancels the connect attempt in progress, if any.
     fn cancel_attempt(&self, connection_id: &str) {
         self.attempts().remove(connection_id);
@@ -546,7 +552,8 @@ fn index_order(state: &AppState, connection_id: &str, databases: &[String]) -> V
 /// Emits `explorerStatus` "connecting", then "connected" or "error". If the
 /// connection is deleted while connecting, fails with `"not_found"`; if
 /// `disconnect_explorer` (or a newer `connect_explorer`) comes in meanwhile,
-/// fails with `"closed"`. In both cases the new session is dropped.
+/// fails with `"closed"`, even if the connect itself failed. In both cases
+/// the new session is dropped and this call emits no "connected" or "error".
 pub async fn connect_explorer(
     state: &AppState,
     connection_id: String,
@@ -588,6 +595,11 @@ pub async fn connect_explorer(
     let (session, server, databases, bound) = match opened {
         Ok(opened) => opened,
         Err(e) => {
+            // A disconnect or a newer connect came in meanwhile: its status
+            // stands, this attempt reports nothing.
+            if !explorer.is_current_attempt(&connection_id, epoch) {
+                return Err(CLOSED.into());
+            }
             let message = e.to_string();
             explorer.status(
                 &connection_id,
@@ -648,9 +660,20 @@ pub async fn connect_explorer(
         })
         .await;
     drop(config);
-    explorer.status(&connection_id, ConnectionStatus::Connected, None);
+    // A disconnect or a delete may have taken the entry since it was
+    // registered; then its own status stands.
+    let still_ours = explorer
+        .conns()
+        .get(&connection_id)
+        .is_some_and(|c| c.epoch == epoch);
+    if still_ours {
+        explorer.status(&connection_id, ConnectionStatus::Connected, None);
+    }
     if let Some(replaced) = replaced {
         Explorer::stop(replaced).await;
+    }
+    if !still_ours {
+        return Err(CLOSED.into());
     }
     if !vanished.is_empty() {
         let id = connection_id.clone();

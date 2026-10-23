@@ -57,6 +57,8 @@ struct Inner {
     gate_connect: AtomicBool,
     connect_entered: Notify,
     connect_release: Notify,
+    /// When set as a `connect` starts, that connect fails (after the gate).
+    fail_connect: AtomicBool,
 }
 
 impl Inner {
@@ -88,9 +90,13 @@ impl Driver for MetaDriver {
         if p.password != PASSWORD {
             return Err(DriverError::AuthFailed("Login failed".into()));
         }
+        let fail = self.0.fail_connect.load(Ordering::SeqCst);
         if self.0.gate_connect.load(Ordering::SeqCst) {
             self.0.connect_entered.notify_one();
             self.0.connect_release.notified().await;
+        }
+        if fail {
+            return Err(DriverError::Unreachable("connect timed out".into()));
         }
         self.0.connects.lock().unwrap().push(p.database.clone());
         let open = self.0.open.fetch_add(1, Ordering::SeqCst) + 1;
@@ -604,6 +610,64 @@ async fn a_disconnect_during_connect_wins() {
     connect_explorer(&f.state, "c1".into(), None).await.unwrap();
     f.events.wait_idle("c1").await;
     assert_eq!(f.driver.snapshots(), ["a", "b"]);
+}
+
+#[tokio::test]
+async fn a_disconnect_during_a_failing_connect_reports_no_error() {
+    let f = fx(Inner::new(&["a"]));
+    save(&f, conn("c1", "Main", None)).await;
+    f.driver.gate_connect.store(true, Ordering::SeqCst);
+    f.driver.fail_connect.store(true, Ordering::SeqCst);
+    let state = f.state.clone();
+    let connecting = tokio::spawn(async move { connect_explorer(&state, "c1".into(), None).await });
+    tokio::time::timeout(TIMEOUT, f.driver.connect_entered.notified())
+        .await
+        .unwrap();
+    disconnect_explorer(&f.state, "c1".into()).await.unwrap();
+    f.driver.connect_release.notify_one();
+    let result = tokio::time::timeout(TIMEOUT, connecting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        status_events(&f, "c1"),
+        [
+            (ConnectionStatus::Connecting, None),
+            (ConnectionStatus::Disconnected, None)
+        ]
+    );
+    assert_eq!(result.unwrap_err(), CLOSED);
+}
+
+#[tokio::test]
+async fn a_superseded_connect_failing_late_reports_no_error() {
+    let f = fx(Inner::new(&["a"]));
+    save(&f, conn("c1", "Main", None)).await;
+    f.driver.gate_connect.store(true, Ordering::SeqCst);
+    f.driver.fail_connect.store(true, Ordering::SeqCst);
+    let state = f.state.clone();
+    let first = tokio::spawn(async move { connect_explorer(&state, "c1".into(), None).await });
+    tokio::time::timeout(TIMEOUT, f.driver.connect_entered.notified())
+        .await
+        .unwrap();
+    // A newer connect goes through while the first one hangs.
+    f.driver.gate_connect.store(false, Ordering::SeqCst);
+    f.driver.fail_connect.store(false, Ordering::SeqCst);
+    connect_explorer(&f.state, "c1".into(), None).await.unwrap();
+    f.events.wait_idle("c1").await;
+    // Then the first one fails.
+    f.driver.connect_release.notify_one();
+    let result = tokio::time::timeout(TIMEOUT, first).await.unwrap().unwrap();
+    assert!(!status_events(&f, "c1")
+        .iter()
+        .any(|(s, _)| *s == ConnectionStatus::Error));
+    assert_eq!(
+        status_events(&f, "c1").last().unwrap(),
+        &(ConnectionStatus::Connected, None)
+    );
+    assert_eq!(result.unwrap_err(), CLOSED);
+    // The newer Explorer is still registered.
+    assert!(refresh_metadata(&f.state, "c1".into(), None).await.is_ok());
 }
 
 #[tokio::test]
