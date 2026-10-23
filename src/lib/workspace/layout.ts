@@ -12,13 +12,15 @@ export function groups(l: Layout): string[] {
   return l.kind === "group" ? [l.id] : l.children.flatMap(groups);
 }
 
-function scale(sizes: number[]): number[] {
-  const total = sizes.reduce((a, b) => a + b, 0);
-  return sizes.map((s) => s / total);
-}
-
 function equal(n: number): number[] {
   return Array.from({ length: n }, () => 1 / n);
+}
+
+/** Rescales to sum 1; falls back to equal sizes when the total is not a finite number above 0. */
+function scale(sizes: number[]): number[] {
+  const total = sizes.reduce((a, b) => a + b, 0);
+  if (!Number.isFinite(total) || !(total > 0)) return equal(sizes.length);
+  return sizes.map((s) => s / total);
 }
 
 function splitIn(l: Layout, groupId: string, dir: "row" | "column", newId: string): Layout {
@@ -40,14 +42,15 @@ function splitIn(l: Layout, groupId: string, dir: "row" | "column", newId: strin
   return { ...l, children: l.children.map((c) => splitIn(c, groupId, dir, newId)) };
 }
 
-/** Splits a group in two; null when the workspace already has MAX_GROUPS groups. */
+/** Splits a group in two; null when the workspace already has MAX_GROUPS groups or the group is not in it. */
 export function split(
   l: Layout,
   groupId: string,
   dir: "row" | "column",
   newId: string,
 ): Layout | null {
-  if (groups(l).length >= MAX_GROUPS) return null;
+  const ids = groups(l);
+  if (ids.length >= MAX_GROUPS || !ids.includes(groupId)) return null;
   return normalize(splitIn(l, groupId, dir, newId));
 }
 
@@ -76,8 +79,7 @@ export function removeGroup(l: Layout, groupId: string): Layout {
 export function resize(l: Layout, path: number[], sizes: number[]): Layout {
   if (l.kind === "group") return l;
   if (path.length === 0) {
-    const total = sizes.reduce((a, b) => a + b, 0);
-    if (sizes.length !== l.children.length || !(total > 0) || sizes.some((s) => !(s >= 0))) {
+    if (sizes.length !== l.children.length || sizes.some((s) => !Number.isFinite(s) || !(s > 0))) {
       return l;
     }
     return { ...l, sizes: scale(sizes) };

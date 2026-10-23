@@ -105,3 +105,36 @@ test("normalize flattens single-child splits and same-direction nesting", () => 
     children: [g("a"), g("b"), g("c")],
   });
 });
+
+test("resize rejects zero, negative and non-finite sizes", () => {
+  const two = split(g("g1"), "g1", "row", "g2")!;
+  expect(resize(two, [], [1, 0])).toEqual(two);
+  expect(resize(two, [], [1, -1])).toEqual(two);
+  expect(resize(two, [], [1, Infinity])).toEqual(two);
+  expect(resize(two, [], [1, NaN])).toEqual(two);
+});
+
+test("removing a group after a degenerate resize keeps sizes finite and summing to 1", () => {
+  const three = split(split(g("g1"), "g1", "row", "g2")!, "g2", "row", "g3")!;
+  const bad: Layout = { ...(three as Extract<Layout, { kind: "split" }>), sizes: [1, 0, 0] };
+  const l = removeGroup(bad, "g1") as Extract<Layout, { kind: "split" }>;
+  expect(l.sizes.every(Number.isFinite)).toBe(true);
+  expect(l.sizes.reduce((a, b) => a + b, 0)).toBeCloseTo(1);
+  const n = normalize({ ...bad, sizes: [0, 0, 0] }) as Extract<Layout, { kind: "split" }>;
+  expect(n.sizes.every(Number.isFinite)).toBe(true);
+});
+
+test("split returns null for an unknown group", () => {
+  expect(split(g("g1"), "nope", "row", "g2")).toBeNull();
+});
+
+test("removeGroup with an unknown id returns the tree unchanged", () => {
+  const two = split(g("g1"), "g1", "row", "g2")!;
+  expect(removeGroup(two, "nope")).toEqual(two);
+});
+
+test("splitting in the same direction resets uneven sizes to equal", () => {
+  const two = resize(split(g("g1"), "g1", "row", "g2")!, [], [1, 3]);
+  const three = split(two, "g1", "row", "g3") as Extract<Layout, { kind: "split" }>;
+  for (const s of three.sizes) expect(s).toBeCloseTo(1 / 3);
+});
