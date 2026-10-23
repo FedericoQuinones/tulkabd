@@ -1,4 +1,4 @@
-export type ShortcutAction = "new" | "close" | "palette" | "save" | "splitRight" | "splitDown" | "zoomIn" | "zoomOut" | "zoomReset";
+export type ShortcutAction = "new" | "close" | "palette" | "save" | "open" | "splitRight" | "splitDown" | "zoomIn" | "zoomOut" | "zoomReset";
 
 /**
  * The lowercase key of a shortcut. A non-ASCII key (Cyrillic, Greek…) falls back to the physical
@@ -21,7 +21,7 @@ function zoomKey(e: KeyboardEvent): ShortcutAction | null {
 }
 
 /**
- * Maps a keydown to an app shortcut (Ctrl+T / Ctrl+W / Ctrl+P / Ctrl+S / Ctrl+\\ / Ctrl+Shift+\\ / Ctrl+plus, minus, 0, Cmd on
+ * Maps a keydown to an app shortcut (Ctrl+T / Ctrl+W / Ctrl+P / Ctrl+S / Ctrl+O / Ctrl+\\ / Ctrl+Shift+\\ / Ctrl+plus, minus, 0, Cmd on
  * macOS). Plain inputs keep their keys; the code editor is allowed, so Ctrl+W closes and Ctrl+S saves
  * with the caret in it. Ctrl+P works from anywhere: no input uses it.
  */
@@ -42,5 +42,5 @@ export function shortcutAction(e: KeyboardEvent, isMac: boolean): ShortcutAction
   }
   if (zoom) return zoom;
   if (backslash) return e.shiftKey ? "splitDown" : "splitRight";
-  return key === "t" ? "new" : key === "w" ? "close" : key === "s" ? "save" : null;
+  return key === "t" ? "new" : key === "w" ? "close" : key === "s" ? "save" : key === "o" ? "open" : null;
 }

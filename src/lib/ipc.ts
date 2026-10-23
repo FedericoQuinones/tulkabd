@@ -342,6 +342,33 @@ export const deleteSavedQuery = (database: string, name: string) =>
 export const revealSavedQuery = (database: string, name: string) =>
   invoke<void>("reveal_saved_query", { database, name });
 
+/** How a `.sql` file from disk is encoded (plan D7); Ctrl+S writes it back the same way. */
+export type FileEncoding = "utf8" | "utf8Bom" | "utf16Le" | "utf16Be";
+/** The line ending a `.sql` file is written back with (its more frequent one when read). */
+export type LineEnding = "lf" | "crlf";
+export interface OpenedFile {
+  path: string;
+  /** The file name, the tab's title. */
+  name: string;
+  /** With `\n` line breaks. */
+  text: string;
+  encoding: FileEncoding;
+  lineEnding: LineEnding;
+}
+
+/**
+ * Shows the native open dialog for `.sql` files (several at once); the backend may then read and
+ * write the picked paths, which it returns. `filterName` labels the `*.sql` filter. Empty when cancelled.
+ */
+export const pickSqlFiles = (filterName: string) => invoke<string[]>("pick_sql_files", { filterName });
+/** Lets the backend read and write `.sql` paths dropped on the window or restored with the session. */
+export const allowDroppedPaths = (paths: string[]) => invoke<void>("allow_dropped_paths", { paths });
+/** Rejects with `"not_allowed"`, `"not_found"`, `"not_text"` or why it could not be read. */
+export const readSqlFile = (path: string) => invoke<OpenedFile>("read_sql_file", { path });
+/** Writes atomically, recreating a deleted file. Rejects with `"not_allowed"` or why it could not be written. */
+export const writeSqlFile = (path: string, text: string, encoding: FileEncoding, lineEnding: LineEnding) =>
+  invoke<void>("write_sql_file", { path, text, encoding, lineEnding });
+
 /** Subscribes to the explorer and indexing events. Call the returned function to stop. */
 export const onAppEvent = (cb: (e: AppEvent) => void): Promise<UnlistenFn> =>
   listen<AppEvent>("app-event", (ev) => cb(ev.payload));

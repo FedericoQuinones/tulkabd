@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { t } from "./lib/i18n/t";
   import Rail from "./lib/shell/Rail.svelte";
   import StatusBar from "./lib/shell/StatusBar.svelte";
@@ -52,10 +53,28 @@
   let restored = $state(false);
   let destroyed = false;
   let stopAutosave: (() => void) | null = null;
+  let stopDrop: (() => void) | null = null;
   onDestroy(() => {
     destroyed = true;
     stopAutosave?.();
+    stopDrop?.();
   });
+
+  // `.sql` files dropped on the window open in tabs. The native drop (dragDropEnabled) only sees
+  // files from outside: tabs and tree items move with pointer events, not HTML drag and drop.
+  try {
+    getCurrentWebview()
+      .onDragDropEvent((e) => {
+        if (e.payload.type === "drop") void tabs.dropFiles(e.payload.paths);
+      })
+      .then((fn) => {
+        if (destroyed) fn();
+        else stopDrop = fn;
+      })
+      .catch(() => {});
+  } catch {
+    // Outside Tauri (tests): nothing is ever dropped.
+  }
   async function restoreSession() {
     const [json] = await Promise.all([loadSession().catch(() => null), connections.refresh()]);
     if (destroyed) return;
@@ -129,6 +148,7 @@
     if (action === "zoomIn" || action === "zoomOut" || action === "zoomReset") zoom.apply(action);
     else if (action === "palette") palette.show();
     else if (action === "save") void tabs.saveActive();
+    else if (action === "open") void tabs.pickFiles();
     else if (action === "new") tabs.newTab();
     else if (action === "splitRight") tabs.splitActive("row");
     else if (action === "splitDown") tabs.splitActive("column");
@@ -178,6 +198,14 @@
     {/if}
     <main class="workspace">
       {#if restored}<Workspace />{/if}
+      {#if tabs.fileError}
+        <div class="file-error" role="alert">
+          <span>{tabs.fileError}</span>
+          <button type="button" aria-label={t("files.dismiss")} title={t("files.dismiss")} onclick={() => (tabs.fileError = null)}>
+            <svg viewBox="0 0 16 16" width="10" height="10"><path d="M3 3l10 10M13 3L3 13" /></svg>
+          </button>
+        </div>
+      {/if}
     </main>
   </div>
   <StatusBar
@@ -274,8 +302,51 @@
     word-break: break-word;
   }
   .workspace {
+    position: relative;
     background: var(--ground);
     min-width: 0;
     min-height: 0;
+  }
+  /* Files that could not be opened, over the top right of the workspace. */
+  .file-error {
+    position: absolute;
+    top: 44px;
+    right: 14px;
+    z-index: 4;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    max-width: 420px;
+    padding: 10px 10px 10px 14px;
+    background: var(--raised);
+    border: 1px solid var(--control);
+    border-radius: var(--radius-card);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    color: var(--negative);
+    white-space: pre-line;
+    word-break: break-word;
+  }
+  .file-error button {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 20px;
+    height: 20px;
+    border: 0;
+    border-radius: 4px;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .file-error button svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+  }
+  .file-error button:hover,
+  .file-error button:focus-visible {
+    outline: none;
+    color: var(--text);
+    background: var(--ground);
   }
 </style>

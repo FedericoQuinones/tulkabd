@@ -8,15 +8,77 @@
 
 <script lang="ts">
   import { startDrag } from "../drag/pointerDrag";
+  import ContextMenu from "../explorer/ContextMenu.svelte";
+  import type { MenuItem } from "../explorer/tree";
   import { t } from "../i18n/t";
   import { groups, MAX_GROUPS } from "../workspace/layout";
-  import { envColor, tabs } from "./tabs.svelte";
+  import { envColor, tabs, type Tab } from "./tabs.svelte";
 
   let { groupId }: { groupId: string } = $props();
 
   const full = $derived(groups(tabs.layout).length >= MAX_GROUPS);
   const list = $derived(tabs.tabsIn(groupId));
   const mark = $derived(tabDrop.over?.groupId === groupId ? tabDrop.over.slot : null);
+
+  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+
+  /** The open menu: the "+" button's or a tab's. `trigger` gets the focus back when it closes. */
+  let menu = $state<{ items: MenuItem[]; x: number; y: number; label: string; trigger: HTMLElement | null } | null>(null);
+
+  function addMenu(e: MouseEvent) {
+    const trigger = e.currentTarget as HTMLElement;
+    const r = trigger.getBoundingClientRect();
+    const items: MenuItem[] = [
+      {
+        id: "new",
+        label: t("tabs.new"),
+        hint: t(isMac ? "tabs.newKey.mac" : "tabs.newKey.other"),
+        run: () => {
+          tabs.focusGroup(groupId);
+          tabs.newTab();
+        },
+      },
+      {
+        id: "open",
+        label: t("tabs.openFile"),
+        hint: t(isMac ? "tabs.openKey.mac" : "tabs.openKey.other"),
+        run: () => {
+          tabs.focusGroup(groupId);
+          return tabs.pickFiles();
+        },
+      },
+    ];
+    menu = { items, x: r.left, y: r.bottom, label: t("tabs.addMenu"), trigger };
+  }
+
+  function tabMenu(tab: Tab, x: number, y: number, trigger: HTMLElement | null) {
+    const items: MenuItem[] = [];
+    if (tab.pane) items.push({ id: "saveAsQuery", label: t("tabs.saveAsQuery"), run: () => tabs.saveAsQuery(tab.id) });
+    items.push({ id: "close", label: t("tabs.closeTab"), run: () => tabs.close(tab.id) });
+    menu = { items, x, y, label: t("tabs.menu"), trigger };
+  }
+
+  function oncontextmenu(tab: Tab, e: MouseEvent) {
+    e.preventDefault();
+    tabMenu(tab, e.clientX, e.clientY, (e.currentTarget as HTMLElement).querySelector<HTMLElement>('[role="tab"]'));
+  }
+
+  /** The menu key or Shift+F10 on a tab opens its menu below it. */
+  function onkeydown(tab: Tab, e: KeyboardEvent) {
+    if (e.key !== "ContextMenu" && !(e.key === "F10" && e.shiftKey)) return;
+    e.preventDefault();
+    const el = e.currentTarget as HTMLElement;
+    const r = el.getBoundingClientRect();
+    tabMenu(tab, r.left, r.bottom, el);
+  }
+
+  function closeMenu(refocus: boolean) {
+    const trigger = menu?.trigger;
+    // A picked item had the focus: give it back to what opened the menu.
+    const fromMenu = !!document.activeElement?.closest('[role="menu"]');
+    menu = null;
+    if (refocus || fromMenu) trigger?.focus();
+  }
 
   function splitFrom(dir: "row" | "column") {
     tabs.focusGroup(groupId);
@@ -84,8 +146,18 @@
         class:mark-after={mark === list.length && i === list.length - 1}
         style:--env={envColor(tab)}
         onpointerdown={(e) => ondragpress(tab.id, e)}
+        oncontextmenu={(e) => oncontextmenu(tab, e)}
       >
-        <button type="button" role="tab" aria-selected={on} class="main" onclick={() => tabs.activate(tab.id)}>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={on}
+          aria-haspopup="menu"
+          class="main"
+          title={tab.file?.path}
+          onclick={() => tabs.activate(tab.id)}
+          onkeydown={(e) => onkeydown(tab, e)}
+        >
           <span class="dot" style:background={envColor(tab)}></span>
           <span class="lab">{tab.title}</span>
           {#if tab.dirty}<span class="mod" title={t("tabs.unsaved")}><span class="sr">{t("tabs.unsaved")}</span></span>{/if}
@@ -98,11 +170,11 @@
     <button
       type="button"
       class="add"
-      aria-label={t("tabs.new")}
-      onclick={() => {
-        tabs.focusGroup(groupId);
-        tabs.newTab();
-      }}>+</button
+      aria-label={t("tabs.addMenu")}
+      title={t("tabs.addMenu")}
+      aria-haspopup="menu"
+      aria-expanded={menu?.label === t("tabs.addMenu")}
+      onclick={addMenu}>+</button
     >
   </div>
   <div class="actions">
@@ -114,6 +186,10 @@
     </button>
   </div>
 </div>
+
+{#if menu}
+  <ContextMenu items={menu.items} x={menu.x} y={menu.y} label={menu.label} onclose={closeMenu} />
+{/if}
 
 <style>
   .bar {

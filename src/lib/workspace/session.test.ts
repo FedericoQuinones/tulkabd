@@ -16,6 +16,7 @@ vi.mock("../ipc", () => ({
   startupError: vi.fn(),
   completionMetadata: vi.fn(),
   onAppEvent: vi.fn(),
+  allowDroppedPaths: vi.fn(),
 }));
 
 let closeRequested: (() => Promise<void>) | null = null;
@@ -57,6 +58,7 @@ beforeEach(async () => {
   vi.mocked(ipc.tableStructure).mockRejectedValue("not_connected");
   vi.mocked(ipc.completionMetadata).mockResolvedValue({ schemas: [], objects: [], columns: {} } as never);
   vi.mocked(ipc.onAppEvent).mockResolvedValue(() => {});
+  vi.mocked(ipc.allowDroppedPaths).mockResolvedValue();
   connections.list = [conn, nopw];
   closeRequested = null;
   await tabs.reset();
@@ -126,6 +128,27 @@ test("restored tabs keep savedQuery, file and dirty", async () => {
   expect(back.savedQuery).toEqual({ database: "Sales", name: "Top orders" });
   expect(back.file).toEqual({ path: "/tmp/q.sql", encoding: "utf16Le", lineEnding: "crlf" });
   expect(back.dirty).toBe(true);
+});
+
+test("restore lets the backend read and write the restored tabs' files", async () => {
+  const a = tabs.open({ kind: "query" });
+  tabs.open({ kind: "query" });
+  const b = tabs.open({ kind: "query" });
+  tabs.list.find((x) => x.id === a)!.file = { path: "/home/u/a.sql", encoding: "utf8", lineEnding: "lf" };
+  tabs.list.find((x) => x.id === b)!.file = { path: "C:\\sql\\b.sql", encoding: "utf16Le", lineEnding: "crlf" };
+  const json = JSON.stringify(snapshot(tabs));
+  await tabs.reset();
+  restore(tabs, parseSession(json)!, known);
+  expect(ipc.allowDroppedPaths).toHaveBeenCalledTimes(1);
+  expect(ipc.allowDroppedPaths).toHaveBeenCalledWith(["/home/u/a.sql", "C:\\sql\\b.sql"]);
+});
+
+test("restore without file tabs allows nothing", async () => {
+  tabs.open({ kind: "query" });
+  const json = JSON.stringify(snapshot(tabs));
+  await tabs.reset();
+  restore(tabs, parseSession(json)!, known);
+  expect(ipc.allowDroppedPaths).not.toHaveBeenCalled();
 });
 
 test("parseSession returns null for garbage, another version, null or a broken structure", async () => {

@@ -1,12 +1,11 @@
 // The workspace session saved between runs: groups, tabs, bindings and unsaved editor text.
 // Never passwords, never results. The backend stores the JSON as is (see `saveSession`).
 import { t } from "../i18n/t";
+import * as ipc from "../ipc";
+import type { FileEncoding as Encoding, LineEnding } from "../ipc";
 import { PaneState } from "../pane/pane.svelte";
 import type { Tab, TabsStore } from "../tabs/tabs.svelte";
 import { groups, MAX_GROUPS, type Layout } from "./layout";
-
-type Encoding = "utf8" | "utf8Bom" | "utf16Le" | "utf16Be";
-type LineEnding = "lf" | "crlf";
 
 export interface SessionV1 {
   version: 1;
@@ -192,9 +191,13 @@ function restoredTab(s: SessionTab, known: { connectionIds: Set<string> }): Tab 
 /**
  * Replaces the store's workspace with a saved session. Connects nothing: a bound query tab opens
  * its session on its first Run. A tab whose connection is not in `known` keeps its text, unbound,
- * with a notice. Definition tabs try to load their text (it needs the Explorer connected).
+ * with a notice. Definition tabs try to load their text (it needs the Explorer connected). The
+ * backend may read and write the files of restored file tabs again (plan D7); a file that moved
+ * keeps its tab and text, and Ctrl+S writes it again at its old path.
  */
 export function restore(store: TabsStore, s: SessionV1, known: { connectionIds: Set<string> }): void {
+  const files = s.tabs.flatMap((x) => (x.kind === "query" && x.file ? [x.file.path] : []));
+  if (files.length) void ipc.allowDroppedPaths(files).catch(() => {});
   const list = s.tabs.map((x) => restoredTab(x, known));
   const tabGroups = groups(s.layout).map((id) => ({ id, tabIds: [...s.groups[id].tabIds], activeId: s.groups[id].activeId }));
   store.replaceWorkspace({ list, tabGroups, layout: s.layout, activeGroupId: s.activeGroupId });

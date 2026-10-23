@@ -1,6 +1,6 @@
 import { t } from "../i18n/t";
 import * as ipc from "../ipc";
-import type { ConnectionConfig } from "../ipc";
+import type { ConnectionConfig, FileEncoding, LineEnding } from "../ipc";
 import { connections } from "../connections/store.svelte";
 import { queries, type NameRequest } from "../queries/queries.svelte";
 import { ENVIRONMENTS } from "../connections/env";
@@ -18,9 +18,18 @@ export type TabSpec =
       run?: boolean;
       /** The saved query `sql` was read from: the tab takes its name. */
       savedQuery?: { database: string; name: string };
+      /** The `.sql` file `sql` was read from: the tab takes its file name. */
+      file?: TabFile & { name: string };
     }
   | { kind: "structure"; connectionId: string; database: string; schema: string; name: string }
   | { kind: "definition"; connectionId: string; database: string; schema: string; name: string };
+
+/** A `.sql` file from disk and the format to write it back in. */
+export interface TabFile {
+  path: string;
+  encoding: FileEncoding;
+  lineEnding: LineEnding;
+}
 
 export interface Tab {
   id: string;
@@ -41,7 +50,7 @@ export interface Tab {
   /** Query tabs opened from (or saved as) a saved query. */
   savedQuery?: { database: string; name: string };
   /** Query tabs opened from (or saved to) a `.sql` file, with the format to write it back in. */
-  file?: { path: string; encoding: "utf8" | "utf8Bom" | "utf16Le" | "utf16Be"; lineEnding: "lf" | "crlf" };
+  file?: TabFile;
 }
 
 export interface PasswordRequest {
@@ -91,6 +100,17 @@ export function isNotConnected(e: unknown): boolean {
   return false;
 }
 
+/** A file command error as user text. */
+export function fileErrorText(e: unknown): string {
+  const s = String(e);
+  if (s === "not_text") return t("files.errors.notText");
+  if (s === "not_found") return t("files.errors.notFound");
+  if (s === "not_allowed") return t("files.errors.notAllowed");
+  return s;
+}
+
+const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
+
 /** Environment color of the connection a tab is bound to; the neutral control color when unbound. */
 export function envColor(tab: Tab | null): string {
   const id = tabs.binding(tab).connectionId;
@@ -107,8 +127,10 @@ export class TabsStore {
   activeGroupId = $state(this.tabGroups[0].id);
   /** Tabs waiting for a password, oldest first; App shows the prompt for the first. */
   passwordRequests = $state<PasswordRequest[]>([]);
-  /** The name dialog App shows (Ctrl+S on a tab not saved yet). */
+  /** The name dialog App shows (Ctrl+S on a tab not saved yet, Save as saved query). */
   nameRequest = $state.raw<NameRequest | null>(null);
+  /** Why the last files opened could not all be opened; App shows it until dismissed or the next open. */
+  fileError = $state<string | null>(null);
 
   private counter = 0;
   private pending = new Map<string, Pending>();
@@ -205,10 +227,13 @@ export class TabsStore {
     }
     const pane = new PaneState(id);
     const saved = spec.kind === "query" ? spec.savedQuery : undefined;
-    const title = spec.kind === "definition" ? spec.name : saved ? saved.name : `untitled-${++this.counter}`;
+    const file = spec.kind === "query" ? spec.file : undefined;
+    const title =
+      spec.kind === "definition" ? spec.name : saved ? saved.name : file ? file.name : `untitled-${++this.counter}`;
     if (spec.kind === "query" && spec.sql) pane.initialDoc = spec.sql;
     const tab: Tab = { id, kind: "query", title, pane, connectError: null, dirty: false };
     if (saved) tab.savedQuery = { database: saved.database, name: saved.name };
+    if (file) tab.file = { path: file.path, encoding: file.encoding, lineEnding: file.lineEnding };
     if (spec.kind === "definition") {
       tab.connectionId = spec.connectionId;
       tab.database = spec.database;
@@ -442,10 +467,43 @@ export class TabsStore {
       this.clearSaveNotice(pane);
       return;
     }
-    // Task 10: a tab with `file` writes the file back here, in its encoding and line endings.
+    if (tab.file) {
+      // Written back in place, in its own encoding and line endings; never asks for a name.
+      const { path, encoding, lineEnding } = tab.file;
+      const edits = pane.edits;
+      try {
+        await ipc.writeSqlFile(path, pane.text(), encoding, lineEnding);
+      } catch (e) {
+        this.saveNotice(pane, t("files.saveFailed", { error: fileErrorText(e) }));
+        return;
+      }
+      if (pane.edits === edits) tab.dirty = false;
+      this.clearSaveNotice(pane);
+      return;
+    }
+    this.askName(tab, tab.name ?? "");
+  }
+
+  /**
+   * "Save as saved query" in a tab's menu: asks for a name and saves the text as a query of the
+   * tab's database. A file tab stays on its file (the saved query is a copy, and the file's unsaved
+   * state does not change); any other tab becomes that saved query.
+   */
+  saveAsQuery(id: string): void {
+    const tab = this.list.find((x) => x.id === id);
+    if (!tab?.pane) return;
+    const initial = tab.file ? fileName(tab.file.path).replace(/\.sql$/i, "") : (tab.savedQuery?.name ?? tab.name ?? "");
+    this.askName(tab, initial, !!tab.file);
+  }
+
+  /**
+   * Asks for a name (through `nameRequest`) and saves the tab's text under its database; without a
+   * database it says so. With `copy` the tab is left as it is; otherwise it becomes the saved query.
+   */
+  private askName(tab: Tab, initial: string, copy = false): void {
+    const pane = tab.pane!;
     // A definition still loading (or that could not load) has nothing to save yet.
-    const definition = tab.name !== undefined;
-    if (definition && pane.text() === "") return;
+    if (tab.name !== undefined && pane.text() === "") return;
     const database = this.binding(tab).database;
     if (!database) {
       this.saveNotice(pane, t("queries.pickDatabase"));
@@ -454,7 +512,7 @@ export class TabsStore {
     const id = tab.id;
     const request: NameRequest = {
       title: t("queries.saveTitle", { database }),
-      initial: definition ? tab.name! : "",
+      initial,
       onsubmit: async (name, overwrite) => {
         const x = this.list.find((y) => y.id === id);
         if (!x?.pane) {
@@ -468,6 +526,11 @@ export class TabsStore {
           return String(e);
         }
         if (this.nameRequest === request) this.nameRequest = null;
+        if (copy) {
+          // "Pick a database" no longer holds.
+          this.clearSaveNotice(x.pane);
+          return null;
+        }
         this.markSaved(x, { database, name });
         if (x.pane.edits === edits) x.dirty = false;
         return null;
@@ -477,6 +540,73 @@ export class TabsStore {
       },
     };
     this.nameRequest = request;
+  }
+
+  /**
+   * Opens `.sql` files the backend may read (picked, dropped or restored) in new query tabs bound to
+   * the active tab's connection and database, titled with the file name; a file already open shows
+   * its tab instead. A file that cannot be read opens nothing and is reported in `fileError`.
+   */
+  async openFiles(paths: string[]): Promise<void> {
+    const { connectionId, database } = this.binding(this.active);
+    const unique = [...new Set(paths)];
+    const read = await Promise.all(
+      unique.map((path) =>
+        this.tabOfFile(path)
+          ? null
+          : ipc.readSqlFile(path).then(
+              (file) => ({ file }),
+              (error: unknown) => ({ error }),
+            ),
+      ),
+    );
+    const errors: string[] = [];
+    unique.forEach((path, i) => {
+      const open = this.tabOfFile(path);
+      const r = read[i];
+      if (open) this.activate(open.id);
+      else if (!r) return;
+      else if ("error" in r) errors.push(t("files.openFailed", { name: fileName(path), error: fileErrorText(r.error) }));
+      else {
+        const { file } = r;
+        this.open({
+          kind: "query",
+          connectionId: connectionId ?? undefined,
+          database: connectionId ? (database ?? undefined) : undefined,
+          sql: file.text,
+          file: { path: file.path, name: file.name, encoding: file.encoding, lineEnding: file.lineEnding },
+        });
+      }
+    });
+    this.fileError = errors.length ? errors.join("\n") : null;
+  }
+
+  /** Ctrl+O and "Open file…": the native open dialog, then `openFiles` with the picked files. */
+  async pickFiles(): Promise<void> {
+    let paths: string[];
+    try {
+      paths = await ipc.pickSqlFiles(t("files.filter"));
+    } catch (e) {
+      this.fileError = t("files.pickFailed", { error: String(e) });
+      return;
+    }
+    if (paths.length) await this.openFiles(paths);
+  }
+
+  /** Paths dropped on the window: the `.sql` ones are allowed in the backend, then opened. */
+  async dropFiles(paths: string[]): Promise<void> {
+    const sql = paths.filter((p) => /\.sql$/i.test(p));
+    if (!sql.length) return;
+    try {
+      await ipc.allowDroppedPaths(sql);
+    } catch {
+      // Reading them says why.
+    }
+    await this.openFiles(sql);
+  }
+
+  private tabOfFile(path: string): Tab | undefined {
+    return this.list.find((x) => x.file?.path === path);
   }
 
   /** The tab now holds a saved query: it takes its name, and a definition tab stops being one. */

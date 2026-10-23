@@ -98,3 +98,13 @@ test("zoom falls back to the physical key and keeps plain inputs", () => {
   expect(shortcutAction(ev("=", { ctrlKey: true }, input), false)).toBeNull();
   expect(shortcutAction(ev("-", { ctrlKey: true, shiftKey: true }), false)).toBeNull();
 });
+test("ctrl+o opens files, from the code editor too but not from a plain input", () => {
+  expect(shortcutAction(ev("o", { ctrlKey: true }), false)).toBe("open");
+  expect(shortcutAction(ev("O", { metaKey: true }), true)).toBe("open");
+  expect(shortcutAction(ev("щ", { ctrlKey: true, code: "KeyO" }), false)).toBe("open");
+  const cm = { tagName: "DIV", isContentEditable: true, closest: (s: string) => (s === ".cm-editor" ? {} : null) } as unknown as HTMLElement;
+  expect(shortcutAction(ev("o", { ctrlKey: true }, cm), false)).toBe("open");
+  const input = { tagName: "INPUT", isContentEditable: false, closest: () => null } as unknown as HTMLElement;
+  expect(shortcutAction(ev("o", { ctrlKey: true }, input), false)).toBeNull();
+  expect(shortcutAction(ev("o", { ctrlKey: true, shiftKey: true }), false)).toBeNull();
+});

@@ -10,6 +10,16 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ onCloseRequested: vi.fn(async () => () => {}) }),
 }));
+type DropHandler = (e: { payload: { type: string; paths?: string[] } }) => void;
+const drop = vi.hoisted(() => ({ handler: null as DropHandler | null }));
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: vi.fn(async (h: DropHandler) => {
+      drop.handler = h;
+      return () => (drop.handler = null);
+    }),
+  }),
+}));
 
 import { invoke } from "@tauri-apps/api/core";
 import App from "./App.svelte";
@@ -150,6 +160,58 @@ test("the startup probe fires only once the restored workspace is painted", asyn
     await new Promise((r) => setTimeout(r, 50));
     expect(document.querySelector(".group")).not.toBeNull();
     expect(probed()).toBe(true);
+  } finally {
+    vi.mocked(invoke).mockImplementation(defaultInvoke);
+  }
+});
+
+test("files dropped on the window open in tabs; other files are ignored", async () => {
+  const defaultInvoke = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+    if (cmd === "read_sql_file") {
+      const path = (args as { path: string }).path;
+      return { path, name: path.slice(1), text: "SELECT 1", encoding: "utf8Bom", lineEnding: "crlf" };
+    }
+    return defaultInvoke(cmd, args as never);
+  });
+  try {
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    vi.mocked(invoke).mockClear();
+    drop.handler!({ payload: { type: "over" } });
+    drop.handler!({ payload: { type: "drop", paths: ["/a.sql", "/notes.txt"] } });
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    const calls = vi.mocked(invoke).mock.calls.map(([cmd, args]) => [cmd, args]);
+    expect(calls.slice(0, 2)).toEqual([
+      ["allow_dropped_paths", { paths: ["/a.sql"] }],
+      ["read_sql_file", { path: "/a.sql" }],
+    ]);
+    const titles = [...document.querySelectorAll('.group [role="tab"]')].map((x) => x.textContent!.trim());
+    expect(titles).toEqual(["a.sql"]);
+  } finally {
+    vi.mocked(invoke).mockImplementation(defaultInvoke);
+  }
+});
+
+test("Ctrl+O shows the open dialog; a file that cannot be read is reported until dismissed", async () => {
+  const defaultInvoke = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+    if (cmd === "pick_sql_files") return ["/bin.sql"];
+    if (cmd === "read_sql_file") throw "not_text";
+    return defaultInvoke(cmd, args as never);
+  });
+  try {
+    await new Promise((r) => setTimeout(r, 0));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "o", code: "KeyO", ctrlKey: true, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("pick_sql_files", { filterName: "SQL files" });
+    const alert = document.querySelector<HTMLElement>(".file-error")!;
+    expect(alert.textContent).toContain("Could not open bin.sql: it is not a text file");
+    alert.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click();
+    flushSync();
+    expect(document.querySelector(".file-error")).toBeNull();
   } finally {
     vi.mocked(invoke).mockImplementation(defaultInvoke);
   }
