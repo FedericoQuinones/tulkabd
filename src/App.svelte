@@ -183,11 +183,13 @@
   <Palette />
 {/if}
 {#if tabs.passwordRequest}
-  <PasswordPrompt
-    connection={tabs.passwordRequest.conn}
-    oncancel={() => tabs.cancelPassword()}
-    onsubmit={(pw) => void tabs.submitPassword(pw)}
-  />
+  {#key tabs.passwordRequest.tabId}
+    <PasswordPrompt
+      connection={tabs.passwordRequest.conn}
+      oncancel={() => tabs.cancelPassword()}
+      onsubmit={(pw) => void tabs.submitPassword(pw)}
+    />
+  {/key}
 {:else if explorer.passwordRequest}
   {#key explorer.passwordRequest.conn.id}
     <PasswordPrompt

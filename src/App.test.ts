@@ -71,3 +71,26 @@ test("a failed tab connect is shown in the workspace while the explorer is hidde
     connections.list = [];
   }
 });
+
+test("the second queued password prompt starts with an empty field", async () => {
+  connections.list = [
+    { id: "p1", name: "One", passwordSaved: false, environment: "local" } as ConnectionConfig,
+    { id: "p2", name: "Two", passwordSaved: false, environment: "local" } as ConnectionConfig,
+  ];
+  try {
+    tabs.open({ kind: "query", connectionId: "p1" });
+    tabs.open({ kind: "query", connectionId: "p2" });
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    const field = () => document.querySelector<HTMLInputElement>("#pw-input")!;
+    field().value = "secret-for-one";
+    field().dispatchEvent(new Event("input", { bubbles: true }));
+    flushSync();
+    document.querySelector<HTMLButtonElement>('[role="dialog"] button.ghost')!.click();
+    flushSync();
+    expect(document.querySelector("#pw-title")?.textContent).toContain("Two");
+    expect(field().value).toBe("");
+  } finally {
+    connections.list = [];
+  }
+});
