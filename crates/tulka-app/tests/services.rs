@@ -1765,3 +1765,12 @@ async fn duplicate_fails_on_keychain_errors_but_not_on_an_unavailable_keychain()
     assert!(!copy.password_saved);
     assert_eq!(list_connections(&f.state).await.len(), 3);
 }
+
+#[tokio::test]
+async fn closed_tab_generations_stay_bounded() {
+    let f = connected("t0").await.0;
+    for i in 0..300 {
+        close_session(&f.state, format!("gone-{i}")).await.unwrap();
+    }
+    assert_eq!(f.state.closed_tab_count(), 256);
+}

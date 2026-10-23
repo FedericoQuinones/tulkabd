@@ -283,6 +283,9 @@ pub async fn copy_results(
     .await?
 }
 
+/// Closed tab ids remembered to discard late `open_session` results.
+const MAX_CLOSED_TABS: usize = 256;
+
 /// Closes the tab's session, cancelling a running query. Closing a tab
 /// without a session is not an error.
 pub async fn close_session(state: &AppState, tab_id: String) -> Result<(), String> {
@@ -291,6 +294,16 @@ pub async fn close_session(state: &AppState, tab_id: String) -> Result<(), Strin
         let generation = state.new_generation();
         let removed = tabs.open.remove(&tab_id);
         tabs.closed_at.insert(tab_id, generation);
+        if tabs.closed_at.len() > MAX_CLOSED_TABS {
+            let oldest = tabs
+                .closed_at
+                .iter()
+                .min_by_key(|(_, &g)| g)
+                .map(|(id, _)| id.clone());
+            if let Some(id) = oldest {
+                tabs.closed_at.remove(&id);
+            }
+        }
         removed
     };
     cancel_running(removed).await;

@@ -216,6 +216,12 @@ impl AppState {
         self.tabs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// How many closed tab ids are remembered (bounded; see `close_session`).
+    #[doc(hidden)]
+    pub fn closed_tab_count(&self) -> usize {
+        self.tabs().closed_at.len()
+    }
+
     pub(crate) fn new_generation(&self) -> u64 {
         self.next_generation.fetch_add(1, Ordering::Relaxed)
     }
