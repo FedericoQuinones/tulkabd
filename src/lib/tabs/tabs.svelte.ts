@@ -189,8 +189,13 @@ class TabsStore {
   /**
    * Splits the active group: a new group beside it (`row`) or below it (`column`) becomes the active
    * one, with a new query tab bound to the active tab's connection and database. False at MAX_GROUPS.
+   * A group with no tabs is not split (it would stay empty beside the new one): the tab opens in it.
    */
   splitActive(dir: "row" | "column"): boolean {
+    if (this.group(this.activeGroupId)?.tabIds.length === 0) {
+      this.open({ kind: "query" });
+      return true;
+    }
     const g = newGroup();
     const next = split(this.layout, this.activeGroupId, dir, g.id);
     if (!next) return false;

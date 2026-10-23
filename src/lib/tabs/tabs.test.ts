@@ -232,6 +232,16 @@ test("splitActive with four groups returns false and changes nothing", () => {
   expect(tabs.list).toHaveLength(count);
 });
 
+test("splitActive on a group with no tabs opens a tab in it instead of leaving it empty beside a new one", () => {
+  const first = tabs.activeGroupId;
+  expect(tabs.active).toBeNull();
+  expect(tabs.splitActive("row")).toBe(true);
+  expect(tabs.layout).toEqual({ kind: "group", id: first });
+  expect(tabs.tabGroups.map((g) => g.id)).toEqual([first]);
+  expect(tabs.activeGroupId).toBe(first);
+  expect(tabs.tabsIn(first).map((x) => x.id)).toEqual([tabs.activeId]);
+});
+
 test("closing the last tab of a group removes the group and activates its neighbour", () => {
   const a = tabs.open({ kind: "query" });
   const first = tabs.activeGroupId;
