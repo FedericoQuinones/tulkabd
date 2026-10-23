@@ -112,7 +112,7 @@ export class PaneState {
   async open(conn: ConnectionConfig, password?: string, database?: string): Promise<OpenResult> {
     if (this.status === "connecting" || this.status === "running") return { kind: "busy" };
     const before = this.status;
-    this.runId++;
+    const token = ++this.runId;
     this.status = "connecting";
     try {
       if (this.hasSession) {
@@ -120,6 +120,11 @@ export class PaneState {
         await ipc.closeSession(this.tabId).catch(() => {});
       }
       const info = await ipc.openSession(this.tabId, conn.id, database, password);
+      if (token !== this.runId) {
+        // Unbound or closed while connecting: this session has no owner.
+        await ipc.closeSession(this.tabId).catch(() => {});
+        return { kind: "busy" };
+      }
       this.hasSession = true;
       this.session = info;
       this.connectionId = conn.id;
@@ -130,6 +135,7 @@ export class PaneState {
       this.status = "idle";
       return { kind: "ok" };
     } catch (e) {
+      if (token !== this.runId) return { kind: "busy" };
       if (before === "disconnected" && this.connectionId === conn.id) {
         this.status = "disconnected";
       } else {

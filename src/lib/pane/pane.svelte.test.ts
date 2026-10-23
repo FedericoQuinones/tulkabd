@@ -104,3 +104,18 @@ test("failed database switch keeps the database and reports the error", async ()
   expect(pane.switching).toBe(false);
   expect(pane.messages.at(-1)?.kind).toBe("error");
 });
+
+test("an open that finishes after unbind is ignored and its session is closed", async () => {
+  const d = deferred<typeof info>();
+  vi.mocked(ipc.openSession).mockReturnValueOnce(d.promise);
+  pane.status = "idle";
+  const opening = pane.open(conn);
+  pane.unbind();
+  vi.mocked(ipc.closeSession).mockClear();
+  d.resolve(info);
+  await opening;
+  expect(pane.connectionId).toBeNull();
+  expect(pane.session).toBeNull();
+  expect(pane.status).toBe("idle");
+  expect(ipc.closeSession).toHaveBeenCalledWith("t1");
+});
