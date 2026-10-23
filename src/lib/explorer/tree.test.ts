@@ -574,3 +574,11 @@ test("a database known only from search hits is not shown as indexing", async ()
   expect(r?.kind === "database" && r.db.name).toBe("Ventas");
   expect(r?.kind === "database" && r.indexing).toBe(false);
 });
+
+test("deleting a connection unbinds the tabs that used it", async () => {
+  vi.mocked(ipc.deleteConnection).mockResolvedValue();
+  const spy = vi.spyOn(tabs, "unbindConnection");
+  expect(await explorer.deleteConnection(local.id)).toBe(true);
+  expect(spy).toHaveBeenCalledWith(local.id);
+  spy.mockRestore();
+});
