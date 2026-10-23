@@ -2,16 +2,17 @@
   import { onDestroy } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
-  import { pane } from "../pane/pane.svelte";
+  import type { PaneState } from "../pane/pane.svelte";
   import CopyToast from "./CopyToast.svelte";
   import MessagesView from "./MessagesView.svelte";
   import ResultGrid from "./ResultGrid.svelte";
   import { toIpcSelection } from "./selection";
 
   interface Props {
+    pane: PaneState;
     onjump: (line: number) => void;
   }
-  let { onjump }: Props = $props();
+  let { pane, onjump }: Props = $props();
 
   const MAX_ROWS = 100_000;
   const TOAST_MS = 2500;

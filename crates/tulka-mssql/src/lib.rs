@@ -2,6 +2,7 @@
 
 mod batches;
 mod convert;
+mod meta;
 mod session;
 
 use async_trait::async_trait;

@@ -2,17 +2,32 @@
   import { onMount, untrack } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
-  import type { ConnectionConfig, GuardLevel } from "../ipc";
+  import type { ConnectionConfig, DatabaseScope, GuardLevel, ParsedConnection } from "../ipc";
+  import { connStrErrorText, fillFrom, ignoredText, proposeName } from "./connstr";
   import { applyEnvironment, ENVIRONMENTS, initialEnvState, type EnvState } from "./env";
+  import { explorer } from "../explorer/tree.svelte";
+  import DatabasePicker from "./DatabasePicker.svelte";
   import { connections } from "./store.svelte";
   import { isNamedInstance, validateConnection } from "./validate";
 
   interface Props {
-    /** Connection to edit, or a prefilled copy (Duplicate) to create. */
+    /** Connection to edit; one whose id is not saved yet is a prefilled new connection. */
     initial?: ConnectionConfig;
+    /** Folder preselected for a new connection (opened from a folder's menu). */
+    folderId?: string | null;
+    /** A connection string already parsed (pasted on the tree) to fill the form with. */
+    parsed?: ParsedConnection;
+    /** Focus the connection string field instead of the name (New from connection string…). */
+    focusConnStr?: boolean;
     onclose: () => void;
   }
-  let { initial: initialProp, onclose }: Props = $props();
+  let {
+    initial: initialProp,
+    folderId: folderProp = null,
+    parsed: parsedProp,
+    focusConnStr = false,
+    onclose,
+  }: Props = $props();
   // The dialog is keyed by connection in App, so the initial value is read once.
   const initial = untrack(() => initialProp);
 
@@ -34,6 +49,10 @@
   let timeout = $state<number | null>(initial?.connectTimeoutS ?? 15);
   let advancedOpen = $state(false);
   let env = $state<EnvState>(initialEnvState(initial));
+  let dbKind = $state<"all" | "selected">(initial?.databases.kind ?? "all");
+  let dbNames = $state<string[]>(initial?.databases.kind === "selected" ? [...new Set(initial.databases.names)] : []);
+  // The backend keeps the stored folder on edit, so the selector only exists when creating.
+  let folderId = $state<string | null>(initial?.folderId ?? untrack(() => folderProp));
 
 
   let errors = $state<Record<string, string>>({});
@@ -42,8 +61,90 @@
   let keyringUnavailable = $state(false);
   let saveError = $state<string | null>(null);
   let nameInput: HTMLInputElement;
+  let connStrInput: HTMLInputElement;
 
-  onMount(() => nameInput.focus());
+  // The connection string field. Its text is never kept once it fills the form.
+  let connStr = $state("");
+  let connStrError = $state<string | null>(null);
+  /** Set once a string filled the form, with the note on the keys it ignored. */
+  let connStrFilled = $state<{ ignored: string | null } | null>(null);
+
+  function applyParsed(p: ParsedConnection) {
+    const fill = fillFrom(p);
+    server = fill.server;
+    port = fill.port;
+    user = fill.user;
+    password = fill.password;
+    dbKind = fill.databases.kind;
+    dbNames = fill.databases.kind === "selected" ? fill.databases.names : [];
+    if (fill.encrypt !== undefined) encrypt = fill.encrypt;
+    if (fill.trust !== undefined) trust = fill.trust;
+    if (fill.timeout !== undefined) timeout = fill.timeout;
+    if (name.trim() === "") name = proposeName(p);
+    connStrError = null;
+    connStrFilled = { ignored: ignoredText(p) };
+  }
+
+  const prefill = untrack(() => parsedProp);
+  if (prefill) applyParsed(prefill);
+
+  /** Parses `text` and fills the form; on failure shows the error and leaves the form alone. */
+  async function fillFromString(text: string): Promise<boolean> {
+    try {
+      applyParsed(await ipc.parseConnectionString(text));
+      connStr = "";
+      return true;
+    } catch (e) {
+      connStrFilled = null;
+      connStrError = connStrErrorText(e);
+      return false;
+    }
+  }
+
+  function onConnStrPaste(e: ClipboardEvent) {
+    const text = e.clipboardData?.getData("text/plain") ?? "";
+    if (text.trim() === "") return;
+    // Parsed straight from the clipboard, so a password never shows in this plain field;
+    // only a string that does not parse is put there, to be fixed.
+    e.preventDefault();
+    void fillFromString(text).then((ok) => {
+      if (!ok) connStr = text;
+    });
+  }
+
+  /** Closes the dialog; a string that failed to parse may hold a password, so it is cleared first. */
+  function close() {
+    connStr = "";
+    connStrError = null;
+    onclose();
+  }
+
+  function onConnStrCommit() {
+    if (connStr.trim() !== "") void fillFromString(connStr);
+  }
+
+  onMount(() => (focusConnStr ? connStrInput : nameInput).focus());
+
+  function scope(): DatabaseScope {
+    return dbKind === "selected" ? { kind: "selected", names: dbNames } : { kind: "all" };
+  }
+
+  /** Folder choices with their path, e.g. "Cliente A / Proyecto X". */
+  const folderOptions = $derived.by(() => {
+    const byId = new Map(explorer.folders.map((f) => [f.id, f]));
+    const label = (id: string): string => {
+      const parts: string[] = [];
+      for (let cur = byId.get(id), n = 0; cur && n < byId.size; cur = cur.parentId ? byId.get(cur.parentId) : undefined, n++) {
+        parts.unshift(cur.name);
+      }
+      return parts.join(" / ");
+    };
+    return explorer.folders.map((f) => ({ id: f.id, label: label(f.id) })).sort((a, b) => a.label.localeCompare(b.label));
+  });
+
+  function loadDatabases() {
+    return ipc.listServerDatabases(build(), password || undefined);
+  }
 
   function build(): ConnectionConfig {
     return {
@@ -53,7 +154,7 @@
       server: server.trim(),
       port,
       user,
-      databases: initial?.databases ?? { kind: "all" },
+      databases: scope(),
       environment: env.environment,
       color: env.color,
       guard: env.guard,
@@ -62,11 +163,13 @@
       // Only called after validate(), which rejects an empty timeout.
       connectTimeoutS: timeout ?? 15,
       passwordSaved: savedConn?.passwordSaved ?? initial?.passwordSaved ?? false,
+      // The backend keeps the stored folder on edit; this only matters for a new connection.
+      folderId,
     };
   }
 
   function validate(): boolean {
-    errors = validateConnection({ name, server, port, timeout });
+    errors = validateConnection({ name, server, port, timeout, databases: scope() });
     // The timeout field sits in the collapsed Advanced section.
     if (errors.timeout) advancedOpen = true;
     return Object.keys(errors).length === 0;
@@ -99,7 +202,7 @@
         password = "";
         return;
       }
-      onclose();
+      close();
     } catch (e) {
       saveError = t("connection.errors.saveFailed", { error: String(e) });
     } finally {
@@ -110,7 +213,7 @@
   function onkeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
       e.stopPropagation();
-      onclose();
+      close();
     }
   }
 
@@ -135,6 +238,34 @@
       }}
     >
       <div class="panel-b">
+        <div class="fl">
+          <label for="c-connstr">{t("connection.connstr.label")}</label>
+          <input
+            id="c-connstr"
+            class="m"
+            bind:this={connStrInput}
+            bind:value={connStr}
+            placeholder={t("connection.connstr.placeholder")}
+            autocomplete="off"
+            spellcheck="false"
+            aria-invalid={!!connStrError}
+            onpaste={onConnStrPaste}
+            onblur={onConnStrCommit}
+            onkeydown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                onConnStrCommit();
+              }
+            }}
+          />
+          {#if connStrError}
+            <div class="err">{connStrError}</div>
+          {:else if connStrFilled}
+            <div class="hint" role="status">
+              {t("connection.connstr.filled")}{#if connStrFilled.ignored}. {connStrFilled.ignored}{/if}
+            </div>
+          {/if}
+        </div>
         <div class="fl">
           <label for="c-name">{t("connection.field.name")}</label>
           <input id="c-name" bind:this={nameInput} bind:value={name} aria-invalid={!!errors.name} />
@@ -181,6 +312,17 @@
             />
           </div>
         </div>
+        <DatabasePicker bind:kind={dbKind} bind:names={dbNames} load={loadDatabases} error={errors.databases}
+          source={JSON.stringify([server, port, user, password])} />
+        {#if !isEdit}
+          <div class="fl">
+            <label for="c-folder">{t("connection.field.folder")}</label>
+            <select id="c-folder" bind:value={folderId}>
+              <option value={null}>{t("connection.folder.root")}</option>
+              {#each folderOptions as f (f.id)}<option value={f.id}>{f.label}</option>{/each}
+            </select>
+          </div>
+        {/if}
         <div class="fl">
           <span class="lbl" id="c-env">{t("connection.field.environment")}</span>
           <div class="envs" role="radiogroup" aria-labelledby="c-env">
@@ -258,7 +400,7 @@
         <button type="button" class="ghost l" disabled={busy !== null} onclick={test}>
           {busy === "test" ? t("connection.testing") : t("connection.test")}
         </button>
-        <button type="button" class="ghost" onclick={onclose}>
+        <button type="button" class="ghost" onclick={close}>
           {keyringUnavailable ? t("connection.close") : t("connection.cancel")}
         </button>
         <button type="submit" class="run" disabled={busy !== null}>

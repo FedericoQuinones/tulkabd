@@ -3,15 +3,21 @@
 //! implements.
 
 pub mod config;
+pub mod connstr;
 pub mod driver;
 pub mod error;
 pub mod export;
 pub mod locale;
+pub mod meta;
 pub mod secrets;
 pub mod value;
 
 pub use config::{
-    AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope, Environment, GuardLevel,
+    AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope, Environment, Folder,
+    GuardLevel,
+};
+pub use connstr::{
+    format_connection_string, parse_connection_string, ConnStrError, ParsedConnection,
 };
 pub use driver::{
     CancelHandle, Column, ConnectParams, Driver, ExecEvent, MessageKind, ServerInfo, Session,
@@ -20,6 +26,10 @@ pub use driver::{
 pub use error::DriverError;
 pub use export::{estimate_tokens, to_ai, to_excel_tsv};
 pub use locale::{decimal_separator_for, system_decimal_separator};
+pub use meta::{
+    qualified, quote_ident, ColumnInfo, DatabaseSnapshot, DbObject, ForeignKey, IndexInfo,
+    ObjectKind, TableStructure,
+};
 pub use secrets::{KeyringStore, MemoryStore, SecretError, SecretStore, UnavailableStore};
 pub use value::Value;
 
@@ -37,7 +47,10 @@ mod tests {
     #[test]
     fn value_json_shape() {
         assert_eq!(to_json(&Value::Null), json!({"kind": "null"}));
-        assert_eq!(to_json(&Value::Int(7)), json!({"kind": "int", "value": "7"}));
+        assert_eq!(
+            to_json(&Value::Int(7)),
+            json!({"kind": "int", "value": "7"})
+        );
         assert_eq!(
             to_json(&Value::Decimal("8912450.50".into())),
             json!({"kind": "decimal", "value": "8912450.50"})

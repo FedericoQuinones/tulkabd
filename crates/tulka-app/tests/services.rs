@@ -13,8 +13,9 @@ use tokio::sync::Notify;
 use tulka_app::*;
 use tulka_core::{
     estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, CancelHandle, Column,
-    ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, Driver, DriverError, Environment,
-    ExecEvent, MemoryStore, MessageKind, SecretStore, ServerInfo, Session, UnavailableStore, Value,
+    ColumnInfo, ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, DatabaseSnapshot,
+    DbObject, Driver, DriverError, Environment, ExecEvent, MemoryStore, MessageKind, ObjectKind,
+    SecretStore, ServerInfo, Session, TableStructure, UnavailableStore, Value,
 };
 
 const PASSWORD: &str = "s3cret-pw";
@@ -171,13 +172,57 @@ impl FakeSession {
     }
 }
 
+fn fake_column() -> ColumnInfo {
+    ColumnInfo {
+        name: "id".into(),
+        type_name: "int".into(),
+        nullable: false,
+        primary_key: true,
+        default: None,
+    }
+}
+
 #[async_trait]
 impl Session for FakeSession {
     async fn server_info(&mut self) -> Result<ServerInfo, DriverError> {
         Ok(ServerInfo {
             version: "Fake SQL 1".into(),
             user: self.user.clone(),
+            single_database: false,
         })
+    }
+
+    async fn snapshot(&mut self, _database: &str) -> Result<DatabaseSnapshot, DriverError> {
+        Ok(DatabaseSnapshot {
+            objects: vec![DbObject {
+                schema: "dbo".into(),
+                name: "Pedidos".into(),
+                kind: ObjectKind::Table,
+            }],
+            columns: vec![(0, vec![fake_column()])],
+        })
+    }
+
+    async fn structure(
+        &mut self,
+        _database: &str,
+        _schema: &str,
+        _name: &str,
+    ) -> Result<TableStructure, DriverError> {
+        Ok(TableStructure {
+            columns: vec![fake_column()],
+            foreign_keys: vec![],
+            indexes: vec![],
+        })
+    }
+
+    async fn definition(
+        &mut self,
+        _database: &str,
+        _schema: &str,
+        _name: &str,
+    ) -> Result<String, DriverError> {
+        Ok("CREATE VIEW dbo.V AS SELECT 1".into())
     }
 
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError> {
@@ -1166,4 +1211,557 @@ async fn unreadable_config_opens_read_only_and_is_never_overwritten() {
     // A healthy file has no startup error.
     let ok = fixture(Arc::new(MemoryStore::default()));
     assert!(ok.state.startup_error().is_none());
+}
+
+// ------------------------------------------------------------------- folders
+
+#[tokio::test]
+async fn folders_nest_and_deleting_moves_children_to_the_parent() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let a = create_folder(&f.state, "Cliente A".into(), None)
+        .await
+        .unwrap();
+    let x = create_folder(&f.state, "Proyecto X".into(), Some(a.id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(x.parent_id.as_deref(), Some(a.id.as_str()));
+    let conn = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    move_connection(&f.state, conn.id.clone(), Some(a.id.clone()))
+        .await
+        .unwrap();
+
+    delete_folder(&f.state, a.id.clone()).await.unwrap();
+    let folders = list_folders(&f.state).await;
+    assert_eq!(folders.len(), 1);
+    assert_eq!(
+        (folders[0].id.as_str(), folders[0].parent_id.clone()),
+        (x.id.as_str(), None)
+    );
+    let conns = list_connections(&f.state).await;
+    assert_eq!(conns.len(), 1);
+    assert_eq!(conns[0].folder_id, None);
+    assert!(conns[0].password_saved);
+
+    // Persisted: a fresh state over the same file sees it.
+    let reopened = AppState::new(
+        ConfigStore::at(f._dir.path().join("config.json")),
+        f.secrets.clone(),
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(list_folders(&reopened).await, folders);
+}
+
+#[tokio::test]
+async fn folders_rename_and_validate_names() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let a = create_folder(&f.state, "  A ".into(), None).await.unwrap();
+    assert_eq!(a.name, "A");
+    rename_folder(&f.state, a.id.clone(), "B".into())
+        .await
+        .unwrap();
+    assert_eq!(list_folders(&f.state).await[0].name, "B");
+    assert_eq!(
+        rename_folder(&f.state, a.id.clone(), "  ".into())
+            .await
+            .unwrap_err(),
+        "empty_name"
+    );
+    assert_eq!(
+        create_folder(&f.state, "".into(), None).await.unwrap_err(),
+        "empty_name"
+    );
+    assert_eq!(
+        create_folder(&f.state, "C".into(), Some("nope".into()))
+            .await
+            .unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(
+        rename_folder(&f.state, "nope".into(), "Z".into())
+            .await
+            .unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(
+        delete_folder(&f.state, "nope".into()).await.unwrap_err(),
+        "not_found"
+    );
+}
+
+#[tokio::test]
+async fn folders_move_rejects_cycles() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let a = create_folder(&f.state, "A".into(), None).await.unwrap();
+    let b = create_folder(&f.state, "B".into(), Some(a.id.clone()))
+        .await
+        .unwrap();
+    let c = create_folder(&f.state, "C".into(), Some(b.id.clone()))
+        .await
+        .unwrap();
+    for target in [&a, &b, &c] {
+        assert_eq!(
+            move_folder(&f.state, a.id.clone(), Some(target.id.clone()))
+                .await
+                .unwrap_err(),
+            "cycle"
+        );
+    }
+    assert_eq!(
+        move_folder(&f.state, "nope".into(), None)
+            .await
+            .unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(
+        move_folder(&f.state, a.id.clone(), Some("nope".into()))
+            .await
+            .unwrap_err(),
+        "not_found"
+    );
+    move_folder(&f.state, c.id.clone(), None).await.unwrap();
+    move_folder(&f.state, a.id.clone(), Some(c.id.clone()))
+        .await
+        .unwrap();
+    let folders = list_folders(&f.state).await;
+    let parent = |id: &str| {
+        folders
+            .iter()
+            .find(|x| x.id == id)
+            .unwrap()
+            .parent_id
+            .clone()
+    };
+    assert_eq!(parent(&c.id), None);
+    assert_eq!(parent(&a.id), Some(c.id.clone()));
+}
+
+#[tokio::test]
+async fn folders_move_connection_and_expanded_persist() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let a = create_folder(&f.state, "A".into(), None).await.unwrap();
+    let conn = save_connection(&f.state, new_conn(), None)
+        .await
+        .unwrap()
+        .connection;
+    move_connection(&f.state, conn.id.clone(), Some(a.id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        move_connection(&f.state, "nope".into(), None)
+            .await
+            .unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(
+        move_connection(&f.state, conn.id.clone(), Some("nope".into()))
+            .await
+            .unwrap_err(),
+        "not_found"
+    );
+    set_expanded(&f.state, vec![a.id.clone(), conn.id.clone(), a.id.clone()])
+        .await
+        .unwrap();
+
+    let reopened = AppState::new(
+        ConfigStore::at(f._dir.path().join("config.json")),
+        f.secrets.clone(),
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(
+        list_connections(&reopened).await[0].folder_id.as_deref(),
+        Some(a.id.as_str())
+    );
+    assert_eq!(
+        ConfigStore::at(f._dir.path().join("config.json"))
+            .load()
+            .unwrap()
+            .expanded,
+        vec![a.id.clone(), conn.id.clone()]
+    );
+    assert_eq!(
+        list_expanded(&reopened).await,
+        vec![a.id.clone(), conn.id.clone()]
+    );
+}
+
+#[tokio::test]
+async fn folders_read_only_mode_rejects_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let original = "{ not json";
+    std::fs::write(&path, original).unwrap();
+    let state = AppState::open(
+        ConfigStore::at(&path),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakeDriver)],
+    );
+    let ro = |r: Result<(), String>| assert!(r.unwrap_err().contains("read-only"));
+    assert!(create_folder(&state, "A".into(), None)
+        .await
+        .unwrap_err()
+        .contains("read-only"));
+    ro(rename_folder(&state, "x".into(), "y".into()).await);
+    ro(delete_folder(&state, "x".into()).await);
+    ro(move_folder(&state, "x".into(), None).await);
+    ro(move_connection(&state, "x".into(), None).await);
+    ro(set_expanded(&state, vec!["x".into()]).await);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn folders_list_server_databases_connects_and_lists() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    // Explicit password.
+    let names = list_server_databases(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap();
+    assert_eq!(names, ["a", "b", "c", "master"]);
+    // Saved password.
+    assert_eq!(
+        list_server_databases(&f.state, saved, None)
+            .await
+            .unwrap()
+            .len(),
+        4
+    );
+    // Nothing saved and nothing given.
+    assert_eq!(
+        list_server_databases(&f.state, new_conn(), None)
+            .await
+            .unwrap_err(),
+        PASSWORD_REQUIRED
+    );
+    assert!(
+        list_server_databases(&f.state, new_conn(), Some("bad".into()))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn folders_move_survives_a_corrupt_parent_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"connections":[],"folders":[
+            {"id":"a","name":"A","parentId":null},
+            {"id":"x","name":"X","parentId":"y"},
+            {"id":"y","name":"Y","parentId":"x"}]}"#,
+    )
+    .unwrap();
+    let state = AppState::new(
+        ConfigStore::at(&path),
+        Arc::new(MemoryStore::default()),
+        vec![],
+    )
+    .unwrap();
+    let r = tokio::time::timeout(TIMEOUT, move_folder(&state, "a".into(), Some("x".into())))
+        .await
+        .expect("move_folder hung");
+    assert_eq!(r.unwrap_err(), "cycle");
+}
+
+#[tokio::test]
+async fn folders_editing_a_connection_keeps_its_folder() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let a = create_folder(&f.state, "A".into(), None).await.unwrap();
+    let mut conn = new_conn();
+    conn.folder_id = Some(a.id.clone());
+    let saved = save_connection(&f.state, conn, None)
+        .await
+        .unwrap()
+        .connection;
+    assert_eq!(saved.folder_id.as_deref(), Some(a.id.as_str()));
+
+    let mut edit = saved.clone();
+    edit.name = "Renamed".into();
+    edit.folder_id = None; // a UI that does not send folderId
+    let out = save_connection(&f.state, edit, None)
+        .await
+        .unwrap()
+        .connection;
+    assert_eq!(out.folder_id.as_deref(), Some(a.id.as_str()));
+    let listed = list_connections(&f.state).await;
+    assert_eq!(listed[0].name, "Renamed");
+    assert_eq!(listed[0].folder_id.as_deref(), Some(a.id.as_str()));
+}
+
+#[tokio::test]
+async fn folders_new_connection_with_unknown_folder_goes_to_root() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let mut conn = new_conn();
+    conn.folder_id = Some("ghost".into());
+    let saved = save_connection(&f.state, conn, None)
+        .await
+        .unwrap()
+        .connection;
+    assert_eq!(saved.folder_id, None);
+    assert_eq!(list_connections(&f.state).await[0].folder_id, None);
+}
+
+// ------------------------------------------------- duplicate and copy (D7)
+
+#[tokio::test]
+async fn duplicate_copies_the_connection_and_its_password() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let folder = create_folder(&f.state, "Cliente A".into(), None)
+        .await
+        .unwrap();
+    let mut conn = new_conn();
+    conn.name = "Prod".into();
+    conn.folder_id = Some(folder.id.clone());
+    let original = save_connection(&f.state, conn, Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+
+    let copy = duplicate_connection(&f.state, original.id.clone())
+        .await
+        .unwrap();
+    assert_ne!(copy.id, original.id);
+    assert_eq!(copy.name, "Prod (copy)");
+    assert_eq!(copy.folder_id.as_deref(), Some(folder.id.as_str()));
+    assert!(copy.password_saved);
+    assert_eq!(
+        (copy.server.as_str(), copy.user.as_str()),
+        (original.server.as_str(), original.user.as_str())
+    );
+    assert_eq!(f.secrets.get(&copy.id).unwrap().as_deref(), Some(PASSWORD));
+    assert_eq!(list_connections(&f.state).await.len(), 2);
+
+    // The copy has its own keychain entry: deleting it keeps the original's.
+    delete_connection(&f.state, copy.id.clone()).await.unwrap();
+    assert_eq!(f.secrets.get(&copy.id).unwrap(), None);
+    assert_eq!(
+        f.secrets.get(&original.id).unwrap().as_deref(),
+        Some(PASSWORD)
+    );
+    // And the original still connects with it.
+    test_connection(&f.state, original, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn duplicate_without_saved_password_and_unknown_id() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let original = save_connection(&f.state, new_conn(), None)
+        .await
+        .unwrap()
+        .connection;
+    let copy = duplicate_connection(&f.state, original.id.clone())
+        .await
+        .unwrap();
+    assert!(!copy.password_saved);
+    assert_eq!(f.secrets.get(&copy.id).unwrap(), None);
+    assert_eq!(
+        duplicate_connection(&f.state, "nope".into())
+            .await
+            .unwrap_err(),
+        NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn duplicate_is_rejected_in_read_only_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let original = "{ not json";
+    std::fs::write(&path, original).unwrap();
+    let state = AppState::open(
+        ConfigStore::at(&path),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakeDriver)],
+    );
+    let err = duplicate_connection(&state, "x".into()).await.unwrap_err();
+    assert!(err.contains("read-only"), "{err}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn copy_connection_string_with_and_without_the_password() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let mut conn = new_conn();
+    conn.databases = DatabaseScope::Selected {
+        names: vec!["Ventas".into()],
+    };
+    let saved = save_connection(&f.state, conn, Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    let clipboard = Arc::new(FakeClipboard::default());
+
+    let included = copy_connection_string(&f.state, clipboard.clone(), saved.id.clone(), false)
+        .await
+        .unwrap();
+    assert!(!included);
+    let text = clipboard.texts.lock().unwrap().last().unwrap().clone();
+    assert!(
+        text.starts_with("Server=fake-host,1433;Database=Ventas;User ID=sa;"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Password") && !text.contains(PASSWORD),
+        "{text}"
+    );
+
+    let included = copy_connection_string(&f.state, clipboard.clone(), saved.id.clone(), true)
+        .await
+        .unwrap();
+    assert!(included);
+    let text = clipboard.texts.lock().unwrap().last().unwrap().clone();
+    assert!(text.contains(&format!("Password={PASSWORD}")), "{text}");
+    let parsed = tulka_core::parse_connection_string(&text).unwrap();
+    assert_eq!(parsed.password.as_deref(), Some(PASSWORD));
+
+    assert_eq!(
+        copy_connection_string(&f.state, clipboard, "nope".into(), false)
+            .await
+            .unwrap_err(),
+        NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn copy_with_password_but_none_saved_copies_without_it() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), None)
+        .await
+        .unwrap()
+        .connection;
+    let clipboard = Arc::new(FakeClipboard::default());
+    let included = copy_connection_string(&f.state, clipboard.clone(), saved.id.clone(), true)
+        .await
+        .unwrap();
+    assert!(!included);
+    let text = clipboard.texts.lock().unwrap().last().unwrap().clone();
+    assert!(!text.contains("Password"), "{text}");
+}
+
+/// A store that records reads, to check the keychain is touched only when
+/// the password is wanted.
+#[derive(Default)]
+struct CountingStore {
+    inner: MemoryStore,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl SecretStore for CountingStore {
+    fn set(&self, id: &str, secret: &str) -> Result<(), tulka_core::SecretError> {
+        self.inner.set(id, secret)
+    }
+    fn get(&self, id: &str) -> Result<Option<String>, tulka_core::SecretError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.get(id)
+    }
+    fn delete(&self, id: &str) -> Result<(), tulka_core::SecretError> {
+        self.inner.delete(id)
+    }
+}
+
+#[tokio::test]
+async fn copy_without_password_never_reads_the_keychain() {
+    let store = Arc::new(CountingStore::default());
+    let f = fixture(store.clone());
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    let clipboard = Arc::new(FakeClipboard::default());
+    copy_connection_string(&f.state, clipboard.clone(), saved.id.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(store.reads.load(Ordering::SeqCst), 0);
+    copy_connection_string(&f.state, clipboard, saved.id, true)
+        .await
+        .unwrap();
+    assert_eq!(store.reads.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn parse_connection_string_reports_codes() {
+    let p = parse_connection_string("Server=h,1500;UID=sa;PWD=x".into()).unwrap();
+    assert_eq!((p.server.as_str(), p.port), ("h", Some(1500)));
+    assert_eq!(
+        parse_connection_string("hola mundo".into()).unwrap_err(),
+        "unrecognized"
+    );
+    assert_eq!(
+        parse_connection_string("Server=h;Encrypt=x".into()).unwrap_err(),
+        "bad_value:Encrypt"
+    );
+}
+
+/// A memory store whose reads or writes can be made to fail.
+#[derive(Default)]
+struct FlakyStore {
+    inner: MemoryStore,
+    fail_get: Mutex<Option<tulka_core::SecretError>>,
+    fail_set: Mutex<Option<tulka_core::SecretError>>,
+}
+
+impl SecretStore for FlakyStore {
+    fn set(&self, id: &str, secret: &str) -> Result<(), tulka_core::SecretError> {
+        match self.fail_set.lock().unwrap().clone() {
+            Some(e) => Err(e),
+            None => self.inner.set(id, secret),
+        }
+    }
+    fn get(&self, id: &str) -> Result<Option<String>, tulka_core::SecretError> {
+        match self.fail_get.lock().unwrap().clone() {
+            Some(e) => Err(e),
+            None => self.inner.get(id),
+        }
+    }
+    fn delete(&self, id: &str) -> Result<(), tulka_core::SecretError> {
+        self.inner.delete(id)
+    }
+}
+
+#[tokio::test]
+async fn duplicate_fails_on_keychain_errors_but_not_on_an_unavailable_keychain() {
+    use tulka_core::SecretError;
+    let store = Arc::new(FlakyStore::default());
+    let f = fixture(store.clone());
+    let original = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+
+    *store.fail_get.lock().unwrap() = Some(SecretError::Other("boom".into()));
+    let err = duplicate_connection(&f.state, original.id.clone())
+        .await
+        .unwrap_err();
+    assert!(err.contains("could not read the saved password"), "{err}");
+    assert_eq!(list_connections(&f.state).await.len(), 1);
+
+    *store.fail_get.lock().unwrap() = None;
+    *store.fail_set.lock().unwrap() = Some(SecretError::Other("boom".into()));
+    let err = duplicate_connection(&f.state, original.id.clone())
+        .await
+        .unwrap_err();
+    assert!(err.contains("could not store the password"), "{err}");
+    assert_eq!(list_connections(&f.state).await.len(), 1);
+
+    // An unavailable keychain is soft: the copy is saved without a password.
+    *store.fail_set.lock().unwrap() = Some(SecretError::Unavailable("locked".into()));
+    let copy = duplicate_connection(&f.state, original.id.clone())
+        .await
+        .unwrap();
+    assert!(!copy.password_saved);
+    *store.fail_set.lock().unwrap() = None;
+    *store.fail_get.lock().unwrap() = Some(SecretError::Unavailable("locked".into()));
+    let copy = duplicate_connection(&f.state, original.id.clone())
+        .await
+        .unwrap();
+    assert!(!copy.password_saved);
+    assert_eq!(list_connections(&f.state).await.len(), 3);
 }

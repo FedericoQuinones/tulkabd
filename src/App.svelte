@@ -4,105 +4,202 @@
   import { t } from "./lib/i18n/t";
   import Rail from "./lib/shell/Rail.svelte";
   import StatusBar from "./lib/shell/StatusBar.svelte";
-  import type { ConnectionConfig } from "./lib/ipc";
+  import type { ConnectionConfig, ParsedConnection } from "./lib/ipc";
   import ConnectionDialog from "./lib/connections/ConnectionDialog.svelte";
-  import ConnectionList from "./lib/connections/ConnectionList.svelte";
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
   import { connections } from "./lib/connections/store.svelte";
+  import ExplorerTree from "./lib/explorer/ExplorerTree.svelte";
+  import { explorer } from "./lib/explorer/tree.svelte";
+  import { clampWidth, loadLayout, saveLayout, MAX_WIDTH, MIN_WIDTH } from "./lib/shell/layout";
   import QueryPane from "./lib/pane/QueryPane.svelte";
-  import { pane } from "./lib/pane/pane.svelte";
+  import StructureView from "./lib/structure/StructureView.svelte";
+  import TabStrip from "./lib/tabs/TabStrip.svelte";
+  import Palette from "./lib/palette/Palette.svelte";
+  import { palette } from "./lib/palette/palette.svelte";
+  import { shortcutAction } from "./lib/tabs/shortcuts";
+  import { tabs } from "./lib/tabs/tabs.svelte";
 
-  // `undefined` = closed, `null` = new connection, otherwise edit/duplicate this one.
+  // `undefined` = closed, `null` = new connection, otherwise edit this one.
   let dialog = $state<ConnectionConfig | null | undefined>(undefined);
-  let prompting = $state<ConnectionConfig | null>(null);
-  let connectError = $state<string | null>(null);
-  // Remembers the database to restore when a password prompt was opened by Reconnect.
-  let promptDatabase: string | undefined;
+  // Folder preselected when the new-connection dialog opens from a folder menu.
+  let dialogFolder = $state<string | null>(null);
+  // A new connection from a connection string: already parsed (a paste on the tree),
+  // or with the connection string field focused (New from connection string…).
+  let dialogParsed = $state<ParsedConnection | undefined>(undefined);
+  let dialogFocusConnStr = $state(false);
+
+  function openDialog(conn: ConnectionConfig | null, folderId: string | null = null, parsed?: ParsedConnection, focusConnStr = false) {
+    dialogFolder = folderId;
+    dialogParsed = parsed;
+    dialogFocusConnStr = focusConnStr;
+    dialog = conn;
+  }
+
+  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  const newKey = t(isMac ? "tabs.newKey.mac" : "tabs.newKey.other");
+  const activeTab = $derived(tabs.active);
+  const activePane = $derived(tabs.activePane);
 
   // Tells the backend the first frame is painted (it only prints with TULKA_STARTUP_PROBE=1).
   onMount(() => {
     requestAnimationFrame(() => void invoke("startup_probe").catch(() => {}));
   });
 
-  void connections.refresh();
+  void explorer.init();
   void connections.loadStartupError();
 
-  async function connect(conn: ConnectionConfig, password?: string, database?: string) {
-    if (pane.status === "connecting" || pane.status === "running") return;
-    connectError = null;
-    if (!conn.passwordSaved && password === undefined) {
-      promptDatabase = database;
-      prompting = conn;
-      return;
-    }
-    const result = await pane.open(conn, password, database);
-    if (result.kind === "passwordRequired") {
-      promptDatabase = database;
-      prompting = conn;
-    } else if (result.kind === "error") {
-      connectError = t("explorer.connectFailed", { error: result.error });
-    }
+  const layout = loadLayout();
+  let explorerWidth = $state(layout.width);
+  let explorerHidden = $state(layout.hidden);
+  const remember = () => saveLayout({ width: explorerWidth, hidden: explorerHidden });
+
+  function onrail(key: string) {
+    if (key === "rail.search") palette.show();
+    if (key !== "rail.explorer") return;
+    explorerHidden = !explorerHidden;
+    remember();
   }
 
-  function reconnect() {
-    const conn = connections.list.find((c) => c.id === pane.connectionId);
-    if (conn) void connect(conn, undefined, pane.database ?? undefined);
+  let resizing: { x: number; width: number } | null = null;
+  function resizeStart(e: PointerEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    resizing = { x: e.clientX, width: explorerWidth };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+  function resizeMove(e: PointerEvent) {
+    if (resizing) explorerWidth = clampWidth(resizing.width + e.clientX - resizing.x);
+  }
+  function resizeEnd() {
+    if (!resizing) return;
+    resizing = null;
+    remember();
+  }
+  function resizeKey(e: KeyboardEvent) {
+    const step = e.key === "ArrowLeft" ? -16 : e.key === "ArrowRight" ? 16 : 0;
+    if (step === 0) return;
+    e.preventDefault();
+    explorerWidth = clampWidth(explorerWidth + step);
+    remember();
   }
 
-  function duplicate(conn: ConnectionConfig) {
-    dialog = {
-      ...conn,
-      id: crypto.randomUUID(),
-      name: t("connection.copySuffix", { name: conn.name }),
-      passwordSaved: false,
-    };
+  function onkeydown(e: KeyboardEvent) {
+    // Dialogs and the password prompts own the keyboard while open.
+    if (dialog !== undefined || tabs.passwordRequest || explorer.passwordRequest) return;
+    if (document.querySelector('[aria-modal="true"]')) return;
+    const action = shortcutAction(e, isMac);
+    if (!action) return;
+    e.preventDefault();
+    if (action === "palette") palette.show();
+    else if (action === "new") tabs.newTab();
+    else if (tabs.activeId) tabs.close(tabs.activeId);
   }
 </script>
 
+<svelte:window {onkeydown} />
+
 <div class="win">
-  <div class="cols">
-    <Rail />
-    <aside class="explorer">
-      <div class="sect"><span>{t("explorer.title")}</span></div>
-      {#if connections.startupError}
-        <p class="error" role="alert">{t("explorer.startupError", { error: connections.startupError })}</p>
-      {/if}
-      {#if connections.error}
-        <p class="error" role="alert">{t("explorer.loadFailed", { error: connections.error })}</p>
-      {/if}
-      {#if connectError}<p class="error" role="alert">{connectError}</p>{/if}
-      {#if connections.list.length === 0}
-        <div class="empty">
-          <p>{t("explorer.empty")}</p>
-          <button class="primary" onclick={() => (dialog = null)}>{t("explorer.new")}</button>
-        </div>
-      {:else}
-        <ConnectionList onconnect={(c) => connect(c)} onedit={(c) => (dialog = c)} onduplicate={duplicate} />
-        <div class="foot">
-          <button class="primary" onclick={() => (dialog = null)}>{t("explorer.new")}</button>
-        </div>
-      {/if}
-    </aside>
-    <main class="workspace"><QueryPane onreconnect={reconnect} /></main>
+  <div class="cols" class:no-explorer={explorerHidden}>
+    <Rail active={explorerHidden ? null : "rail.explorer"} onselect={onrail} />
+    {#if !explorerHidden}
+      <aside class="explorer" style:width="{explorerWidth}px">
+        {#if connections.startupError}
+          <p class="error" role="alert">{t("explorer.startupError", { error: connections.startupError })}</p>
+        {/if}
+        {#if connections.error}
+          <p class="error" role="alert">{t("explorer.loadFailed", { error: connections.error })}</p>
+        {/if}
+        <ExplorerTree
+          onnewconnection={(folderId) => openDialog(null, folderId ?? null)}
+          onedit={(c) => openDialog(c)}
+          onnewfromstring={(folderId, parsed) => openDialog(null, folderId, parsed ?? undefined, parsed === null)}
+        />
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+        <div
+          class="resize"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t("explorer.resize")}
+          aria-valuenow={explorerWidth}
+          aria-valuemin={MIN_WIDTH}
+          aria-valuemax={MAX_WIDTH}
+          tabindex="0"
+          onpointerdown={resizeStart}
+          onpointermove={resizeMove}
+          onpointerup={resizeEnd}
+          onpointercancel={resizeEnd}
+          onkeydown={resizeKey}
+        ></div>
+      </aside>
+    {/if}
+    <main class="workspace">
+      <TabStrip />
+      <!-- A failed tab connect shows here so it stays visible with the Explorer hidden. -->
+      <div class="notices">
+        {#if tabs.connectError}<p class="error" role="alert">{tabs.connectError}</p>{/if}
+      </div>
+      <div class="body">
+        {#if activeTab?.pane}
+          {#key activeTab.id}
+            <QueryPane pane={activeTab.pane} onreconnect={() => tabs.reconnectActive()} onretry={() => tabs.retry(activeTab.id)} />
+          {/key}
+        {:else if activeTab?.kind === "structure"}
+          {#key activeTab.id}
+            <StructureView
+              connectionId={activeTab.connectionId!}
+              database={activeTab.database!}
+              schema={activeTab.schema!}
+              name={activeTab.name!}
+            />
+          {/key}
+        {:else}
+          <div class="blank">
+            <p>{t("tabs.empty", { key: newKey })}</p>
+            <p class="sub">{t("tabs.emptyHint")}</p>
+          </div>
+        {/if}
+      </div>
+    </main>
   </div>
-  <StatusBar status={pane.status} session={pane.session} cursor={pane.cursor} onreconnect={reconnect} />
+  <StatusBar
+    status={activePane?.status ?? "idle"}
+    session={activePane?.session ?? null}
+    cursor={activePane?.cursor ?? { line: 1, col: 1 }}
+    onreconnect={() => tabs.reconnectActive()}
+  />
 </div>
 
 {#if dialog !== undefined}
   {#key dialog?.id}
-    <ConnectionDialog initial={dialog ?? undefined} onclose={() => (dialog = undefined)} />
+    <ConnectionDialog
+      initial={dialog ?? undefined}
+      folderId={dialogFolder}
+      parsed={dialogParsed}
+      focusConnStr={dialogFocusConnStr}
+      onclose={() => {
+        dialog = undefined;
+        dialogParsed = undefined;
+      }}
+    />
   {/key}
 {/if}
-{#if prompting}
+{#if palette.isOpen}
+  <Palette />
+{/if}
+{#if tabs.passwordRequest}
   <PasswordPrompt
-    connection={prompting}
-    oncancel={() => (prompting = null)}
-    onsubmit={(pw) => {
-      const c = prompting!;
-      prompting = null;
-      void connect(c, pw, promptDatabase);
-    }}
+    connection={tabs.passwordRequest.conn}
+    oncancel={() => tabs.cancelPassword()}
+    onsubmit={(pw) => void tabs.submitPassword(pw)}
   />
+{:else if explorer.passwordRequest}
+  {#key explorer.passwordRequest.conn.id}
+    <PasswordPrompt
+      connection={explorer.passwordRequest.conn}
+      oncancel={() => explorer.cancelPassword()}
+      onsubmit={(pw) => void explorer.submitPassword(pw)}
+    />
+  {/key}
 {/if}
 
 <style>
@@ -114,51 +211,35 @@
   }
   .cols {
     display: grid;
-    grid-template-columns: 54px 272px 1fr;
+    grid-template-columns: 54px auto minmax(0, 1fr);
     min-height: 0;
   }
+  /* Without the aside the workspace would land in the auto track. */
+  .cols.no-explorer {
+    grid-template-columns: 54px minmax(0, 1fr);
+  }
   .explorer {
+    position: relative;
     background: var(--surface);
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
+    min-width: 0;
   }
-  .sect {
-    padding: 12px 16px 4px;
-    color: var(--muted);
-    font-size: 12px;
+  .resize {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: -3px;
+    width: 6px;
+    cursor: col-resize;
+    z-index: 2;
+    outline: none;
   }
-  .empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 12px;
-    margin-top: 40px;
-    color: var(--muted);
-  }
-  .empty p {
-    margin: 0;
-  }
-  .primary {
-    height: 34px;
-    padding: 0 16px;
-    border: 1px solid var(--control);
-    border-radius: var(--radius-control);
-    background: none;
-    color: var(--text);
-    font: inherit;
-    font-weight: 500;
-    cursor: pointer;
-  }
-  .primary:hover {
-    border-color: var(--accent);
-  }
-  .foot {
-    margin-top: auto;
-    padding: 12px 16px;
-    display: flex;
-    justify-content: center;
+  .resize:hover,
+  .resize:focus-visible {
+    background: linear-gradient(var(--accent), var(--accent)) center / 1px 100% no-repeat;
   }
   .error {
     margin: 4px 16px;
@@ -170,5 +251,25 @@
     background: var(--ground);
     min-width: 0;
     min-height: 0;
+    display: grid;
+    grid-template-rows: 36px auto minmax(0, 1fr);
+  }
+  .body {
+    min-height: 0;
+  }
+  .blank {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    color: var(--muted);
+  }
+  .blank p {
+    margin: 0;
+  }
+  .blank .sub {
+    font-size: 12px;
   }
 </style>

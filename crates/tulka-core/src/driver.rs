@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Sender;
 
+use crate::meta::{DatabaseSnapshot, TableStructure};
 use crate::{DriverError, Value};
 
 /// Application name reported to the server at login.
@@ -127,6 +128,8 @@ pub struct ServerInfo {
     pub version: String,
     /// The login name of the session.
     pub user: String,
+    /// True on Azure SQL Database, where a connection is bound to one database.
+    pub single_database: bool,
 }
 
 /// An open connection to a server.
@@ -136,6 +139,22 @@ pub trait Session: Send {
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError>;
     async fn use_database(&mut self, name: &str) -> Result<(), DriverError>;
     async fn current_database(&mut self) -> Result<String, DriverError>;
+    /// Every object of `database` with the columns of its tables and views.
+    async fn snapshot(&mut self, database: &str) -> Result<DatabaseSnapshot, DriverError>;
+    /// Columns, foreign keys and indexes of one table.
+    async fn structure(
+        &mut self,
+        database: &str,
+        schema: &str,
+        name: &str,
+    ) -> Result<TableStructure, DriverError>;
+    /// The source text of a view or procedure.
+    async fn definition(
+        &mut self,
+        database: &str,
+        schema: &str,
+        name: &str,
+    ) -> Result<String, DriverError>;
     /// Runs a script, streaming its events to `tx`. Returns once the script
     /// finished, failed, was cancelled or the connection was lost.
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError>;
