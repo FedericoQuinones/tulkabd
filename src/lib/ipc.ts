@@ -229,7 +229,8 @@ export type AppEvent =
 /**
  * Command errors arrive as plain strings. Sentinels: `"password_required"`, `"disconnected"`,
  * `"busy"` (the tab's session is in use), `"closed"` (tab closed, or explorer disconnected or reconnected, while connecting),
- * `"not_connected"` (no explorer session), `"not_found"`, `"cycle"` and `"empty_name"` (folders).
+ * `"not_connected"` (no explorer session), `"not_found"`, `"cycle"` and `"empty_name"` (folders),
+ * `"too_large"` (a `.sql` file over 20 MB).
  */
 export const listConnections = () => invoke<ConnectionConfig[]>("list_connections");
 
@@ -390,7 +391,10 @@ export const pickSqlFiles = (filterName: string) => invoke<string[]>("pick_sql_f
 export const allowDroppedPaths = (paths: string[]) => invoke<void>("allow_dropped_paths", { paths });
 /** For each path, whether the backend allows it and its file still exists. */
 export const sqlFilesExist = (paths: string[]) => invoke<boolean[]>("sql_files_exist", { paths });
-/** Rejects with `"not_allowed"`, `"not_found"`, `"not_text"` or why it could not be read. */
+/**
+ * Rejects with `"not_allowed"`, `"not_found"`, `"too_large"` (over 20 MB), `"not_text"` or why it
+ * could not be read.
+ */
 export const readSqlFile = (path: string) => invoke<OpenedFile>("read_sql_file", { path });
 /** Writes atomically, recreating a deleted file. Rejects with `"not_allowed"` or why it could not be written. */
 export const writeSqlFile = (path: string, text: string, encoding: FileEncoding, lineEnding: LineEnding) =>

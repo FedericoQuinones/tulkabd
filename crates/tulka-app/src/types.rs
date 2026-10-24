@@ -21,6 +21,9 @@ pub const EXISTS: &str = "exists";
 pub const NOT_ALLOWED: &str = "not_allowed";
 /// File command error: the file is neither UTF-8 nor UTF-16 with a BOM.
 pub const NOT_TEXT: &str = "not_text";
+/// File command error: the file is larger than `MAX_SQL_FILE_BYTES`, so it
+/// is not read.
+pub const TOO_LARGE: &str = "too_large";
 /// Command error meaning the tab's connection was lost; only `open_session`
 /// gets the tab working again.
 pub const DISCONNECTED: &str = "disconnected";

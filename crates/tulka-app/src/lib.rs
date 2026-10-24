@@ -8,8 +8,8 @@
 //! Every command of the UI is a plain async function taking [`AppState`];
 //! the Tauri layer only wraps them. Errors are plain strings, with the
 //! sentinels [`PASSWORD_REQUIRED`], [`DISCONNECTED`], [`BUSY`], [`CLOSED`],
-//! [`NOT_CONNECTED`], [`NOT_ALLOWED`] and [`NOT_TEXT`]. Background events go
-//! to [`AppEvents`].
+//! [`NOT_CONNECTED`], [`NOT_ALLOWED`], [`NOT_TEXT`] and [`TOO_LARGE`].
+//! Background events go to [`AppEvents`].
 
 pub mod connections;
 pub mod explorer;
@@ -34,7 +34,7 @@ pub use explorer::{
 };
 pub use files::{
     allow_paths, decode_text, encode_text, read_sql_file, sql_files_exist, write_sql_file,
-    FileEncoding, LineEnding, OpenedFile, TextFile,
+    FileEncoding, LineEnding, OpenedFile, TextFile, MAX_SQL_FILE_BYTES,
 };
 pub use queries::{
     decode_component, delete_saved_query, encode_component, list_saved_queries, read_saved_query,
@@ -56,6 +56,7 @@ pub use types::{
     ExplorerInfo, NoopEvents, PaletteHit, RunOutcome, RunSummary, SaveConnectionResult, SavedQuery,
     SavedQueryHit, SearchResponse, SessionInfo, UiEvent, BUSY, CLOSED, CYCLE, DISCONNECTED,
     EMPTY_NAME, EXISTS, NOT_ALLOWED, NOT_CONNECTED, NOT_FOUND, NOT_TEXT, PASSWORD_REQUIRED,
+    TOO_LARGE,
 };
 
 /// The core types used in the command signatures (`ConnectionConfig`,

@@ -131,6 +131,7 @@
   "files.errors.notText": "it is not a text file (UTF-8, or UTF-16 with a BOM).",
   "files.errors.notFound": "the file no longer exists.",
   "files.errors.notAllowed": "open it with Open file… or drop it on the window.",
+  "files.errors.tooLarge": "it is larger than 20 MB.",
   "structure.columns": "Columns",
   "structure.foreignKeys": "Foreign keys",
   "structure.indexes": "Indexes",

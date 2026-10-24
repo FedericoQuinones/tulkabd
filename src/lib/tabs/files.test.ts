@@ -19,6 +19,7 @@ vi.mock("../ipc", () => ({
 
 import * as ipc from "../ipc";
 import { connections } from "../connections/store.svelte";
+import { t } from "../i18n/t";
 import { queries } from "../queries/queries.svelte";
 import { tabs } from "./tabs.svelte";
 import TabStrip from "./TabStrip.svelte";
@@ -124,6 +125,14 @@ test("a file that cannot be read opens no tab and says why; the others still ope
   // The next open that works clears it.
   await tabs.openFiles(["/ok2.sql"]);
   expect(tabs.fileError).toBeNull();
+});
+
+test("a file over the size limit says it is too large", async () => {
+  vi.mocked(ipc.readSqlFile).mockRejectedValue("too_large");
+  await tabs.openFiles(["/huge.sql"]);
+  expect(tabs.list).toHaveLength(0);
+  expect(tabs.fileError).toContain("huge.sql");
+  expect(tabs.fileError).toContain(t("files.errors.tooLarge"));
 });
 
 test("Ctrl+S on a file tab writes the file in its encoding and line endings without asking for a name", async () => {

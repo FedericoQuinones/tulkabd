@@ -106,6 +106,7 @@ export function fileErrorText(e: unknown): string {
   if (s === "not_text") return t("files.errors.notText");
   if (s === "not_found") return t("files.errors.notFound");
   if (s === "not_allowed") return t("files.errors.notAllowed");
+  if (s === "too_large") return t("files.errors.tooLarge");
   return s;
 }
 

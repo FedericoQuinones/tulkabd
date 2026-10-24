@@ -453,3 +453,27 @@ async fn sql_files_exist_reports_allowed_files_that_are_still_there() {
         [true, false, false, false]
     );
 }
+
+#[tokio::test]
+async fn a_file_over_20_mb_is_not_read() {
+    assert_eq!(MAX_SQL_FILE_BYTES, 20 * 1024 * 1024);
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    // Sparse files: nothing is really written to the disk.
+    let big = dir.path().join("big.sql");
+    std::fs::File::create(&big)
+        .unwrap()
+        .set_len(MAX_SQL_FILE_BYTES + 1)
+        .unwrap();
+    let limit = dir.path().join("limit.sql");
+    std::fs::File::create(&limit)
+        .unwrap()
+        .set_len(MAX_SQL_FILE_BYTES)
+        .unwrap();
+    let (big, limit) = (path_string(&big), path_string(&limit));
+    allow_paths(&st, vec![big.clone(), limit.clone()]);
+
+    assert_eq!(read_sql_file(&st, big).await.unwrap_err(), TOO_LARGE);
+    // Read, then refused for its NUL bytes: the size itself is accepted.
+    assert_eq!(read_sql_file(&st, limit).await.unwrap_err(), NOT_TEXT);
+}

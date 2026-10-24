@@ -7,7 +7,8 @@
 //! characters (UTF-16 without a BOM, binary files), is [`NOT_TEXT`]. The
 //! editor gets the text with `\n` line breaks; [`TextFile`] keeps the
 //! encoding and the more frequent line ending (LF on a tie) so
-//! [`encode_text`] writes it back the same way.
+//! [`encode_text`] writes it back the same way. A file larger than
+//! [`MAX_SQL_FILE_BYTES`] is [`TOO_LARGE`] and is not read at all.
 //!
 //! # Allowed paths
 //!
@@ -40,7 +41,12 @@ use serde::{Deserialize, Serialize};
 use crate::connections::blocking;
 use crate::queries::write_atomic;
 use crate::state::AppState;
-use crate::types::{NOT_ALLOWED, NOT_FOUND, NOT_TEXT};
+use crate::types::{NOT_ALLOWED, NOT_FOUND, NOT_TEXT, TOO_LARGE};
+
+/// The largest `.sql` file [`read_sql_file`] reads (20 MB); a larger one is
+/// [`TOO_LARGE`], so dropping a huge file never fills the memory or the
+/// editor.
+pub const MAX_SQL_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
 const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 const UTF16LE_BOM: [u8; 2] = [0xFF, 0xFE];
@@ -194,14 +200,18 @@ fn check_allowed(state: &AppState, path: &str) -> Result<PathBuf, String> {
 }
 
 /// Reads an allowed `.sql` file: [`NOT_ALLOWED`], [`NOT_FOUND`] when it no
-/// longer exists, [`NOT_TEXT`].
+/// longer exists, [`TOO_LARGE`] over [`MAX_SQL_FILE_BYTES`], [`NOT_TEXT`].
 pub async fn read_sql_file(state: &AppState, path: String) -> Result<OpenedFile, String> {
     let p = check_allowed(state, &path)?;
     blocking(move || {
-        let bytes = fs::read(&p).map_err(|e| match e.kind() {
+        let fail = |e: std::io::Error| match e.kind() {
             ErrorKind::NotFound => NOT_FOUND.to_string(),
             _ => format!("could not read {}: {e}", p.display()),
-        })?;
+        };
+        if fs::metadata(&p).map_err(fail)?.len() > MAX_SQL_FILE_BYTES {
+            return Err(TOO_LARGE.to_string());
+        }
+        let bytes = fs::read(&p).map_err(fail)?;
         let file = decode_text(&bytes)?;
         let name = p
             .file_name()
