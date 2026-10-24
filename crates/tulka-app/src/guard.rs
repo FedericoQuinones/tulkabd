@@ -39,6 +39,11 @@ pub fn guard_off_for_session(state: &AppState) -> Vec<String> {
 /// Saves a new guard level for a connection and returns the previous one
 /// (so the caller can offer an undo). Also ends any "off until the app
 /// closes" for it. Fails with `"not_found"` for an unknown connection.
+///
+/// The saved level and the session-off set are updated one after the other,
+/// not together: for a few microseconds a run may see the new level while
+/// the connection is still in the set (so it runs unguarded once more). That
+/// is the same as the run having started just before the change.
 pub async fn set_connection_guard(
     state: &AppState,
     connection_id: String,
@@ -64,26 +69,39 @@ fn off_set(state: &AppState) -> std::sync::MutexGuard<'_, std::collections::Hash
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Analyzes `sql` for the connection of `tab_id`. Returns the summary to
-/// answer with when the script must not run now, `None` when it may run.
-/// A tab without a session or with an unknown connection passes through, so
-/// the usual errors come from the run itself.
+/// What [`check`] decided.
+pub(crate) enum Verdict {
+    /// The script must not run now; answer with this summary.
+    Hold(RunSummary),
+    /// The script may run. `generation` is that of the tab the connection
+    /// was read from (`None` if the tab does not exist): the run must take
+    /// the session of that same tab, not one that replaced it meanwhile.
+    Run { generation: Option<u64> },
+}
+
+/// Analyzes `sql` for the connection of `tab_id`. A tab that does not exist
+/// passes through (taking its session fails with the usual error), but a tab
+/// whose connection is no longer saved is an error: the level that applies
+/// is unknown, so the script is not run.
 pub(crate) async fn check(
     state: &AppState,
     tab_id: &str,
     sql: &str,
     confirmed: bool,
-) -> Result<Option<RunSummary>, String> {
-    // The tabs lock is held only to read the connection id.
-    let Some(connection_id) = state
+) -> Result<Verdict, String> {
+    // The tabs lock is held only to read these two values.
+    let Some((connection_id, generation)) = state
         .tabs()
         .open
         .get(tab_id)
-        .map(|t| t.connection_id.clone())
+        .map(|t| (t.connection_id.clone(), t.generation))
     else {
-        return Ok(None);
+        return Ok(Verdict::Run { generation: None });
     };
-    let Some(conn) = state
+    let run = Verdict::Run {
+        generation: Some(generation),
+    };
+    let conn = state
         .connections
         .lock()
         .await
@@ -91,26 +109,71 @@ pub(crate) async fn check(
         .iter()
         .find(|c| c.id == connection_id)
         .cloned()
-    else {
-        return Ok(None);
-    };
+        .ok_or_else(|| "the connection does not exist".to_string())?;
     let level = effective_guard(state, &conn);
     if level == GuardLevel::Off || (level == GuardLevel::Confirm && confirmed) {
-        return Ok(None);
+        return Ok(run);
     }
     let findings = state.driver(&conn.driver)?.guard_findings(sql);
     if findings.is_empty() {
-        return Ok(None);
+        return Ok(run);
     }
     let outcome = if level == GuardLevel::Block {
         RunOutcome::Blocked
     } else {
         RunOutcome::NeedsConfirmation
     };
-    Ok(Some(RunSummary {
+    Ok(Verdict::Hold(RunSummary {
         elapsed_ms: 0,
         finished_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         outcome,
         findings,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::TabState;
+    use std::sync::Arc;
+    use tulka_core::{ConfigStore, MemoryStore};
+
+    fn state_with_tab(connection_id: &str) -> AppState {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            ConfigStore::at(dir.path().join("config.json")),
+            Arc::new(MemoryStore::default()),
+            vec![],
+        )
+        .unwrap();
+        state.tabs().open.insert(
+            "t1".into(),
+            TabState {
+                generation: 7,
+                connection_id: connection_id.into(),
+                database: "master".into(),
+                session: None,
+                cancel: None,
+                results: Vec::new(),
+                disconnected: false,
+            },
+        );
+        state
+    }
+
+    #[tokio::test]
+    async fn a_tab_whose_connection_is_gone_is_an_error() {
+        let state = state_with_tab("gone");
+        let err = check(&state, "t1", "DROP TABLE x", false).await.err();
+        assert!(err.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_tab_passes_and_carries_no_generation() {
+        let state = state_with_tab("gone");
+        match check(&state, "nope", "DROP TABLE x", false).await {
+            Ok(Verdict::Run { generation: None }) => {}
+            _ => panic!("expected to run without a generation"),
+        }
+    }
 }

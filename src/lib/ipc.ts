@@ -88,7 +88,7 @@ export interface GuardFinding {
   object: string | null;
   /** The statement text, trimmed, at most 400 chars plus an ellipsis. */
   statement: string;
-  /** 0-based line of the statement start, relative to the script sent. */
+  /** 0-based line of the statement start, relative to the text sent (the selection, if one was run). */
   line: number;
 }
 export interface RunSummary {
@@ -284,7 +284,11 @@ export const runQuery = (tabId: string, sql: string, confirmed: boolean, onEvent
 export const setGuardOffForSession = (connectionId: string, off: boolean) =>
   invoke<void>("set_guard_off_for_session", { connectionId, off });
 
-/** Saves a connection's guard level; resolves with the previous level (for undo). */
+/**
+ * Saves a connection's guard level; resolves with the previous level (for undo).
+ * Rejects with `not_found` for an unknown connection, or with the read-only config
+ * error when the connections file could not be read at startup.
+ */
 export const setConnectionGuard = (connectionId: string, level: GuardLevel) =>
   invoke<GuardLevel>("set_connection_guard", { connectionId, level });
 

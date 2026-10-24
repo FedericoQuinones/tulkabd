@@ -130,7 +130,7 @@ pub async fn use_database(
     tab_id: String,
     database: String,
 ) -> Result<(), String> {
-    let (checkout, mut session) = Checkout::take(state, &tab_id, false)?;
+    let (checkout, mut session) = Checkout::take(state, &tab_id, false, None)?;
     let generation = checkout.generation;
     let result = session.use_database(&database).await;
     let lost = matches!(result, Err(DriverError::Disconnected(_)));
@@ -175,10 +175,11 @@ pub async fn run_query<F>(
 where
     F: Fn(UiEvent) + Send + Sync,
 {
-    if let Some(held) = crate::guard::check(state, &tab_id, &sql, confirmed).await? {
-        return Ok(held);
-    }
-    let (checkout, mut session) = Checkout::take(state, &tab_id, true)?;
+    let generation = match crate::guard::check(state, &tab_id, &sql, confirmed).await? {
+        crate::guard::Verdict::Hold(held) => return Ok(held),
+        crate::guard::Verdict::Run { generation } => generation,
+    };
+    let (checkout, mut session) = Checkout::take(state, &tab_id, true, generation)?;
     let started = Instant::now();
     let (tx, rx) = mpsc::channel(EVENT_QUEUE);
     let forwarder = Forwarder {
@@ -391,13 +392,20 @@ struct Checkout<'a> {
 impl<'a> Checkout<'a> {
     /// Takes the session out of the tab. For a run, also publishes its cancel
     /// handle and clears the previous results, in the same critical section.
+    /// With `expected_generation`, fails with `"busy"` if the tab is not that
+    /// generation any more (it was replaced after the guard looked at it), so
+    /// a script is never run on a session the guard did not analyze it for.
     fn take(
         state: &'a AppState,
         tab_id: &'a str,
         run: bool,
+        expected_generation: Option<u64>,
     ) -> Result<(Self, Box<dyn Session>), String> {
         let mut tabs = state.tabs();
         let tab = tabs.open.get_mut(tab_id).ok_or_else(no_session)?;
+        if expected_generation.is_some_and(|g| g != tab.generation) {
+            return Err(BUSY.into());
+        }
         if tab.disconnected {
             return Err(DISCONNECTED.into());
         }
@@ -643,5 +651,101 @@ impl RowCounter {
             });
         }
         *self = RowCounter::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use tokio::sync::mpsc::Sender;
+    use tulka_core::{ConfigStore, DatabaseSnapshot, MemoryStore, ServerInfo, TableStructure};
+
+    struct NoCancel;
+
+    #[async_trait]
+    impl tulka_core::CancelHandle for NoCancel {
+        async fn cancel(&self) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    /// A session that is only ever checked out and in.
+    struct Inert;
+
+    #[async_trait]
+    impl Session for Inert {
+        async fn server_info(&mut self) -> Result<ServerInfo, DriverError> {
+            unimplemented!()
+        }
+        async fn list_databases(&mut self) -> Result<Vec<String>, DriverError> {
+            unimplemented!()
+        }
+        async fn use_database(&mut self, _: &str) -> Result<(), DriverError> {
+            unimplemented!()
+        }
+        async fn current_database(&mut self) -> Result<String, DriverError> {
+            unimplemented!()
+        }
+        async fn snapshot(&mut self, _: &str) -> Result<DatabaseSnapshot, DriverError> {
+            unimplemented!()
+        }
+        async fn structure(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<TableStructure, DriverError> {
+            unimplemented!()
+        }
+        async fn definition(&mut self, _: &str, _: &str, _: &str) -> Result<String, DriverError> {
+            unimplemented!()
+        }
+        async fn execute(&mut self, _: &str, _: Sender<ExecEvent>) -> Result<(), DriverError> {
+            unimplemented!()
+        }
+        fn cancel_handle(&self) -> Box<dyn tulka_core::CancelHandle> {
+            Box::new(NoCancel)
+        }
+    }
+
+    fn state_with_tab(generation: u64) -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            ConfigStore::at(dir.path().join("config.json")),
+            Arc::new(MemoryStore::default()),
+            vec![],
+        )
+        .unwrap();
+        state.tabs().open.insert(
+            "t1".into(),
+            TabState {
+                generation,
+                connection_id: "c".into(),
+                database: "master".into(),
+                session: Some(Box::new(Inert)),
+                cancel: None,
+                results: Vec::new(),
+                disconnected: false,
+            },
+        );
+        (state, dir)
+    }
+
+    #[test]
+    fn take_refuses_a_tab_replaced_since_the_guard_check() {
+        let (state, _dir) = state_with_tab(2);
+        // The guard looked at generation 1; the tab is now generation 2.
+        let err = Checkout::take(&state, "t1", true, Some(1)).err();
+        assert_eq!(err.as_deref(), Some(BUSY));
+        // Nothing was taken or cleared: the new tab keeps its session.
+        assert!(state.tabs().open["t1"].session.is_some());
+    }
+
+    #[test]
+    fn take_proceeds_when_the_generation_is_the_one_checked() {
+        let (state, _dir) = state_with_tab(2);
+        assert!(Checkout::take(&state, "t1", true, Some(2)).is_ok());
+        assert!(state.tabs().open["t1"].session.is_none());
     }
 }

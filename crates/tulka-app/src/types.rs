@@ -240,8 +240,8 @@ impl UiEvent {
     }
 }
 
-/// How a `run_query` ended. Serialized as `"ok"`, `"error"`, `"cancelled"`
-/// or `"disconnected"`.
+/// How a `run_query` ended. Serialized as `"ok"`, `"error"`, `"cancelled"`,
+/// `"disconnected"`, `"blocked"` or `"needsConfirmation"`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RunOutcome {
