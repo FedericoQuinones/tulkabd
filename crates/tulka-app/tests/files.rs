@@ -449,9 +449,34 @@ async fn sql_files_exist_reports_allowed_files_that_are_still_there() {
     // Never allowed: reported missing, whatever is on disk.
     asked.push(path_string(&other));
     assert_eq!(
-        sql_files_exist(&st, asked).await,
-        [true, false, false, false]
+        sql_files_exist(&st, asked).await.unwrap(),
+        [Some(true), Some(false), Some(false), Some(false)]
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sql_files_exist_tells_a_file_it_could_not_check_from_a_missing_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    let inside = locked.join("q.sql");
+    std::fs::write(&inside, "SELECT 1").unwrap();
+    let under_a_file = dir.path().join("plain").join("q.sql");
+    std::fs::write(dir.path().join("plain"), "not a folder").unwrap();
+    let paths = vec![path_string(&inside), path_string(&under_a_file)];
+    allow_paths(&st, paths.clone());
+
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads through any permission: nothing to check then.
+    let enforced = std::fs::metadata(&inside).is_err();
+    let found = sql_files_exist(&st, paths).await.unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if enforced {
+        assert_eq!(found, [None, Some(false)]);
+    }
 }
 
 #[tokio::test]

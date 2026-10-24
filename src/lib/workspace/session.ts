@@ -222,12 +222,13 @@ function restoredTab(s: SessionTab, known: { connectionIds: Set<string> }): Tab 
  * Lets the backend read and write the restored tabs' files, then checks they are still there. A tab
  * whose file is gone stops being a file tab (Ctrl+S would recreate a file the user moved or deleted):
  * it keeps its text, now unsaved, with a notice. Tabs are found by their pane, so a tab closed or
- * replaced meanwhile is left alone. When the paths cannot be allowed nothing changes: Ctrl+S
- * allows a file tab's path again before writing it.
+ * replaced meanwhile is left alone. Only a file reported missing (`false`) is dropped: when the
+ * paths cannot be allowed, the check fails or a file cannot be checked (`null`), the tab keeps its
+ * file; Ctrl+S allows a file tab's path again before writing it.
  */
 async function checkFiles(store: TabsStore, files: { pane: PaneState; path: string }[]): Promise<void> {
   const paths = files.map((f) => f.path);
-  let exists: boolean[];
+  let exists: (boolean | null)[];
   try {
     await ipc.allowDroppedPaths(paths);
     exists = await ipc.sqlFilesExist(paths);

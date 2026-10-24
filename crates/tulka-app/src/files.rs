@@ -228,24 +228,43 @@ pub async fn read_sql_file(state: &AppState, path: String) -> Result<OpenedFile,
     .await?
 }
 
-/// For each path, whether it is allowed and a file is there now (through a
-/// symlink too). A path that is not allowed is reported missing, so nothing
-/// is learnt about other paths. The UI checks restored file tabs with it.
-pub async fn sql_files_exist(state: &AppState, paths: Vec<String>) -> Vec<bool> {
+/// For each path: `Some(true)` when it is allowed and a file is there now
+/// (through a symlink too), `Some(false)` when it is not (nothing there, a
+/// folder, or a path that is not allowed, so nothing is learnt about other
+/// paths), `None` when it could not be checked (no permission, an I/O
+/// error). Fails as a whole only when the check could not run. The UI checks
+/// restored file tabs with it and keeps the file of a tab it could not check.
+pub async fn sql_files_exist(
+    state: &AppState,
+    paths: Vec<String>,
+) -> Result<Vec<Option<bool>>, String> {
     let allowed: Vec<bool> = paths
         .iter()
         .map(|p| state.files.contains(Path::new(p)))
         .collect();
-    let n = paths.len();
     blocking(move || {
         paths
             .iter()
             .zip(allowed)
-            .map(|(p, ok)| ok && Path::new(p).is_file())
+            .map(|(p, ok)| {
+                if ok {
+                    file_exists(Path::new(p))
+                } else {
+                    Some(false)
+                }
+            })
             .collect()
     })
     .await
-    .unwrap_or_else(|_| vec![false; n])
+}
+
+/// Whether a file is at `path`, or `None` when that cannot be told.
+fn file_exists(path: &Path) -> Option<bool> {
+    match fs::metadata(path) {
+        Ok(meta) => Some(meta.is_file()),
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Some(false),
+        Err(_) => None,
+    }
 }
 
 /// Writes `text` to an allowed `.sql` file in `encoding` and `line_ending`,

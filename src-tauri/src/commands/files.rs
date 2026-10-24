@@ -39,13 +39,14 @@ pub fn allow_dropped_paths(state: State<'_, AppState>, paths: Vec<String>) {
     tulka_app::allow_paths(&state, paths);
 }
 
-/// For each path, whether it is allowed and its file still exists.
+/// For each path, whether it is allowed and its file still exists; `null`
+/// when that could not be checked.
 #[tauri::command]
 pub async fn sql_files_exist(
     state: State<'_, AppState>,
     paths: Vec<String>,
-) -> Result<Vec<bool>, String> {
-    Ok(tulka_app::sql_files_exist(&state, paths).await)
+) -> Result<Vec<Option<bool>>, String> {
+    tulka_app::sql_files_exist(&state, paths).await
 }
 
 #[tauri::command]

@@ -203,6 +203,26 @@ test("when the restored paths cannot be allowed, file tabs keep their file and n
   expect(tabs.list[0].pane!.notice).toBeNull();
 });
 
+test("a restored file tab keeps its file when the check fails or cannot tell", async () => {
+  const json = await sessionWithFiles(["/sql/locked.sql", "/sql/gone.sql"]);
+  vi.mocked(ipc.sqlFilesExist).mockRejectedValue("internal error");
+  restore(tabs, parseSession(json)!, known);
+  await flush();
+  expect(tabs.list.map((x) => x.file?.path)).toEqual(["/sql/locked.sql", "/sql/gone.sql"]);
+  expect(tabs.list.map((x) => x.pane!.notice)).toEqual([null, null]);
+  await tabs.reset();
+
+  // `null`: that file could not be checked (no permission); only the missing one loses its file.
+  vi.mocked(ipc.sqlFilesExist).mockResolvedValue([null, false]);
+  restore(tabs, parseSession(json)!, known);
+  await flush();
+  const [locked, gone] = tabs.list;
+  expect(locked.file?.path).toBe("/sql/locked.sql");
+  expect(locked.pane!.notice).toBeNull();
+  expect(locked.dirty).toBe(false);
+  expect(gone.file).toBeUndefined();
+});
+
 test("the file check of a restore leaves alone a tab closed or replaced meanwhile", async () => {
   const json = await sessionWithFiles(["/sql/gone.sql"]);
   let answer!: (v: boolean[]) => void;
