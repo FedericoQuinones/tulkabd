@@ -15,7 +15,8 @@ pub mod value;
 
 pub use config::{
     clamp_zoom, AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope, Environment,
-    Folder, GuardLevel, Preferences,
+    EnvironmentDefaults, EnvironmentStyle, Folder, GuardLevel, NumberFormat, Preferences,
+    MAX_ROWS_DEFAULT,
 };
 pub use connstr::{
     format_connection_string, parse_connection_string, ConnStrError, ParsedConnection,
