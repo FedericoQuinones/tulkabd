@@ -32,7 +32,7 @@ const ROW_COUNT_INTERVAL: Duration = Duration::from_millis(50);
 /// Events buffered between the driver and the forwarder.
 const EVENT_QUEUE: usize = 32;
 
-fn no_session() -> String {
+pub(crate) fn no_session() -> String {
     "no session is open on this tab".into()
 }
 
@@ -130,6 +130,8 @@ pub async fn use_database(
     tab_id: String,
     database: String,
 ) -> Result<(), String> {
+    // No generation to match: switching database runs no user script, so
+    // there is no guard analysis it could outdate.
     let (checkout, mut session) = Checkout::take(state, &tab_id, false, None)?;
     let generation = checkout.generation;
     let result = session.use_database(&database).await;
@@ -179,7 +181,7 @@ where
         crate::guard::Verdict::Hold(held) => return Ok(held),
         crate::guard::Verdict::Run { generation } => generation,
     };
-    let (checkout, mut session) = Checkout::take(state, &tab_id, true, generation)?;
+    let (checkout, mut session) = Checkout::take(state, &tab_id, true, Some(generation))?;
     let started = Instant::now();
     let (tx, rx) = mpsc::channel(EVENT_QUEUE);
     let forwarder = Forwarder {

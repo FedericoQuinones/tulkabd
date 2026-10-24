@@ -5,6 +5,7 @@ use chrono::{SecondsFormat, Utc};
 use tulka_core::{ConnectionConfig, GuardLevel};
 
 use crate::connections::mutate;
+use crate::query::no_session;
 use crate::state::AppState;
 use crate::types::{RunOutcome, RunSummary, NOT_FOUND};
 
@@ -74,15 +75,15 @@ pub(crate) enum Verdict {
     /// The script must not run now; answer with this summary.
     Hold(RunSummary),
     /// The script may run. `generation` is that of the tab the connection
-    /// was read from (`None` if the tab does not exist): the run must take
-    /// the session of that same tab, not one that replaced it meanwhile.
-    Run { generation: Option<u64> },
+    /// was read from: the run must take the session of that same tab, not
+    /// one that replaced it meanwhile.
+    Run { generation: u64 },
 }
 
 /// Analyzes `sql` for the connection of `tab_id`. A tab that does not exist
-/// passes through (taking its session fails with the usual error), but a tab
-/// whose connection is no longer saved is an error: the level that applies
-/// is unknown, so the script is not run.
+/// is an error (the same one as running on it without a session), and so is
+/// a tab whose connection is no longer saved: the level that applies is
+/// unknown, so the script is not run.
 pub(crate) async fn check(
     state: &AppState,
     tab_id: &str,
@@ -96,11 +97,9 @@ pub(crate) async fn check(
         .get(tab_id)
         .map(|t| (t.connection_id.clone(), t.generation))
     else {
-        return Ok(Verdict::Run { generation: None });
+        return Err(no_session());
     };
-    let run = Verdict::Run {
-        generation: Some(generation),
-    };
+    let run = Verdict::Run { generation };
     let conn = state
         .connections
         .lock()
@@ -169,11 +168,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unknown_tab_passes_and_carries_no_generation() {
+    async fn an_unknown_tab_is_an_error() {
         let state = state_with_tab("gone");
-        match check(&state, "nope", "DROP TABLE x", false).await {
-            Ok(Verdict::Run { generation: None }) => {}
-            _ => panic!("expected to run without a generation"),
-        }
+        let err = check(&state, "nope", "DROP TABLE x", false).await.err();
+        assert_eq!(err.as_deref(), Some("no session is open on this tab"));
     }
 }
