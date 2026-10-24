@@ -138,7 +138,7 @@ fn lex(text: &str) -> Result<Vec<Token>, usize> {
             });
         } else if c.is_ascii_digit() {
             let start = i;
-            i = advance_while(text, i, is_word_char);
+            i = number_end(b, i);
             tokens.push(Token {
                 kind: Kind::Num,
                 start,
@@ -198,6 +198,41 @@ fn lex(text: &str) -> Result<Vec<Token>, usize> {
         }
     }
     Ok(tokens)
+}
+
+/// End of the numeric literal at `i`: digits, an optional fraction and
+/// exponent, or hex digits after `0x`. A keyword glued to the number, as in
+/// `1DROP`, starts a new token.
+fn number_end(b: &[u8], mut i: usize) -> usize {
+    if b[i] == b'0' && matches!(b.get(i + 1), Some(b'x' | b'X')) {
+        i += 2;
+        while i < b.len() && b[i].is_ascii_hexdigit() {
+            i += 1;
+        }
+        return i;
+    }
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if b.get(i) == Some(&b'.') && b.get(i + 1).is_some_and(u8::is_ascii_digit) {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    if matches!(b.get(i), Some(b'e' | b'E')) {
+        let mut j = i + 1;
+        if matches!(b.get(j), Some(b'+' | b'-')) {
+            j += 1;
+        }
+        if b.get(j).is_some_and(u8::is_ascii_digit) {
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            i = j;
+        }
+    }
+    i
 }
 
 fn advance_while(text: &str, mut i: usize, f: impl Fn(char) -> bool) -> usize {
@@ -266,28 +301,61 @@ impl Scan<'_> {
         Some((text, temp, end + 1))
     }
 
-    /// Skips an optional `TOP (n)` / `TOP n` at `i`.
+    /// Skips an optional `TOP (n) [PERCENT] [WITH TIES]` at `i`.
     fn skip_top(&self, i: usize) -> usize {
         if !self.is_kw(i, "TOP") {
             return i;
         }
+        let mut j = i + 2;
         if self.is_punct(i + 1, '(') {
             let mut depth = 0;
-            let mut j = i + 1;
+            j = i + 1;
             while j < self.toks.len() {
                 if self.is_punct(j, '(') {
                     depth += 1;
                 } else if self.is_punct(j, ')') {
                     depth -= 1;
                     if depth == 0 {
-                        return j + 1;
+                        j += 1;
+                        break;
                     }
                 }
                 j += 1;
             }
-            return j;
         }
-        i + 2
+        if self.is_kw(j, "PERCENT") {
+            j += 1;
+        }
+        if self.is_kw(j, "WITH") && self.is_kw(j + 1, "TIES") {
+            j += 2;
+        }
+        j
+    }
+
+    /// Whether an `ALTER TABLE ... DROP` item list starting at `drop` removes
+    /// a column. Dropping constraints, indexes or the period does not; only a
+    /// later `COLUMN` item in the same list does.
+    fn drops_column(&self, drop: usize) -> bool {
+        let first = drop + 1;
+        if self.is_kw(first, "COLUMN") {
+            return true;
+        }
+        if !self.is_any_kw(first, &["CONSTRAINT", "INDEX", "PERIOD"]) {
+            // A bare column name.
+            return true;
+        }
+        let (end, _) = self.statement_end(drop, false);
+        let mut depth = 0i32;
+        for j in first..end {
+            if self.is_punct(j, '(') {
+                depth += 1;
+            } else if self.is_punct(j, ')') {
+                depth -= 1;
+            } else if depth == 0 && self.is_punct(j, ',') && self.is_kw(j + 1, "COLUMN") {
+                return true;
+            }
+        }
+        false
     }
 
     /// Finds where the statement that starts at `from` ends: the index of the
@@ -409,9 +477,10 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
     }
 
     let mut depth = 0i32;
-    // Table named by the `ALTER TABLE` statement being scanned, with the
-    // token where it starts.
-    let mut alter_table: Option<(usize, Option<String>)> = None;
+    // The latest `ALTER TABLE`: where it starts, the table it names and the
+    // token after the table name. A `DROP` there is an action of that
+    // statement; anywhere else it starts a statement of its own.
+    let mut alter_table: Option<(usize, Option<String>, usize)> = None;
     let mut i = 0;
     while i < sc.toks.len() {
         if sc.is_punct(i, '(') {
@@ -424,32 +493,37 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
             i += 1;
             continue;
         }
-        if depth == 0 && sc.is_punct(i, ';') {
-            alter_table = None;
-        }
         if depth > 0 || sc.toks[i].kind != Kind::Word {
             i += 1;
             continue;
         }
 
         if sc.is_kw(i, "ALTER") && sc.is_kw(i + 1, "TABLE") {
-            let table = sc.name(i + 2).map(|(n, _, _)| n);
-            alter_table = Some((i, table));
+            let named = sc.name(i + 2);
+            let after = named.as_ref().map_or(i + 2, |n| n.2);
+            alter_table = Some((i, named.map(|n| n.0), after));
             i += 2;
             continue;
         }
 
         if sc.is_kw(i, "EXEC") || sc.is_kw(i, "EXECUTE") {
-            alter_table = None;
-            if level < MAX_DYNAMIC_LEVEL {
-                if let Some(inner) = dynamic_sql(&sc, i + 1) {
+            if let Some(inner) = dynamic_sql(&sc, i + 1) {
+                let line = base_line + sc.toks[i].line;
+                if level < MAX_DYNAMIC_LEVEL {
                     let mut found = Vec::new();
                     analyze_batch(&inner, 0, level + 1, &mut found);
-                    let line = base_line + sc.toks[i].line;
                     for mut f in found {
                         f.line = line;
                         out.push(f);
                     }
+                } else if first_dangerous_word(&inner).is_some() {
+                    // Too deep to analyze, but not safe to ignore.
+                    out.push(GuardFinding {
+                        kind: GuardKind::Unparsed,
+                        object: None,
+                        statement: truncate_statement(&inner),
+                        line,
+                    });
                 }
             }
             i += 1;
@@ -459,33 +533,23 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         let is_dml = sc.is_kw(i, "UPDATE") || sc.is_kw(i, "DELETE");
         let is_start = is_dml || sc.is_kw(i, "TRUNCATE") || sc.is_kw(i, "DROP");
         if !is_start {
-            if alter_table.is_some()
-                && sc.is_any_kw(
-                    i,
-                    &[
-                        "SELECT", "INSERT", "MERGE", "CREATE", "DECLARE", "IF", "ELSE", "WHILE",
-                        "BEGIN", "END", "RETURN", "PRINT", "USE", "GRANT",
-                    ],
-                )
-            {
-                alter_table = None;
-            }
             i += 1;
             continue;
         }
-        alter_table = if sc.is_kw(i, "DROP") {
-            alter_table
-        } else {
-            None
-        };
 
+        // `ON DELETE CASCADE` and friends are foreign key actions, but a bare
+        // `ON` ends statements like `SET NOCOUNT ON`.
+        let fk_action = sc.is_kw(i.wrapping_sub(1), "ON")
+            && (sc.is_any_kw(i + 1, &["CASCADE", "NO"]) || sc.is_kw(i + 1, "SET"));
         let prev_blocks = i > 0
-            && (sc.is_any_kw(
-                i - 1,
-                &[
-                    "ON", "FOR", "AFTER", "OF", "GRANT", "DENY", "REVOKE", "THEN",
-                ],
-            ) || sc.is_punct(i - 1, ','));
+            && (fk_action
+                || sc.is_any_kw(
+                    i - 1,
+                    &[
+                        "FOR", "AFTER", "BEFORE", "OF", "GRANT", "DENY", "REVOKE", "THEN",
+                    ],
+                )
+                || sc.is_punct(i - 1, ','));
         if is_dml && prev_blocks {
             i += 1;
             continue;
@@ -494,43 +558,77 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
             i += 1;
             continue;
         }
-
-        let (kind, target, start) = if sc.is_kw(i, "UPDATE") {
-            (
-                GuardKind::UpdateWithoutWhere,
-                sc.name(sc.skip_top(i + 1)),
-                i,
+        // `ALTER ROLE r DROP MEMBER m`, `ALTER COLUMN c DROP MASKED` and the
+        // like are not statements of their own.
+        if sc.is_kw(i, "DROP")
+            && sc.is_any_kw(
+                i + 1,
+                &["MEMBER", "MASKED", "ROWGUIDCOL", "PERSISTED", "NOT"],
             )
+        {
+            i += 1;
+            continue;
+        }
+
+        // The object, and whether it is a temporary one nobody will miss.
+        let (kind, object, temp, start) = if sc.is_kw(i, "UPDATE") {
+            let n = sc.name(sc.skip_top(i + 1));
+            let temp = n.as_ref().is_some_and(|n| n.1);
+            (GuardKind::UpdateWithoutWhere, n.map(|n| n.0), temp, i)
         } else if sc.is_kw(i, "DELETE") {
             let mut j = sc.skip_top(i + 1);
             if sc.is_kw(j, "FROM") {
                 j += 1;
             }
-            (GuardKind::DeleteWithoutWhere, sc.name(j), i)
+            let n = sc.name(j);
+            let temp = n.as_ref().is_some_and(|n| n.1);
+            (GuardKind::DeleteWithoutWhere, n.map(|n| n.0), temp, i)
         } else if sc.is_kw(i, "TRUNCATE") {
             let j = if sc.is_kw(i + 1, "TABLE") {
                 i + 2
             } else {
                 i + 1
             };
-            (GuardKind::Truncate, sc.name(j), i)
-        } else if let Some((at, table)) = alter_table.clone() {
-            // Inside `ALTER TABLE`, only dropping a column loses data.
-            if sc.is_any_kw(i + 1, &["CONSTRAINT", "INDEX", "PERIOD"]) {
+            let n = sc.name(j);
+            let temp = n.as_ref().is_some_and(|n| n.1);
+            (GuardKind::Truncate, n.map(|n| n.0), temp, i)
+        } else if let Some((at, table, _)) = alter_table.clone().filter(|(_, _, after)| *after == i)
+        {
+            // An action of `ALTER TABLE`: only dropping a column loses data.
+            if !sc.drops_column(i) {
                 i += 1;
                 continue;
             }
-            let target = table.map(|n| (n, false, 0));
-            (GuardKind::Drop, target, at)
+            (GuardKind::Drop, table, false, at)
         } else {
             let mut j = i + 2;
             if sc.is_kw(j, "IF") && sc.is_kw(j + 1, "EXISTS") {
                 j += 2;
             }
-            (GuardKind::Drop, sc.name(j), i)
+            // `DROP TABLE a, b` drops every name in the list.
+            let mut first = None;
+            let mut unknown = false;
+            loop {
+                match sc.name(j) {
+                    Some((n, temp, next)) => {
+                        if !temp && first.is_none() {
+                            first = Some(n);
+                        }
+                        j = next;
+                        if sc.is_punct(j, ',') {
+                            j += 1;
+                            continue;
+                        }
+                    }
+                    None => unknown = true,
+                }
+                break;
+            }
+            let all_temp = first.is_none() && !unknown;
+            (GuardKind::Drop, first, all_temp, i)
         };
 
-        if target.as_ref().is_some_and(|(_, temp, _)| *temp) {
+        if temp {
             i += 1;
             continue;
         }
@@ -545,7 +643,7 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
             let statement = &text[sc.toks[start].start..sc.toks[last].end];
             out.push(GuardFinding {
                 kind,
-                object: target.map(|(n, _, _)| n),
+                object,
                 statement: truncate_statement(statement),
                 line: base_line + sc.toks[start].line,
             });
@@ -558,16 +656,31 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
 /// of `sp_executesql`, when it is made only of string literals joined by `+`.
 /// `i` is the token after `EXEC`.
 fn dynamic_sql(sc: &Scan, i: usize) -> Option<String> {
-    let (first, parens) = if sc.is_punct(i, '(') {
-        (i + 1, true)
-    } else if sc.is_kw(i, "sp_executesql") {
-        (i + 1, false)
-    } else if sc.is_name_part(i) && sc.is_punct(i + 1, '.') && sc.is_kw(i + 2, "sp_executesql") {
-        (i + 3, false)
+    let mut j = i;
+    let parens = sc.is_punct(j, '(');
+    if parens {
+        j += 1;
     } else {
-        return None;
-    };
-    let mut j = first;
+        // `EXEC @rc = [schema.]sp_executesql [@stmt =] N'...'`
+        if sc.toks.get(j).is_some_and(|t| t.kind == Kind::Var) && sc.is_punct(j + 1, '=') {
+            j += 2;
+        }
+        let (name, _, next) = sc.name(j)?;
+        let last = name.rsplit('.').next().unwrap_or("");
+        if !last
+            .trim_matches(['[', ']'])
+            .eq_ignore_ascii_case("sp_executesql")
+        {
+            return None;
+        }
+        j = next;
+        if sc.toks.get(j).is_some_and(|t| t.kind == Kind::Var)
+            && sc.src(j).eq_ignore_ascii_case("@stmt")
+            && sc.is_punct(j + 1, '=')
+        {
+            j += 2;
+        }
+    }
     let mut sql = String::new();
     loop {
         let t = sc.toks.get(j)?;
@@ -684,6 +797,65 @@ mod tests {
                 &[(UpdateWithoutWhere, Some("t"))],
             ),
             (
+                "SET NOCOUNT ON\nDELETE FROM dbo.Pedidos",
+                &[(DeleteWithoutWhere, Some("dbo.Pedidos"))],
+            ),
+            (
+                "SET XACT_ABORT ON\nDELETE FROM t",
+                &[(DeleteWithoutWhere, Some("t"))],
+            ),
+            (
+                "SET STATISTICS IO ON\nDELETE FROM t",
+                &[(DeleteWithoutWhere, Some("t"))],
+            ),
+            (
+                "ALTER DATABASE db SET READ_COMMITTED_SNAPSHOT ON\nDELETE FROM t",
+                &[(DeleteWithoutWhere, Some("t"))],
+            ),
+            (
+                "EXEC sp_executesql N'SET NOCOUNT ON DELETE FROM t'",
+                &[(DeleteWithoutWhere, Some("t"))],
+            ),
+            (
+                "ALTER TABLE t ADD c int\nDROP INDEX ix ON u",
+                &[(Drop, Some("ix"))],
+            ),
+            (
+                "ALTER TABLE t ADD c int\nDROP TABLE u",
+                &[(Drop, Some("u"))],
+            ),
+            ("DROP TABLE #a, dbo.Real", &[(Drop, Some("dbo.Real"))]),
+            (
+                "DROP TABLE IF EXISTS #a, dbo.Real",
+                &[(Drop, Some("dbo.Real"))],
+            ),
+            (
+                "ALTER TABLE t DROP CONSTRAINT df_c, COLUMN c",
+                &[(Drop, Some("t"))],
+            ),
+            (
+                "EXEC sp_executesql @stmt = N'DELETE FROM t'",
+                &[(DeleteWithoutWhere, Some("t"))],
+            ),
+            (
+                "EXEC @rc = sp_executesql N'DELETE FROM t'",
+                &[(DeleteWithoutWhere, Some("t"))],
+            ),
+            (
+                "EXEC master.sys.sp_executesql N'DELETE FROM t'",
+                &[(DeleteWithoutWhere, Some("t"))],
+            ),
+            ("EXEC('EXEC(''DELETE FROM t'')')", &[(Unparsed, None)]),
+            (
+                "DELETE TOP (10) PERCENT FROM t",
+                &[(DeleteWithoutWhere, Some("t"))],
+            ),
+            (
+                "DELETE TOP (10) WITH TIES FROM t",
+                &[(DeleteWithoutWhere, Some("t"))],
+            ),
+            ("SELECT 1DROP TABLE t", &[(Drop, Some("t"))]),
+            (
                 "DELETE FROM a; DELETE FROM b WHERE x = 1; DELETE FROM c",
                 &[
                     (DeleteWithoutWhere, Some("a")),
@@ -703,7 +875,6 @@ mod tests {
                 "EXEC sys.sp_executesql N'DELETE ' + N'FROM t'",
                 &[(DeleteWithoutWhere, Some("t"))],
             ),
-            ("EXEC('EXEC(''DELETE FROM t'')')", &[]),
         ];
         for (sql, w) in cases {
             assert_eq!(kinds(sql), want(w), "{sql}");
@@ -729,6 +900,14 @@ mod tests {
             "ALTER TABLE t DROP CONSTRAINT fk_a",
             "MERGE t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = s.a WHEN NOT MATCHED BY SOURCE THEN DELETE;",
             "EXEC(@sql)",
+            "ALTER ROLE r DROP MEMBER bob",
+            "ALTER TABLE t ALTER COLUMN c DROP MASKED",
+            "ALTER TABLE t ALTER COLUMN c DROP ROWGUIDCOL",
+            "ALTER TABLE t ALTER COLUMN c DROP PERSISTED",
+            "DROP TABLE #a, #b",
+            "ALTER TABLE t DROP CONSTRAINT a, b",
+            "ALTER TABLE t ADD CONSTRAINT f FOREIGN KEY (a) REFERENCES u(id) ON DELETE SET NULL ON UPDATE NO ACTION",
+            "CREATE SECURITY POLICY p ADD BLOCK PREDICATE f(a) ON t BEFORE DELETE",
         ] {
             assert_eq!(kinds(sql), vec![], "{sql}");
         }
