@@ -5,7 +5,7 @@
   import { t } from "./lib/i18n/t";
   import Rail from "./lib/shell/Rail.svelte";
   import StatusBar from "./lib/shell/StatusBar.svelte";
-  import { loadSession, saveSession, type ConnectionConfig, type ParsedConnection } from "./lib/ipc";
+  import { loadSession, onAppEvent, saveSession, type ConnectionConfig, type ParsedConnection } from "./lib/ipc";
   import ConnectionDialog from "./lib/connections/ConnectionDialog.svelte";
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
   import TransactionDialog from "./lib/tabs/TransactionDialog.svelte";
@@ -22,6 +22,7 @@
   import { zoom } from "./lib/zoom.svelte";
   import { prefs } from "./lib/settings/prefs.svelte";
   import { tabs } from "./lib/tabs/tabs.svelte";
+  import { runLog, showRunLog } from "./lib/runlog/runlog.svelte";
   import Settings from "./lib/settings/Settings.svelte";
   import Workspace from "./lib/workspace/Workspace.svelte";
   import { parseSession, restore } from "./lib/workspace/session";
@@ -46,6 +47,10 @@
   const activePane = $derived(tabs.activePane);
 
   void explorer.init();
+  // Every finished run, of any tab, joins the Run log.
+  void onAppEvent((e) => {
+    if (e.kind === "runLogged") runLog.prepend(e.entry);
+  }).catch(() => {});
   void queries.reload();
   void connections.loadStartupError();
   zoom.init();
@@ -142,6 +147,7 @@
     // Any other icon acts on the workspace, which Settings covers.
     closeSettings(false);
     if (key === "rail.search") palette.show();
+    if (key === "rail.log") showRunLog();
     if (key !== "rail.explorer" && key !== "rail.saved") return;
     if (!explorerHidden && leftPanel !== key) leftPanel = key;
     else {

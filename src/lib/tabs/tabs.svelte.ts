@@ -1,6 +1,6 @@
 import { t } from "../i18n/t";
 import * as ipc from "../ipc";
-import type { ConnectionConfig, FileEncoding, LineEnding } from "../ipc";
+import type { ConnectionConfig, FileEncoding, LineEnding, RunLogEntry } from "../ipc";
 import { connections } from "../connections/store.svelte";
 import { queries, type NameRequest } from "../queries/queries.svelte";
 import { ENVIRONMENTS } from "../connections/env";
@@ -289,6 +289,25 @@ export class TabsStore {
       const conn = connections.list.find((c) => c.id === spec.connectionId);
       if (conn) void this.connectTab(id, conn, undefined, spec.database);
     }
+    return id;
+  }
+
+  /**
+   * Opens a run of the Run log in a new tab: its text, bound to the connection and database it ran
+   * on. Nothing connects until the user runs it, as with a restored tab. A connection that was
+   * deleted since leaves the tab unbound, with a notice.
+   */
+  openFromRunLog(entry: RunLogEntry): string {
+    const id = `tab-${crypto.randomUUID()}`;
+    const pane = new PaneState(id);
+    pane.initialDoc = entry.sql;
+    if (connections.list.some((c) => c.id === entry.connectionId)) {
+      pane.connectionId = entry.connectionId;
+      pane.database = entry.database;
+    } else {
+      pane.notice = t("runlog.connectionGone");
+    }
+    this.add({ id, kind: "query", title: `untitled-${++this.counter}`, pane, connectError: null, dirty: false });
     return id;
   }
 
