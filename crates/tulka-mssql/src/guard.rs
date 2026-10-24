@@ -425,6 +425,11 @@ impl Scan<'_> {
                         if self.toks.get(j + 1).is_some_and(|t| t.kind == Kind::Word) {
                             return (j, where_seen);
                         }
+                    } else if self.is_kw(j, "IF")
+                        && self.is_kw(j + 1, "EXISTS")
+                        && !self.is_punct(j + 2, '(')
+                    {
+                        // `IF EXISTS` of a DROP; `IF EXISTS (...)` is a condition.
                     } else if self.is_any_kw(j, OPENERS) {
                         return (j, where_seen);
                     }
@@ -563,7 +568,15 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         if sc.is_kw(i, "DROP")
             && sc.is_any_kw(
                 i + 1,
-                &["MEMBER", "MASKED", "ROWGUIDCOL", "PERSISTED", "NOT"],
+                &[
+                    "MEMBER",
+                    "MASKED",
+                    "ROWGUIDCOL",
+                    "PERSISTED",
+                    "HIDDEN",
+                    "SPARSE",
+                    "NOT",
+                ],
             )
         {
             i += 1;
@@ -854,6 +867,14 @@ mod tests {
                 "DELETE TOP (10) WITH TIES FROM t",
                 &[(DeleteWithoutWhere, Some("t"))],
             ),
+            (
+                "ALTER TABLE t DROP CONSTRAINT IF EXISTS df_c, COLUMN c",
+                &[(Drop, Some("t"))],
+            ),
+            (
+                "ALTER TABLE dbo.Pedidos DROP CONSTRAINT IF EXISTS DF_Pedidos_Estado, COLUMN IF EXISTS Estado",
+                &[(Drop, Some("dbo.Pedidos"))],
+            ),
             ("SELECT 1DROP TABLE t", &[(Drop, Some("t"))]),
             (
                 "DELETE FROM a; DELETE FROM b WHERE x = 1; DELETE FROM c",
@@ -904,12 +925,26 @@ mod tests {
             "ALTER TABLE t ALTER COLUMN c DROP MASKED",
             "ALTER TABLE t ALTER COLUMN c DROP ROWGUIDCOL",
             "ALTER TABLE t ALTER COLUMN c DROP PERSISTED",
+            "ALTER TABLE t ALTER COLUMN c DROP HIDDEN",
+            "ALTER TABLE t ALTER COLUMN c DROP SPARSE",
             "DROP TABLE #a, #b",
             "ALTER TABLE t DROP CONSTRAINT a, b",
             "ALTER TABLE t ADD CONSTRAINT f FOREIGN KEY (a) REFERENCES u(id) ON DELETE SET NULL ON UPDATE NO ACTION",
             "CREATE SECURITY POLICY p ADD BLOCK PREDICATE f(a) ON t BEFORE DELETE",
         ] {
             assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+    }
+
+    #[test]
+    fn keeps_the_whole_statement_text() {
+        for sql in [
+            "DROP TABLE IF EXISTS dbo.t",
+            "ALTER TABLE [dbo].[My T] DROP COLUMN IF EXISTS c",
+        ] {
+            let f = findings(sql);
+            assert_eq!(f.len(), 1, "{sql}");
+            assert_eq!(f[0].statement, sql);
         }
     }
 
