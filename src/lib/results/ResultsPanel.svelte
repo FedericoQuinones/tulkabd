@@ -97,6 +97,8 @@
     if (view) applyFilter(view, "");
   }
 
+  const viewPending = $derived((void viewVersion, view?.pending ?? false));
+
   const shown = $derived.by(() => {
     void viewVersion;
     if (!view || !result || view.visible === null || !isFiltered(view.applied)) return null;
@@ -121,7 +123,8 @@
   });
 
   async function copy(mode: "excel" | "ai") {
-    if (active === "messages" || !result || copying) return;
+    // While a view is on its way, the selection's row indexes may belong to either order.
+    if (active === "messages" || !result || copying || viewPending) return;
     const sel = grid?.getSelection() ?? null;
     const run = pane.runCount;
     copying = true;
@@ -180,8 +183,8 @@
     {#if pane.summary}
       <span class="meta num">{t("results.elapsed", { ms: count(pane.summary.elapsedMs) })}{finishedAt ? ` · ${finishedAt}` : ""}</span>
     {/if}
-    <button type="button" class="ghost" disabled={!result} onclick={() => copy("excel")}>{t("results.copy")}</button>
-    <button type="button" class="ghost" disabled={!result} onclick={() => copy("ai")}>{t("results.copyAi")}</button>
+    <button type="button" class="ghost" disabled={!result || viewPending} onclick={() => copy("excel")}>{t("results.copy")}</button>
+    <button type="button" class="ghost" disabled={!result || viewPending} onclick={() => copy("ai")}>{t("results.copyAi")}</button>
   </div>
   <div class="body">
     {#if active === "messages" || !result}

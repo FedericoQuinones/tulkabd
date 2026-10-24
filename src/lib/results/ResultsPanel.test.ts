@@ -268,3 +268,24 @@ test("Filter by this value from the keyboard gives the focus back to the grid", 
   expect(ipc.setResultView).toHaveBeenCalledTimes(1);
   expect(document.activeElement).toBe(grid());
 });
+
+test("nothing is copied while a view is on its way", async () => {
+  let release!: (n: number) => void;
+  vi.mocked(ipc.setResultView).mockImplementationOnce(() => new Promise((r) => (release = r)));
+  open();
+  await settle();
+  sortButton("id").click();
+  await settle();
+  const copyButton = [...document.querySelectorAll<HTMLButtonElement>("button.ghost")].find((b) => b.textContent === "Copy")!;
+  expect(copyButton.disabled).toBe(true);
+  grid().dispatchEvent(new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true, cancelable: true }));
+  copyButton.click();
+  await settle();
+  expect(ipc.copyResults).not.toHaveBeenCalled();
+  release(20);
+  await settle();
+  expect(copyButton.disabled).toBe(false);
+  grid().dispatchEvent(new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true, cancelable: true }));
+  await settle();
+  expect(ipc.copyResults).toHaveBeenCalledTimes(1);
+});
