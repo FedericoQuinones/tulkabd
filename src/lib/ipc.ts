@@ -94,6 +94,19 @@ export interface CopyOutcome {
   rows: number;
   tokens: number;
 }
+/** A filter on one column of a result; filters combine with AND. */
+export type ColumnFilter =
+  | { kind: "isNull"; column: number }
+  | { kind: "notNull"; column: number }
+  /** Exact text (case-sensitive); numbers also match with thousands separators; NULL never. */
+  | { kind: "equals"; column: number; text: string };
+/** How a received result is shown: filtered, then sorted (stable). All empty = rows as received. */
+export interface ViewSpec {
+  sort: { column: number; descending: boolean } | null;
+  /** Substring of the cell text as the grid shows it, in any column, ignoring case. */
+  text: string | null;
+  columns: ColumnFilter[];
+}
 
 export type ObjectKind = "table" | "view" | "procedure";
 export interface DbObject {
@@ -250,6 +263,13 @@ export const cancelQuery = (tabId: string) => invoke<void>("cancel_query", { tab
  */
 export const fetchRows = (tabId: string, resultIndex: number, offset: number, limit: number) =>
   invoke<Value[][]>("fetch_rows", { tabId, resultIndex, offset, limit });
+
+/**
+ * Sorts and filters a received result without rerunning it; returns the visible row count.
+ * `fetchRows` and `copyResults` then use visible-row indexes. Fails with "busy" while the tab runs.
+ */
+export const setResultView = (tabId: string, resultIndex: number, view: ViewSpec) =>
+  invoke<number>("set_result_view", { tabId, resultIndex, view });
 
 export const copyResults = (
   tabId: string,

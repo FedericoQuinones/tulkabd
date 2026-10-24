@@ -14,7 +14,9 @@ use tulka_core::{
 };
 
 use crate::connections::{blocking, connect_params, resolve_password};
-use crate::results::{display_cell, ResultBuffer, Selection, CELLS_CAPPED_WARNING, MAX_ROWS};
+use crate::results::{
+    display_cell, ResultBuffer, Selection, ViewSpec, CELLS_CAPPED_WARNING, MAX_ROWS,
+};
 use crate::state::{AppState, SharedBuffer, TabState, Tabs};
 use crate::types::{
     Clipboard, CopyMode, CopyOutcome, RunOutcome, RunSummary, SessionInfo, UiEvent, BUSY, CLOSED,
@@ -225,10 +227,10 @@ pub async fn cancel_query(state: &AppState, tab_id: String) -> Result<(), String
     }
 }
 
-/// Up to `limit` (at most 1000) rows of a result, from `offset`, in display
-/// form: long text and binary cells are shortened (see [`display_cell`]).
-/// Works while the result is still streaming: rows below the last `RowCount`
-/// total are always there.
+/// Up to `limit` (at most 1000) visible rows of a result (see
+/// [`set_result_view`]), from `offset`, in display form: long text and
+/// binary cells are shortened (see [`display_cell`]). Works while the result
+/// is still streaming: rows below the last `RowCount` total are always there.
 pub async fn fetch_rows(
     state: &AppState,
     tab_id: String,
@@ -243,6 +245,38 @@ pub async fn fetch_rows(
         .iter()
         .map(|row| row.iter().map(display_cell).collect())
         .collect())
+}
+
+/// Sorts and filters the rows of a result already received, without running
+/// the query again; returns how many rows are visible. `fetch_rows` and
+/// `copy_results` then read the visible rows, in their order (row indexes
+/// are of visible rows). An empty `view` goes back to the rows as received;
+/// a new run starts without a view. Fails with `"busy"` while the tab runs a
+/// query, since its results may still be receiving rows. Runs on a blocking
+/// thread.
+pub async fn set_result_view(
+    state: &AppState,
+    tab_id: String,
+    result_index: u32,
+    view: ViewSpec,
+) -> Result<usize, String> {
+    let buffer = {
+        let tabs = state.tabs();
+        let tab = tabs.open.get(&tab_id).ok_or_else(no_session)?;
+        if tab.cancel.is_some() {
+            return Err(BUSY.into());
+        }
+        result_in(tab, result_index)?
+    };
+    blocking(move || {
+        let mut buffer = buffer.blocking_write();
+        if let Some(column) = view.columns_used().find(|&c| c >= buffer.columns.len()) {
+            return Err(format!("column {column} does not exist"));
+        }
+        buffer.set_view(&view);
+        Ok(buffer.visible_len())
+    })
+    .await?
 }
 
 /// Copies (part of) a result to the clipboard as Excel TSV or in the
@@ -320,12 +354,11 @@ async fn cancel_running(tab: Option<TabState>) {
 
 /// The buffer of a result, shared so it is read without the tabs lock.
 fn result_of(state: &AppState, tab_id: &str, index: u32) -> Result<SharedBuffer, String> {
-    state
-        .tabs()
-        .open
-        .get(tab_id)
-        .ok_or_else(no_session)?
-        .results
+    result_in(state.tabs().open.get(tab_id).ok_or_else(no_session)?, index)
+}
+
+fn result_in(tab: &TabState, index: u32) -> Result<SharedBuffer, String> {
+    tab.results
         .get(index as usize)
         .cloned()
         .ok_or_else(|| format!("result {index} does not exist"))

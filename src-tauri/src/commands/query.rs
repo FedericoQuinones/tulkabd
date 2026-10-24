@@ -6,6 +6,7 @@ use tauri::{AppHandle, State};
 use tulka_app::tulka_core::Value;
 use tulka_app::{
     AppState, Clipboard, CopyMode, CopyOutcome, RunSummary, Selection, SessionInfo, UiEvent,
+    ViewSpec,
 };
 
 #[tauri::command]
@@ -56,6 +57,16 @@ pub async fn fetch_rows(
     limit: usize,
 ) -> Result<Vec<Vec<Value>>, String> {
     tulka_app::fetch_rows(&state, tab_id, result_index, offset, limit).await
+}
+
+#[tauri::command]
+pub async fn set_result_view(
+    state: State<'_, AppState>,
+    tab_id: String,
+    result_index: u32,
+    view: ViewSpec,
+) -> Result<usize, String> {
+    tulka_app::set_result_view(&state, tab_id, result_index, view).await
 }
 
 #[tauri::command]

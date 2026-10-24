@@ -14,7 +14,9 @@ const AI_MAX_BYTES: usize = 32;
 
 /// Tab-separated text for pasting into Excel: `\r\n` line endings, numbers
 /// with `decimal` as the decimal separator and no thousands separator.
-pub fn to_excel_tsv(columns: &[Column], rows: &[Vec<Value>], decimal: char) -> String {
+///
+/// `rows` are `Vec<Value>`s or borrowed `&[Value]`s.
+pub fn to_excel_tsv<R: AsRef<[Value]>>(columns: &[Column], rows: &[R], decimal: char) -> String {
     let mut out = String::new();
     write_line(
         &mut out,
@@ -25,7 +27,7 @@ pub fn to_excel_tsv(columns: &[Column], rows: &[Vec<Value>], decimal: char) -> S
     for row in rows {
         write_line(
             &mut out,
-            row.iter().map(|v| excel_cell(v, decimal)),
+            row.as_ref().iter().map(|v| excel_cell(v, decimal)),
             '\t',
             "\r\n",
         );
@@ -35,7 +37,7 @@ pub fn to_excel_tsv(columns: &[Column], rows: &[Vec<Value>], decimal: char) -> S
 
 /// Compact text for pasting into an LLM prompt: headers once, `\n` line
 /// endings, numbers with `.` and no trailing zeros.
-pub fn to_ai(columns: &[Column], rows: &[Vec<Value>]) -> String {
+pub fn to_ai<R: AsRef<[Value]>>(columns: &[Column], rows: &[R]) -> String {
     let mut out = String::new();
     write_line(
         &mut out,
@@ -44,7 +46,12 @@ pub fn to_ai(columns: &[Column], rows: &[Vec<Value>]) -> String {
         "\n",
     );
     for row in rows {
-        write_line(&mut out, row.iter().map(ai_cell), AI_SEPARATOR, "\n");
+        write_line(
+            &mut out,
+            row.as_ref().iter().map(ai_cell),
+            AI_SEPARATOR,
+            "\n",
+        );
     }
     out
 }
@@ -301,8 +308,9 @@ mod tests {
 
     #[test]
     fn empty_result_is_header_only() {
-        assert_eq!(to_ai(&cols(&["a", "b"]), &[]), "a|b\n");
-        assert_eq!(to_excel_tsv(&cols(&["a", "b"]), &[], '.'), "a\tb\r\n");
+        let none: &[Vec<Value>] = &[];
+        assert_eq!(to_ai(&cols(&["a", "b"]), none), "a|b\n");
+        assert_eq!(to_excel_tsv(&cols(&["a", "b"]), none, '.'), "a\tb\r\n");
     }
 
     #[test]

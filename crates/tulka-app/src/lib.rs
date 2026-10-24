@@ -41,12 +41,13 @@ pub use queries::{
     rename_saved_query, save_query, saved_query_path, QueriesStore,
 };
 pub use query::{
-    cancel_query, close_session, copy_results, fetch_rows, open_session, run_query, use_database,
-    MAX_FETCH_ROWS,
+    cancel_query, close_session, copy_results, fetch_rows, open_session, run_query,
+    set_result_view, use_database, MAX_FETCH_ROWS,
 };
 pub use results::{
-    cap_cell, display_cell, ResultBuffer, Selection, CELLS_CAPPED_WARNING, DISPLAY_BYTES,
-    DISPLAY_TEXT_CHARS, MAX_CELL_BYTES, MAX_ROWS,
+    cap_cell, cell_matches, compare_values, display_cell, ColumnFilter, ResultBuffer, Selection,
+    SortSpec, ViewSpec, CELLS_CAPPED_WARNING, DISPLAY_BYTES, DISPLAY_TEXT_CHARS, MAX_CELL_BYTES,
+    MAX_ROWS,
 };
 pub use session::{load_session, save_session};
 pub use state::{AppState, SharedBuffer, TabState};

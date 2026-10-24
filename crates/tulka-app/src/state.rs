@@ -19,10 +19,13 @@
 //! `cancel_query` clones it under the lock and cancels after releasing it.
 //! Each result buffer sits behind its own `Arc<tokio::sync::RwLock<_>>`: the
 //! tabs lock is held only to clone that `Arc`, then rows are appended (one
-//! chunk of at most 500 rows per write), read by `fetch_rows`, or formatted by
-//! `copy_results` on a blocking thread, under the buffer's own lock. So
-//! `fetch_rows` and `copy_results` see the rows already received while the
-//! run goes on, and a large copy never blocks other tabs or the runtime.
+//! chunk of at most 500 rows per write), read by `fetch_rows`, formatted by
+//! `copy_results` or sorted and filtered by `set_result_view` (both on a
+//! blocking thread), under the buffer's own lock. So `fetch_rows` and
+//! `copy_results` see the rows already received while the run goes on, and a
+//! large copy or sort never blocks other tabs or the runtime.
+//! `set_result_view` fails with `"busy"` while the tab runs (`cancel` is
+//! `Some`), so a view never changes under rows still arriving.
 //!
 //! `close_session` removes the tab, records when it was closed and cancels a
 //! running query; `open_session` replaces the tab (cancelling a run on the old

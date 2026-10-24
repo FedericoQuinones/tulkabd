@@ -987,6 +987,136 @@ async fn large_cells_are_capped_with_one_warning_and_trimmed_for_display() {
     assert!(!events.iter().any(|e| matches!(e, UiEvent::Message { .. })));
 }
 
+fn sort_by(column: usize, descending: bool) -> ViewSpec {
+    ViewSpec {
+        sort: Some(SortSpec { column, descending }),
+        ..ViewSpec::default()
+    }
+}
+
+#[tokio::test]
+async fn result_view_orders_fetch_and_copy() {
+    let (f, _) = connected("t1").await;
+    let (result, _) = run(&f.state, "t1", "rows 4").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    let visible = set_result_view(&f.state, "t1".into(), 0, sort_by(0, true))
+        .await
+        .unwrap();
+    assert_eq!(visible, 4);
+
+    let rows = fetch_rows(&f.state, "t1".into(), 0, 1, 2).await.unwrap();
+    assert_eq!(rows, vec![fake_row(2), fake_row(1)]);
+
+    let clipboard = Arc::new(FakeClipboard::default());
+    let out = copy_results(
+        &f.state,
+        "t1".into(),
+        0,
+        CopyMode::Excel,
+        Selection::All,
+        clipboard.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.rows, 4);
+    let reversed: Vec<_> = (0..4).rev().map(fake_row).collect();
+    let expected = to_excel_tsv(&fake_columns(), &reversed, system_decimal_separator());
+    assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+
+    // A filter copies only the visible rows.
+    let filter = ViewSpec {
+        text: Some("ROW\t2".into()),
+        ..ViewSpec::default()
+    };
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 0, filter)
+            .await
+            .unwrap(),
+        1
+    );
+    let out = copy_results(
+        &f.state,
+        "t1".into(),
+        0,
+        CopyMode::Ai,
+        Selection::All,
+        clipboard.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.rows, 1);
+    let expected = to_ai(&fake_columns(), &[fake_row(2)]);
+    assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+
+    // An empty spec gives back the original order.
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 0, ViewSpec::default())
+            .await
+            .unwrap(),
+        4
+    );
+    let rows = fetch_rows(&f.state, "t1".into(), 0, 0, 10).await.unwrap();
+    assert_eq!(rows, (0..4).map(fake_row).collect::<Vec<_>>());
+
+    // A new run starts without a view.
+    set_result_view(&f.state, "t1".into(), 0, sort_by(0, true))
+        .await
+        .unwrap();
+    run(&f.state, "t1", "rows 3").await.0.unwrap();
+    let rows = fetch_rows(&f.state, "t1".into(), 0, 0, 10).await.unwrap();
+    assert_eq!(rows, (0..3).map(fake_row).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn result_view_rejects_unknown_columns_and_results() {
+    let (f, _) = connected("t1").await;
+    run(&f.state, "t1", "rows 2").await.0.unwrap();
+    assert!(set_result_view(&f.state, "t1".into(), 0, sort_by(3, false))
+        .await
+        .is_err());
+    let filter = ViewSpec {
+        columns: vec![ColumnFilter::IsNull { column: 9 }],
+        ..ViewSpec::default()
+    };
+    assert!(set_result_view(&f.state, "t1".into(), 0, filter)
+        .await
+        .is_err());
+    assert!(set_result_view(&f.state, "t1".into(), 1, sort_by(0, false))
+        .await
+        .is_err());
+    assert!(
+        set_result_view(&f.state, "nope".into(), 0, sort_by(0, false))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn result_view_is_busy_while_rows_arrive() {
+    let (f, _) = connected("t1").await;
+    let (sink, mut rx) = streamer();
+    let state = f.state.clone();
+    let running =
+        tokio::spawn(
+            async move { run_query(&state, "t1".into(), "rows 700; wait".into(), sink).await },
+        );
+    wait_for_total(&mut rx, 700).await;
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 0, sort_by(0, true)).await,
+        Err(BUSY.to_string())
+    );
+    cancel_query(&f.state, "t1".into()).await.unwrap();
+    tokio::time::timeout(TIMEOUT, running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 0, sort_by(0, true)).await,
+        Ok(700)
+    );
+}
+
 #[tokio::test]
 async fn copy_works_while_the_result_is_streaming() {
     let (f, _) = connected("t1").await;

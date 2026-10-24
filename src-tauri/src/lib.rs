@@ -86,6 +86,7 @@ pub fn run() {
             query::run_query,
             query::cancel_query,
             query::fetch_rows,
+            query::set_result_view,
             query::copy_results,
             query::close_session,
             session::load_session,
