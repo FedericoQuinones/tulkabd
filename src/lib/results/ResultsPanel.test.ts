@@ -290,6 +290,25 @@ test("nothing is copied while a view is on its way", async () => {
   expect(ipc.copyResults).toHaveBeenCalledTimes(1);
 });
 
+test("rows are not fetched while a view is on its way, and fetched again once it is in", async () => {
+  // Two rows of 20: the window stays short, so every `ensure` would fetch it again.
+  let release!: (n: number) => void;
+  vi.mocked(ipc.setResultView).mockImplementationOnce(() => new Promise((r) => (release = r)));
+  open();
+  await settle();
+  const before = vi.mocked(ipc.fetchRows).mock.calls.length;
+  expect(before).toBeGreaterThan(0);
+  sortButton("id").click();
+  await settle();
+  grid().dispatchEvent(new Event("scroll"));
+  await settle();
+  expect(ipc.fetchRows).toHaveBeenCalledTimes(before);
+  release(3);
+  await settle();
+  expect(vi.mocked(ipc.fetchRows).mock.calls.length).toBeGreaterThan(before);
+  expect(vi.mocked(ipc.fetchRows).mock.calls.at(-1)).toEqual([pane.tabId, 0, 0, 200]);
+});
+
 test("the row counter is one live region that stays and only changes its text", async () => {
   vi.useFakeTimers();
   open();
