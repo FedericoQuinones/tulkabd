@@ -9,7 +9,7 @@ use tulka_core::{Column, Value};
 
 /// Most rows kept per result set; the rest of the stream is drained and
 /// dropped, and the buffer is flagged as truncated.
-pub const MAX_ROWS: usize = 100_000;
+pub const MAX_ROWS: usize = tulka_core::MAX_ROWS_DEFAULT as usize;
 
 /// Most bytes kept per text or binary cell; longer values are shortened when
 /// stored (text at a character boundary).

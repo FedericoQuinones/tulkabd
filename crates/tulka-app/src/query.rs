@@ -1,6 +1,7 @@
 //! Sessions per query tab: opening, running scripts, cancelling, reading and
 //! copying results. See [`crate::state`] for the locking scheme.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -207,13 +208,21 @@ where
     // way Stop does.
     let cancel = session.cancel_handle();
     let finished = Notify::new();
+    let done = AtomicBool::new(false);
     let timer = async {
         let limit = Duration::from_secs(u64::from(prefs.query_timeout_s));
         if limit.is_zero() {
             return;
         }
+        // `biased`: if the script ended at the same moment the limit was
+        // reached, it counts as finished and nothing is cancelled or reported.
         tokio::select! {
+            biased;
+            () = finished.notified() => {}
             () = tokio::time::sleep(limit) => {
+                if done.load(Ordering::SeqCst) {
+                    return;
+                }
                 on_event(UiEvent::Message {
                     kind: MessageKind::Warning,
                     text: format!(
@@ -224,11 +233,11 @@ where
                 });
                 let _ = cancel.cancel().await;
             }
-            () = finished.notified() => {}
         }
     };
     let execute = async {
         let result = session.execute(&sql, tx).await;
+        done.store(true, Ordering::SeqCst);
         finished.notify_one();
         result
     };
