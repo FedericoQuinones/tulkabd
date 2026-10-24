@@ -266,7 +266,7 @@ impl Explorer {
         self.attempts().remove(connection_id);
     }
 
-    fn emit(&self, ev: AppEvent) {
+    pub(crate) fn emit(&self, ev: AppEvent) {
         self.events.emit(ev);
     }
 

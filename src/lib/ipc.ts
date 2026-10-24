@@ -236,7 +236,28 @@ export type ExplorerStatus = "connecting" | "connected" | "disconnected" | "erro
 export type AppEvent =
   | { kind: "explorerStatus"; connectionId: string; status: ExplorerStatus; message: string | null }
   | { kind: "indexProgress"; connectionId: string; database: string; done: boolean; noAccess: boolean }
-  | { kind: "indexIdle"; connectionId: string };
+  | { kind: "indexIdle"; connectionId: string }
+  | { kind: "runLogged"; entry: RunLogEntry };
+
+export type RunLogOutcome = "ok" | "error" | "cancelled" | "blocked" | "disconnected";
+/** One statement run, with where it ran when it ran. Text only: never passwords or rows. */
+export interface RunLogEntry {
+  id: number;
+  /** Unix milliseconds, UTC. */
+  atMs: number;
+  connectionId: string;
+  connectionName: string;
+  color: string;
+  database: string;
+  /** At most 100 KB. */
+  sql: string;
+  sqlTruncated: boolean;
+  outcome: RunLogOutcome;
+  /** Rows received, else rows affected; null when neither applies. */
+  rows: number | null;
+  /** Null for a blocked statement and for a cancelled confirmation. */
+  elapsedMs: number | null;
+}
 
 /**
  * Command errors arrive as plain strings. Sentinels: `"password_required"`, `"disconnected"`,
@@ -294,6 +315,16 @@ export const setConnectionGuard = (connectionId: string, level: GuardLevel) =>
 
 /** Ids of the connections whose guard is off until the app closes. */
 export const guardOffForSession = () => invoke<string[]>("guard_off_for_session");
+
+/** Run log entries, newest first. `before` is an entry id to page backwards; `limit` is capped at 500. */
+export const listRunLog = (before: number | null, limit: number) =>
+  invoke<RunLogEntry[]>("list_run_log", { before, limit });
+
+export const clearRunLog = () => invoke<void>("clear_run_log");
+
+/** Records that the user cancelled the confirmation of `sql` on the tab. */
+export const logCancelledRun = (tabId: string, sql: string) =>
+  invoke<void>("log_cancelled_run", { tabId, sql });
 
 export const cancelQuery = (tabId: string) => invoke<void>("cancel_query", { tabId });
 

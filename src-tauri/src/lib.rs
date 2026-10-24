@@ -1,7 +1,9 @@
 mod commands;
 mod events;
 
-use commands::{connections as conn, explorer as ex, files, guard, queries, query, session};
+use commands::{
+    connections as conn, explorer as ex, files, guard, queries, query, runlog, session,
+};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tauri::Manager;
@@ -47,6 +49,15 @@ pub fn run() {
             // on its own thread.
             let events = Arc::new(events::TauriEvents(app.handle().clone()));
             app.manage(AppState::open_default(events));
+            // Old run log entries are pruned a little after startup, so the
+            // first paint does not wait for it.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                tauri::async_runtime::block_on(async {
+                    tulka_app::prune_run_log(&handle.state::<AppState>()).await;
+                });
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -105,6 +116,9 @@ pub fn run() {
             guard::set_guard_off_for_session,
             guard::set_connection_guard,
             guard::guard_off_for_session,
+            runlog::list_run_log,
+            runlog::clear_run_log,
+            runlog::log_cancelled_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

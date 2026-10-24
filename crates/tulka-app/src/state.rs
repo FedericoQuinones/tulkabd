@@ -51,7 +51,7 @@
 //! see [`crate::files`].
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, MutexGuard, PoisonError};
 
 use tokio::sync::{Mutex, RwLock};
@@ -59,7 +59,7 @@ use tulka_core::{
     AppConfig, CancelHandle, ConfigStore, Driver, KeyringStore, SecretStore, Session,
 };
 use tulka_mssql::MssqlDriver;
-use tulka_store::{MetaCache, SessionStore};
+use tulka_store::{MetaCache, RunLogStore, SessionStore};
 
 use crate::explorer::Explorer;
 use crate::files::AllowedFiles;
@@ -92,6 +92,10 @@ pub struct AppState {
     /// Connections whose guard is switched off until the app closes. Only
     /// held for short, non-async critical sections.
     pub(crate) guard_off_session: std::sync::Mutex<HashSet<String>>,
+    /// Every statement run, with where it ran; see [`crate::runlog`].
+    pub(crate) runlog: Arc<RunLogStore>,
+    /// Unix milliseconds of the last prune of the run log.
+    pub(crate) runlog_pruned_ms: AtomicI64,
 }
 
 /// A result buffer shared between the run that fills it and the commands
@@ -148,6 +152,8 @@ impl AppState {
             queries: SavedQueries::unavailable(),
             files: AllowedFiles::default(),
             guard_off_session: std::sync::Mutex::default(),
+            runlog: Arc::new(RunLogStore::in_memory()),
+            runlog_pruned_ms: AtomicI64::new(0),
         })
     }
 
@@ -173,6 +179,8 @@ impl AppState {
             queries: SavedQueries::unavailable(),
             files: AllowedFiles::default(),
             guard_off_session: std::sync::Mutex::default(),
+            runlog: Arc::new(RunLogStore::in_memory()),
+            runlog_pruned_ms: AtomicI64::new(0),
         }
     }
 
@@ -199,6 +207,12 @@ impl AppState {
     /// returns at once.
     pub fn with_queries(mut self, store: QueriesStore) -> Self {
         self.queries = SavedQueries::start(store);
+        self
+    }
+
+    /// Keeps the run log in `store` instead of memory.
+    pub fn with_runlog(mut self, store: Arc<RunLogStore>) -> Self {
+        self.runlog = store;
         self
     }
 
@@ -237,6 +251,7 @@ impl AppState {
             .with_metadata(Arc::new(MetaCache::open_default()), events)
             .with_session(Arc::new(SessionStore::open_default()))
             .with_queries(QueriesStore::open_default())
+            .with_runlog(Arc::new(RunLogStore::open_default()))
     }
 
     /// Fails when the state is read-only.

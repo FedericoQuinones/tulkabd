@@ -10,6 +10,7 @@ pub mod files;
 pub mod guard;
 pub mod queries;
 pub mod query;
+pub mod runlog;
 pub mod session;
 
 /// Writes copied text to the system clipboard through the plugin.

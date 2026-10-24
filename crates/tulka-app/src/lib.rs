@@ -19,6 +19,7 @@ pub mod guard;
 pub mod queries;
 pub mod query;
 pub mod results;
+pub mod runlog;
 pub mod session;
 pub mod state;
 pub mod types;
@@ -54,6 +55,7 @@ pub use results::{
     SortSpec, ViewSpec, CELLS_CAPPED_WARNING, DISPLAY_BYTES, DISPLAY_TEXT_CHARS, MAX_CELL_BYTES,
     MAX_ROWS,
 };
+pub use runlog::{clear_run_log, list_run_log, log_cancelled_run, prune_run_log};
 pub use session::{load_session, save_session};
 pub use state::{AppState, SharedBuffer, TabState};
 pub use types::{

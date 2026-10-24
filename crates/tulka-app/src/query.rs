@@ -12,11 +12,13 @@ use tulka_core::{
     estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, Column, DatabaseScope,
     DriverError, ExecEvent, MessageKind, Session, Value,
 };
+use tulka_store::RunLogOutcome;
 
 use crate::connections::{blocking, connect_params, resolve_password};
 use crate::results::{
     display_cell, ResultBuffer, Selection, ViewSpec, CELLS_CAPPED_WARNING, MAX_ROWS,
 };
+use crate::runlog;
 use crate::state::{AppState, SharedBuffer, TabState, Tabs};
 use crate::types::{
     Clipboard, CopyMode, CopyOutcome, RunOutcome, RunSummary, SessionInfo, UiEvent, BUSY, CLOSED,
@@ -178,9 +180,18 @@ where
     F: Fn(UiEvent) + Send + Sync,
 {
     let generation = match crate::guard::check(state, &tab_id, &sql, confirmed).await? {
-        crate::guard::Verdict::Hold(held) => return Ok(held),
+        crate::guard::Verdict::Hold(held) => {
+            // A refused script is logged; one waiting for confirmation is not
+            // (the confirmation dialog logs its own cancel).
+            if held.outcome == RunOutcome::Blocked {
+                let snap = runlog::snapshot(state, &tab_id).await;
+                runlog::record(state, snap, &sql, RunLogOutcome::Blocked, None, None).await;
+            }
+            return Ok(held);
+        }
         crate::guard::Verdict::Run { generation } => generation,
     };
+    let snap = runlog::snapshot(state, &tab_id).await;
     let (checkout, mut session) = Checkout::take(state, &tab_id, true, Some(generation))?;
     let started = Instant::now();
     let (tx, rx) = mpsc::channel(EVENT_QUEUE);
@@ -192,7 +203,8 @@ where
     };
     // The driver must be polled until `execute` returns, also after a
     // cancel, so both run to completion here.
-    let (result, saw_disconnect) = tokio::join!(session.execute(&sql, tx), forwarder.run(rx));
+    let (result, tally) = tokio::join!(session.execute(&sql, tx), forwarder.run(rx));
+    let saw_disconnect = tally.disconnected;
     let elapsed = started.elapsed();
 
     let outcome = match &result {
@@ -222,8 +234,16 @@ where
     }
 
     checkout.checkin(session, outcome == RunOutcome::Disconnected);
+    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let logged = match outcome {
+        RunOutcome::Ok => RunLogOutcome::Ok,
+        RunOutcome::Cancelled => RunLogOutcome::Cancelled,
+        RunOutcome::Disconnected => RunLogOutcome::Disconnected,
+        _ => RunLogOutcome::Error,
+    };
+    runlog::record(state, snap, &sql, logged, tally.rows(), Some(elapsed_ms)).await;
     Ok(RunSummary {
-        elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        elapsed_ms,
         finished_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         outcome,
         findings: Vec::new(),
@@ -474,6 +494,33 @@ fn new_buffer(columns: Vec<Column>) -> SharedBuffer {
     Arc::new(RwLock::new(ResultBuffer::new(columns, MAX_ROWS)))
 }
 
+/// What a run produced, for the run log.
+#[derive(Default)]
+struct RunTally {
+    /// A `Disconnected` event was seen.
+    disconnected: bool,
+    /// Every row that arrived, also those the buffer dropped for its limit.
+    rows_received: u64,
+    /// The sum of the `RowsAffected` counts.
+    rows_affected: u64,
+    saw_result: bool,
+    saw_affected: bool,
+}
+
+impl RunTally {
+    /// Rows received if any result set came, else rows affected if any
+    /// statement reported them, else nothing.
+    fn rows(&self) -> Option<u64> {
+        if self.saw_result {
+            Some(self.rows_received)
+        } else if self.saw_affected {
+            Some(self.rows_affected)
+        } else {
+            None
+        }
+    }
+}
+
 /// Moves the driver's events to the UI sink and the rows to the buffers.
 struct Forwarder<'a, F> {
     state: &'a AppState,
@@ -483,11 +530,10 @@ struct Forwarder<'a, F> {
 }
 
 impl<F: Fn(UiEvent)> Forwarder<'_, F> {
-    /// Forwards until the driver closes the channel. Returns whether a
-    /// `Disconnected` event was seen.
-    async fn run(&self, mut rx: Receiver<ExecEvent>) -> bool {
+    /// Forwards until the driver closes the channel and tallies what came.
+    async fn run(&self, mut rx: Receiver<ExecEvent>) -> RunTally {
         let mut counter = RowCounter::default();
-        let mut disconnected = false;
+        let mut tally = RunTally::default();
         // The capped-cell warning is shown once per run.
         let mut warned_capped = false;
         loop {
@@ -505,6 +551,8 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
             match ev {
                 ExecEvent::Rows { index, rows } => {
                     let received = rows.len();
+                    tally.saw_result = true;
+                    tally.rows_received += received as u64;
                     if let Some((total, truncated, capped)) = self.push_rows(index, rows).await {
                         counter.rows(index, received, total, truncated, self.emit);
                         if capped && !warned_capped {
@@ -518,6 +566,7 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
                     }
                 }
                 ExecEvent::ResultStart { index, columns } => {
+                    tally.saw_result = true;
                     counter.finish(self.emit);
                     // The buffer exists before the UI hears of the result.
                     self.start_result(index, columns.clone());
@@ -526,7 +575,11 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
                 }
                 other => {
                     counter.flush(self.emit);
-                    disconnected |= matches!(other, ExecEvent::Disconnected { .. });
+                    tally.disconnected |= matches!(other, ExecEvent::Disconnected { .. });
+                    if let ExecEvent::RowsAffected { count } = other {
+                        tally.saw_affected = true;
+                        tally.rows_affected += count;
+                    }
                     if let Some(ev) = UiEvent::from_exec(other) {
                         (self.emit)(ev);
                     }
@@ -534,7 +587,7 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
             }
         }
         counter.finish(self.emit);
-        disconnected
+        tally
     }
 
     /// The buffer of result `index` in this run's tab, created (empty) if
