@@ -10,12 +10,14 @@ vi.mock("../ipc", () => ({
   setConnectionGuard: vi.fn(),
   setGuardOffForSession: vi.fn(),
   logCancelledRun: vi.fn(),
+  getPreferences: vi.fn(),
+  setPreferences: vi.fn(),
 }));
 
 import * as ipc from "../ipc";
 import { PaneState } from "./pane.svelte";
 import { connections } from "../connections/store.svelte";
-import { prefs } from "../settings/prefs.svelte";
+import { DEFAULT_PREFERENCES, prefs } from "../settings/prefs.svelte";
 
 const pane = new PaneState("t1");
 
@@ -275,13 +277,27 @@ test("unbind and close drop the guard prompt, the blocked list and the toast", a
   }
 });
 
-test("a run remembers the row limit it started with", async () => {
-  prefs.value.maxRows = 1_000;
+test("a run remembers the confirmed row limit it started with", async () => {
+  vi.mocked(ipc.getPreferences).mockResolvedValue({ ...DEFAULT_PREFERENCES, maxRows: 1_000 });
+  await prefs.load();
   const r = startRun();
-  prefs.value.maxRows = 500;
+  // A later change does not apply to the run in progress.
+  prefs.value = { ...prefs.value, maxRows: 500 };
   expect(pane.runMaxRows).toBe(1_000);
   r.d.resolve(ok);
   await r.done;
   expect(pane.runMaxRows).toBe(1_000);
-  prefs.value.maxRows = 100_000;
+});
+
+test("a write in flight does not change the limit of a new run", async () => {
+  vi.mocked(ipc.getPreferences).mockResolvedValue({ ...DEFAULT_PREFERENCES, maxRows: 1_000 });
+  await prefs.load();
+  vi.mocked(ipc.setPreferences).mockReturnValue(new Promise(() => {}));
+  void prefs.update({ maxRows: 2_000 });
+  await new Promise((r) => setTimeout(r, 0));
+  expect(prefs.maxRows).toBe(2_000);
+  const r = startRun();
+  expect(pane.runMaxRows).toBe(1_000);
+  r.d.resolve(ok);
+  await r.done;
 });

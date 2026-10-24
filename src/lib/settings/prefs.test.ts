@@ -59,3 +59,27 @@ it("updates reach the backend in call order and the last one stays", async () =>
   expect(sent).toEqual([110, 120]);
   expect(prefs.zoom).toBe(120);
 });
+
+it("a rejected save puts back the last value the backend confirmed", async () => {
+  vi.mocked(ipc.getPreferences).mockResolvedValue({ ...DEFAULT_PREFERENCES, maxRows: 5_000 });
+  await prefs.load();
+  vi.mocked(ipc.setPreferences).mockRejectedValue("read-only");
+  const saving = prefs.update({ maxRows: 9_000 });
+  await expect(saving).rejects.toBeDefined();
+  expect(prefs.maxRows).toBe(5_000);
+  expect(prefs.confirmed.maxRows).toBe(5_000);
+});
+
+it("confirmed lags behind a write in flight", async () => {
+  vi.mocked(ipc.getPreferences).mockResolvedValue({ ...DEFAULT_PREFERENCES, maxRows: 5_000 });
+  await prefs.load();
+  let answer!: (p: typeof DEFAULT_PREFERENCES) => void;
+  vi.mocked(ipc.setPreferences).mockReturnValue(new Promise((r) => (answer = r)));
+  const saving = prefs.update({ maxRows: 9_000 });
+  await new Promise((r) => setTimeout(r, 0));
+  expect(prefs.maxRows).toBe(9_000);
+  expect(prefs.confirmed.maxRows).toBe(5_000);
+  answer({ ...DEFAULT_PREFERENCES, maxRows: 9_000 });
+  await saving;
+  expect(prefs.confirmed.maxRows).toBe(9_000);
+});

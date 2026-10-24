@@ -19,7 +19,9 @@ export const DEFAULT_PREFERENCES: Preferences = {
 
 /** The saved preferences, shared by the whole interface. */
 class PrefsStore {
-  value = $state<Preferences>(structuredClone(DEFAULT_PREFERENCES));
+  #value = $state<Preferences>(structuredClone(DEFAULT_PREFERENCES));
+  // The last preferences the backend answered with (or defaults before the first read).
+  #confirmed: Preferences = structuredClone(DEFAULT_PREFERENCES);
   // Bumped by every update, so a slow `load()` never overwrites a newer change.
   #version = 0;
   // The read in flight, if any: an update waits for it so it never saves defaults over saved values.
@@ -28,6 +30,20 @@ class PrefsStore {
   #loadFailed = false;
   // Writes run one after the other, so they reach the backend in the order they were requested.
   #queue: Promise<unknown> = Promise.resolve();
+
+  /** What the interface shows: includes a change whose save is still in flight. */
+  get value(): Preferences {
+    return this.#value;
+  }
+  /** Replaces the preferences as if the backend had confirmed them (loading, tests). */
+  set value(p: Preferences) {
+    this.#value = p;
+    this.#confirmed = structuredClone($state.snapshot(p) as Preferences);
+  }
+  /** The last values the backend confirmed; use these where a failed save must not leak in. */
+  get confirmed(): Preferences {
+    return this.#confirmed;
+  }
 
   get zoom() {
     return this.value.zoom;
@@ -48,7 +64,9 @@ class PrefsStore {
     const read = getPreferences().then(
       (loaded) => {
         this.#loadFailed = !loaded;
-        if (loaded && version === this.#version) this.value = loaded;
+        if (!loaded) return;
+        if (version === this.#version) this.value = loaded;
+        else this.#confirmed = structuredClone($state.snapshot(loaded) as Preferences);
       },
       () => {
         // Keep the defaults; the app works without saved preferences.
@@ -58,7 +76,7 @@ class PrefsStore {
     this.#loading = read;
     await read;
     if (this.#loading === read) this.#loading = null;
-    return this.value;
+    return this.#value;
   }
 
   /**
@@ -80,11 +98,21 @@ class PrefsStore {
       if (this.#loadFailed) throw new Error("preferences could not be read");
     }
     this.#version++;
-    const next = { ...this.value, ...patch };
-    this.value = next;
+    const next = { ...this.#value, ...patch };
+    this.#value = next;
     const version = this.#version;
-    const kept = await setPreferences(next);
-    if (kept && version === this.#version) this.value = kept;
+    let kept: Preferences;
+    try {
+      kept = await setPreferences(next);
+    } catch (e) {
+      // The change did not reach the backend: show what the backend has.
+      if (version === this.#version) this.#value = structuredClone(this.#confirmed);
+      throw e;
+    }
+    if (kept) {
+      this.#confirmed = structuredClone($state.snapshot(kept) as Preferences);
+      if (version === this.#version) this.#value = kept;
+    }
     return kept;
   }
 }
