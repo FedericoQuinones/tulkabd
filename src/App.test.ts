@@ -26,6 +26,7 @@ import App from "./App.svelte";
 import type { ConnectionConfig } from "./lib/ipc";
 import { connections } from "./lib/connections/store.svelte";
 import { tabs } from "./lib/tabs/tabs.svelte";
+import { DEFAULT_PREFERENCES, prefs } from "./lib/settings/prefs.svelte";
 
 let cmp: ReturnType<typeof mount> | undefined;
 beforeEach(() => {
@@ -169,6 +170,46 @@ test("a saved session that cannot be restored is kept until the user edits somet
     expect(await start(async () => JSON.stringify(ok))).toBe(false);
   } finally {
     autosave.mockRestore();
+    vi.mocked(invoke).mockImplementation(defaultInvoke);
+  }
+});
+
+test("with restore off the saved session is neither restored nor replaced until the user edits", async () => {
+  unmount(cmp!);
+  await tabs.reset();
+  const session = {
+    version: 1,
+    layout: { kind: "group", id: "g1" },
+    activeGroupId: "g1",
+    groups: { g1: { tabIds: ["t1"], activeId: "t1" } },
+    tabs: [{ id: "t1", kind: "query", title: "untitled-9", connectionId: null, database: null, text: "SELECT kept", dirty: false }],
+  };
+  const defaultInvoke = vi.mocked(invoke).getMockImplementation()!;
+  const autosave = vi.spyOn(tabs, "startAutosave");
+  const start = async (restoreSession: boolean) => {
+    autosave.mockClear();
+    vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === "get_preferences") return { ...DEFAULT_PREFERENCES, restoreSession };
+      if (cmd === "load_session") return JSON.stringify(session);
+      return defaultInvoke(cmd, args as never);
+    });
+    cmp = mount(App, { target: document.body });
+    flushSync();
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    const titles = [...document.querySelectorAll('.group [role="tab"]')].map((x) => x.textContent!.trim());
+    const hold = autosave.mock.calls[0][1]?.holdUntilEdit === true;
+    unmount(cmp);
+    cmp = undefined;
+    await tabs.reset();
+    return { titles, hold };
+  };
+  try {
+    expect(await start(false)).toEqual({ titles: [], hold: true });
+    expect(await start(true)).toEqual({ titles: ["untitled-9"], hold: false });
+  } finally {
+    autosave.mockRestore();
+    prefs.value = structuredClone(DEFAULT_PREFERENCES);
     vi.mocked(invoke).mockImplementation(defaultInvoke);
   }
 });

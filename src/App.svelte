@@ -20,6 +20,7 @@
   import { queries } from "./lib/queries/queries.svelte";
   import { shortcutAction } from "./lib/tabs/shortcuts";
   import { zoom } from "./lib/zoom.svelte";
+  import { prefs } from "./lib/settings/prefs.svelte";
   import { tabs } from "./lib/tabs/tabs.svelte";
   import Workspace from "./lib/workspace/Workspace.svelte";
   import { parseSession, restore } from "./lib/workspace/session";
@@ -78,13 +79,16 @@
   }
   async function restoreSession() {
     // `undefined` when the saved session could not be loaded at all.
-    const [json] = await Promise.all([
+    const [json, loaded] = await Promise.all([
       loadSession().catch(() => undefined),
+      prefs.load(),
       connections.refresh(),
       connections.loadGuardOff(),
     ]);
     if (destroyed) return;
-    const session = parseSession(json ?? null);
+    // With "open with the last session" off the workspace starts empty, and the saved session stays
+    // on disk until the user edits something, like one this version cannot restore.
+    const session = loaded.restoreSession ? parseSession(json ?? null) : null;
     if (session) {
       // Unreadable connections file: keep the bindings rather than drop them all.
       const ids = connections.error
