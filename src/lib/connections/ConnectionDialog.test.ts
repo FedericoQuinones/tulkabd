@@ -340,3 +340,14 @@ test.each(["Escape", "Cancel"])("%s clears a failed connection string before clo
   expect(onclose).toHaveBeenCalled();
   expect(val("#c-connstr")).toBe("");
 });
+
+test("saving keeps the guard level saved meanwhile, not a stale copy of the connection", async () => {
+  // The dialog was opened from a copy taken before the guard menu changed the level.
+  connections.list = [{ ...base, guard: "block" }];
+  vi.mocked(ipc.saveConnection).mockImplementation(async (c) => ({ connection: c, keyringUnavailable: false }));
+  vi.mocked(ipc.listConnections).mockResolvedValue([]);
+  open({ initial: { ...base, guard: "off" } });
+  document.querySelector("form")!.requestSubmit();
+  await settle();
+  expect(vi.mocked(ipc.saveConnection).mock.calls[0][0].guard).toBe("block");
+});

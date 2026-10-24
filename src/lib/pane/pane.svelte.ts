@@ -1,6 +1,7 @@
 import { t } from "../i18n/t";
 import * as ipc from "../ipc";
-import type { ConnectionConfig, RunSummary, SessionInfo } from "../ipc";
+import type { ConnectionConfig, GuardFinding, GuardLevel, RunSummary, SessionInfo } from "../ipc";
+import { connections } from "../connections/store.svelte";
 import { pushDisconnectedMessage, reduceEvent, type PaneBody, type PaneMessage, type PaneResult } from "./reduce";
 
 export type PaneStatus = "idle" | "connecting" | "running" | "disconnected";
@@ -61,6 +62,16 @@ export class PaneState {
   notice = $state<string | null>(null);
   /** CodeMirror state saved when the editor unmounts, so text, cursor and undo survive tab switches. */
   editorState: unknown = null;
+
+  /**
+   * A script the connection's guard held for confirmation: the exact text that was sent,
+   * where it started in the editor, and the flagged statements (lines relative to `sql`).
+   */
+  guardPrompt = $state<{ sql: string; lineOffset: number; findings: GuardFinding[] } | null>(null);
+  /** The statements that made the guard refuse the last run, with editor-relative 0-based lines. */
+  blocked = $state<GuardFinding[] | null>(null);
+  /** Shown after "don't ask again" turns the guard off; `undoGuardOff` restores `previous`. */
+  guardToast = $state<{ text: string; connectionId: string; previous: GuardLevel } | null>(null);
 
   /** True while a use_database call is in flight (Run and the database select are disabled). */
   switching = $state(false);
@@ -155,6 +166,8 @@ export class PaneState {
       this.results = [];
       this.messages = [];
       this.summary = null;
+      this.guardPrompt = null;
+      this.blocked = null;
       this.status = "idle";
       return { kind: "ok" };
     } catch (e) {
@@ -185,7 +198,58 @@ export class PaneState {
   }
 
   async run(sql: string, lineOffset: number): Promise<void> {
+    if (this.status === "idle" && this.session) this.guardToast = null;
+    await this.send(sql, lineOffset, false);
+  }
+
+  /**
+   * Sends the script held by the guard once more, now confirmed. It is the text the guard
+   * analyzed, not whatever the editor holds now. With `dontAskAgain` the connection's guard is
+   * saved as Off first; if that fails nothing runs.
+   */
+  async confirmGuard(dontAskAgain: boolean): Promise<void> {
+    const prompt = this.guardPrompt;
+    if (!prompt || this.status !== "idle") return;
+    if (dontAskAgain && this.connectionId) {
+      const id = this.connectionId;
+      const name = connections.list.find((c) => c.id === id)?.name ?? "";
+      try {
+        const previous = await connections.setGuard(id, "off");
+        this.guardToast = { text: t("guard.turnedOff", { connection: name }), connectionId: id, previous };
+      } catch (e) {
+        this.guardPrompt = null;
+        this.messages = [{ kind: "error", text: t("guard.changeFailed", { error: String(e) }), line: null }];
+        return;
+      }
+    }
+    this.guardPrompt = null;
+    await this.send(prompt.sql, prompt.lineOffset, true);
+  }
+
+  /** Drops the held script and records that the user backed out. */
+  cancelGuard(): void {
+    const prompt = this.guardPrompt;
+    if (!prompt) return;
+    this.guardPrompt = null;
+    void ipc.logCancelledRun(this.tabId, prompt.sql).catch(() => {});
+  }
+
+  /** Puts back the guard level that "don't ask again" replaced. */
+  async undoGuardOff(): Promise<void> {
+    const toast = this.guardToast;
+    if (!toast) return;
+    this.guardToast = null;
+    try {
+      await connections.setGuard(toast.connectionId, toast.previous);
+    } catch (e) {
+      this.messages.push({ kind: "error", text: t("guard.changeFailed", { error: String(e) }), line: null });
+    }
+  }
+
+  private async send(sql: string, lineOffset: number, confirmed: boolean): Promise<void> {
     if (this.status !== "idle" || !this.session) return;
+    this.guardPrompt = null;
+    this.blocked = null;
     this.status = "running";
     const id = ++this.runId;
     this.runCount++;
@@ -210,7 +274,7 @@ export class PaneState {
     };
     const cancelledLine = () => this.messages.push({ kind: "info", text: t("pane.cancelled"), line: null });
     try {
-      const summary = await ipc.runQuery(this.tabId, sql, false, (e) => {
+      const summary = await ipc.runQuery(this.tabId, sql, confirmed, (e) => {
         if (id === this.runId) reduceEvent(body, e, lineOffset);
       });
       if (id !== this.runId) return;
@@ -218,6 +282,11 @@ export class PaneState {
       if (this.isDisconnected()) return;
       if (summary.outcome === "disconnected") this.markDisconnected();
       else {
+        if (summary.outcome === "needsConfirmation") {
+          this.guardPrompt = { sql, lineOffset, findings: summary.findings };
+        } else if (summary.outcome === "blocked") {
+          this.blocked = summary.findings.map((f) => ({ ...f, line: f.line + lineOffset }));
+        }
         if (summary.outcome === "cancelled") cancelledLine();
         this.status = "idle";
       }

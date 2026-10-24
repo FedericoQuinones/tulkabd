@@ -77,7 +77,11 @@
   }
   async function restoreSession() {
     // `undefined` when the saved session could not be loaded at all.
-    const [json] = await Promise.all([loadSession().catch(() => undefined), connections.refresh()]);
+    const [json] = await Promise.all([
+      loadSession().catch(() => undefined),
+      connections.refresh(),
+      connections.loadGuardOff(),
+    ]);
     if (destroyed) return;
     const session = parseSession(json ?? null);
     if (session) {

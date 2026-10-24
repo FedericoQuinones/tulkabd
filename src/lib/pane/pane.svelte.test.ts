@@ -7,10 +7,14 @@ vi.mock("../ipc", () => ({
   useDatabase: vi.fn(),
   runQuery: vi.fn(),
   cancelQuery: vi.fn(),
+  setConnectionGuard: vi.fn(),
+  setGuardOffForSession: vi.fn(),
+  logCancelledRun: vi.fn(),
 }));
 
 import * as ipc from "../ipc";
 import { PaneState } from "./pane.svelte";
+import { connections } from "../connections/store.svelte";
 
 const pane = new PaneState("t1");
 
@@ -135,4 +139,87 @@ test("a stale open never closes the session of a newer open", async () => {
   expect(ipc.closeSession).toHaveBeenCalledTimes(1);
   expect(pane.session).not.toBeNull();
   expect(pane.connectionId).toBe("c1");
+});
+
+// Guard
+
+const finding = (line: number) => ({ kind: "deleteWithoutWhere" as const, object: "dbo.T", statement: "DELETE FROM dbo.T", line });
+const needs: RunSummary = { elapsedMs: 0, finishedAt: "", outcome: "needsConfirmation", findings: [finding(2)] };
+const blockedSummary: RunSummary = { elapsedMs: 0, finishedAt: "", outcome: "blocked", findings: [finding(2)] };
+
+test("needsConfirmation sets guardPrompt and leaves status idle", async () => {
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(needs);
+  await pane.run("DELETE FROM dbo.T", 4);
+  expect(pane.status).toBe("idle");
+  expect(pane.guardPrompt).toEqual({ sql: "DELETE FROM dbo.T", lineOffset: 4, findings: needs.findings });
+  expect(pane.blocked).toBeNull();
+});
+
+test("confirmGuard runs again with confirmed=true and the exact text that was held", async () => {
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(needs).mockResolvedValueOnce(ok);
+  await pane.run("DELETE FROM dbo.T", 0);
+  // The editor may change while the dialog is open; the held text is what goes out.
+  pane.liveDoc = () => "DROP TABLE other";
+  await pane.confirmGuard(false);
+  pane.liveDoc = null;
+  expect(vi.mocked(ipc.runQuery).mock.calls[1].slice(0, 3)).toEqual(["t1", "DELETE FROM dbo.T", true]);
+  expect(pane.guardPrompt).toBeNull();
+  expect(pane.status).toBe("idle");
+  expect(pane.summary?.outcome).toBe("ok");
+});
+
+test("confirmGuard(true) turns the connection off before running and offers undo", async () => {
+  connections.list = [{ ...conn, guard: "confirm" } as ConnectionConfig];
+  const order: string[] = [];
+  vi.mocked(ipc.setConnectionGuard).mockImplementation(async () => (order.push("guard"), "confirm"));
+  vi.mocked(ipc.runQuery)
+    .mockResolvedValueOnce(needs)
+    .mockImplementationOnce(async () => (order.push("run"), ok));
+  await pane.run("DELETE FROM dbo.T", 0);
+  await pane.confirmGuard(true);
+  expect(order).toEqual(["guard", "run"]);
+  expect(ipc.setConnectionGuard).toHaveBeenCalledWith("c1", "off");
+  expect(connections.list[0].guard).toBe("off");
+  expect(pane.guardToast?.text).toBe("Guard turned off for Local.");
+  await pane.undoGuardOff();
+  expect(ipc.setConnectionGuard).toHaveBeenLastCalledWith("c1", "confirm");
+  expect(connections.list[0].guard).toBe("confirm");
+  expect(pane.guardToast).toBeNull();
+});
+
+test("confirmGuard(true) does not run when the level could not be saved", async () => {
+  connections.list = [{ ...conn, guard: "confirm" } as ConnectionConfig];
+  vi.mocked(ipc.setConnectionGuard).mockRejectedValue("read-only");
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(needs);
+  await pane.run("DELETE FROM dbo.T", 0);
+  await pane.confirmGuard(true);
+  expect(ipc.runQuery).toHaveBeenCalledTimes(1);
+  expect(pane.messages.at(-1)?.text).toContain("read-only");
+  expect(pane.status).toBe("idle");
+});
+
+test("cancelGuard logs a cancelled run", async () => {
+  vi.mocked(ipc.logCancelledRun).mockResolvedValue();
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(needs);
+  await pane.run("DELETE FROM dbo.T", 0);
+  pane.cancelGuard();
+  expect(ipc.logCancelledRun).toHaveBeenCalledWith("t1", "DELETE FROM dbo.T");
+  expect(pane.guardPrompt).toBeNull();
+  expect(pane.status).toBe("idle");
+});
+
+test("blocked sets blocked and a new run clears it", async () => {
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(blockedSummary).mockResolvedValueOnce(ok);
+  await pane.run("DELETE FROM dbo.T", 0);
+  expect(pane.blocked).toHaveLength(1);
+  expect(pane.guardPrompt).toBeNull();
+  expect(pane.status).toBe("idle");
+  await pane.run("SELECT 1", 0);
+  expect(pane.blocked).toBeNull();
+});
+
+test("finding lines include the selection offset", async () => {
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(blockedSummary);
+  await pane.run("DELETE FROM dbo.T", 10);
+  expect(pane.blocked![0].line).toBe(12);
 });

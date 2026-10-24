@@ -70,6 +70,11 @@
     return runTarget(s.doc.toString(), from, to);
   }
 
+  /** Gives the editor the keyboard focus. */
+  export function focus() {
+    view?.focus();
+  }
+
   /** Moves the caret to a 1-based editor line (used by message clicks in Task 10). */
   export function jumpToLine(line: number) {
     if (!view) return;

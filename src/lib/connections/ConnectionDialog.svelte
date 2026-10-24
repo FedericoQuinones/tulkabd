@@ -29,7 +29,9 @@
     onclose,
   }: Props = $props();
   // The dialog is keyed by connection in App, so the initial value is read once.
-  const initial = untrack(() => initialProp);
+  // A saved connection is read from the store, not from the copy the caller kept, which can be
+  // stale (e.g. the guard level was changed from the toolbar after that copy was taken).
+  const initial = untrack(() => (initialProp ? (connections.list.find((c) => c.id === initialProp.id) ?? initialProp) : undefined));
 
   const startsEdit = initial !== undefined && connections.list.some((c) => c.id === initial.id);
 
