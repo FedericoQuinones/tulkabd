@@ -727,8 +727,15 @@ export class TabsStore {
   /**
    * Saves the session AUTOSAVE_MS after the last change (tabs, groups, layout, bindings or editor
    * text), and right away when the window is asked to close. Returns a function that stops it.
+   * With `holdUntilEdit` nothing is saved, not even on close, until the user edits the text of
+   * some tab: a saved session that could not be restored is not replaced by a workspace the user
+   * never worked in.
    */
-  startAutosave(save: (json: string) => Promise<void>): () => void {
+  startAutosave(save: (json: string) => Promise<void>, opts: { holdUntilEdit?: boolean } = {}): () => void {
+    let held = opts.holdUntilEdit === true;
+    const baseline = new WeakMap<PaneState, number>();
+    for (const x of this.list) if (x.pane) baseline.set(x.pane, x.pane.edits);
+    const userEdited = () => this.list.some((x) => x.pane && x.pane.edits > (baseline.get(x.pane) ?? 0));
     let timer: ReturnType<typeof setTimeout> | undefined;
     // Started by the first unsaved change, so continuous typing still saves.
     let maxTimer: ReturnType<typeof setTimeout> | undefined;
@@ -767,10 +774,10 @@ export class TabsStore {
     const stopEffect = $effect.root(() => {
       $effect(() => {
         watchSession(this);
-        if (first) {
-          first = false;
-          return;
-        }
+        const skip = first || (held && !userEdited());
+        first = false;
+        if (skip) return;
+        held = false;
         clearTimeout(timer);
         timer = setTimeout(() => void flush(), AUTOSAVE_MS);
         maxTimer ??= setTimeout(() => void flush(), AUTOSAVE_MAX_WAIT_MS);
@@ -778,7 +785,7 @@ export class TabsStore {
     });
     getCurrentWindow()
       .onCloseRequested(async () => {
-        if (!stopped) await flush();
+        if (!stopped && !held) await flush();
       })
       .then((fn) => {
         if (stopped) fn();

@@ -141,6 +141,38 @@ test("the saved session is restored before the workspace renders, without connec
   }
 });
 
+test("a saved session that cannot be restored is kept until the user edits something", async () => {
+  unmount(cmp!);
+  await tabs.reset();
+  const defaultInvoke = vi.mocked(invoke).getMockImplementation()!;
+  const autosave = vi.spyOn(tabs, "startAutosave");
+  const start = async (load: () => Promise<unknown>) => {
+    autosave.mockClear();
+    vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === "load_session" ? load() : defaultInvoke(cmd, args as never),
+    );
+    cmp = mount(App, { target: document.body });
+    flushSync();
+    await new Promise((r) => setTimeout(r, 0));
+    const opts = autosave.mock.calls[0][1];
+    unmount(cmp);
+    cmp = undefined;
+    await tabs.reset();
+    return opts?.holdUntilEdit === true;
+  };
+  try {
+    expect(await start(async () => JSON.stringify({ version: 99, tabs: [] }))).toBe(true);
+    expect(await start(async () => "{ broken")).toBe(true);
+    expect(await start(async () => Promise.reject("internal error"))).toBe(true);
+    expect(await start(async () => null)).toBe(false);
+    const ok = { version: 1, layout: { kind: "group", id: "g1" }, activeGroupId: "g1", groups: { g1: { tabIds: [], activeId: null } }, tabs: [] };
+    expect(await start(async () => JSON.stringify(ok))).toBe(false);
+  } finally {
+    autosave.mockRestore();
+    vi.mocked(invoke).mockImplementation(defaultInvoke);
+  }
+});
+
 test("the startup probe fires only once the restored workspace is painted", async () => {
   unmount(cmp!);
   await tabs.reset();

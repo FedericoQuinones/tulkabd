@@ -76,9 +76,10 @@
     // Outside Tauri (tests): nothing is ever dropped.
   }
   async function restoreSession() {
-    const [json] = await Promise.all([loadSession().catch(() => null), connections.refresh()]);
+    // `undefined` when the saved session could not be loaded at all.
+    const [json] = await Promise.all([loadSession().catch(() => undefined), connections.refresh()]);
     if (destroyed) return;
-    const session = parseSession(json);
+    const session = parseSession(json ?? null);
     if (session) {
       // Unreadable connections file: keep the bindings rather than drop them all.
       const ids = connections.error
@@ -87,7 +88,9 @@
       restore(tabs, session, { connectionIds: new Set(ids) });
     }
     restored = true;
-    stopAutosave = tabs.startAutosave(saveSession);
+    // A saved session this version cannot restore (or could not load) stays on disk until the
+    // user edits something.
+    stopAutosave = tabs.startAutosave(saveSession, { holdUntilEdit: !session && json !== null });
     // Tells the backend the restored workspace is painted (it only prints with TULKA_STARTUP_PROBE=1).
     await tick();
     requestAnimationFrame(() => {

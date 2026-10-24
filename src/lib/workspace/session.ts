@@ -126,7 +126,24 @@ function validTab(v: unknown): v is SessionTab {
   );
 }
 
-/** The saved session, or null (start empty) when there is none or it is not a valid version 1. */
+/** The id `activeId` falls back to when it is not in `kept`: the closest kept tab before it in `original`, else after it. */
+function neighbour(original: unknown[], kept: string[], activeId: string | null): string | null {
+  const keptSet = new Set(kept);
+  const i = activeId === null ? -1 : original.indexOf(activeId);
+  if (i >= 0) {
+    for (let j = i - 1; j >= 0; j--) if (keptSet.has(original[j] as string)) return original[j] as string;
+    for (let j = i + 1; j < original.length; j++) if (keptSet.has(original[j] as string)) return original[j] as string;
+  }
+  return kept[0] ?? null;
+}
+
+/**
+ * The saved session, or null (start empty) when there is none, it is not JSON, it is not version 1
+ * or its layout and groups are broken. An invalid tab (a missing field, a kind this version does
+ * not know) is dropped alone: it leaves its group, and a group that showed it shows a neighbour.
+ * A tab listed twice stays in its first group, and a valid tab no group lists joins the active
+ * one, so no restorable text is lost.
+ */
 export function parseSession(json: string | null): SessionV1 | null {
   if (json === null) return null;
   let v: unknown;
@@ -140,22 +157,35 @@ export function parseSession(json: string | null): SessionV1 | null {
   if (!ids || ids.length > MAX_GROUPS || new Set(ids).size !== ids.length) return null;
   if (!isString(v.activeGroupId) || !ids.includes(v.activeGroupId)) return null;
   if (Object.keys(v.groups).length !== ids.length) return null;
-  if (!v.tabs.every(validTab)) return null;
-  const tabIds = new Set(v.tabs.map((x) => x.id));
-  if (tabIds.size !== v.tabs.length) return null;
+  const rawGroups = v.groups;
+  if (!ids.every((id) => isObject(rawGroups[id]) && Array.isArray(rawGroups[id].tabIds))) return null;
+
+  // Valid tabs only, the first one of each id.
+  const tabs: SessionTab[] = [];
+  const tabIds = new Set<string>();
+  for (const x of v.tabs) {
+    if (!validTab(x) || tabIds.has(x.id)) continue;
+    tabs.push(x);
+    tabIds.add(x.id);
+  }
   // Every tab sits in exactly one group, and every group shows one of its own tabs.
   const placed = new Set<string>();
+  const groups: SessionV1["groups"] = {};
   for (const id of ids) {
-    const g = v.groups[id];
-    if (!isObject(g) || !Array.isArray(g.tabIds) || !isStringOrNull(g.activeId)) return null;
+    const g = rawGroups[id] as { tabIds: unknown[]; activeId?: unknown };
+    const kept: string[] = [];
     for (const t of g.tabIds) {
-      if (!isString(t) || !tabIds.has(t) || placed.has(t)) return null;
+      if (!isString(t) || !tabIds.has(t) || placed.has(t)) continue;
+      kept.push(t);
       placed.add(t);
     }
-    if (g.activeId === null ? g.tabIds.length > 0 : !g.tabIds.includes(g.activeId)) return null;
+    const activeId = isString(g.activeId) ? g.activeId : null;
+    groups[id] = { tabIds: kept, activeId: activeId !== null && kept.includes(activeId) ? activeId : neighbour(g.tabIds, kept, activeId) };
   }
-  if (placed.size !== tabIds.size) return null;
-  return v as unknown as SessionV1;
+  const active = groups[v.activeGroupId];
+  for (const tab of tabs) if (!placed.has(tab.id)) active.tabIds.push(tab.id);
+  active.activeId ??= active.tabIds[0] ?? null;
+  return { version: 1, layout: v.layout as Layout, activeGroupId: v.activeGroupId, groups, tabs };
 }
 
 function restoredTab(s: SessionTab, known: { connectionIds: Set<string> }): Tab {

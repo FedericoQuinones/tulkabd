@@ -235,11 +235,108 @@ test("parseSession returns null for garbage, another version, null or a broken s
   expect(parseSession("not json {")).toBeNull();
   expect(parseSession("42")).toBeNull();
   expect(parseSession(JSON.stringify({ ...good, version: 2 }))).toBeNull();
-  const gid = good.activeGroupId;
-  const missingTab: SessionV1 = { ...good, groups: { [gid]: { tabIds: ["nope"], activeId: "nope" } } };
-  expect(parseSession(JSON.stringify(missingTab))).toBeNull();
   expect(parseSession(JSON.stringify({ ...good, activeGroupId: "other" }))).toBeNull();
-  expect(parseSession(JSON.stringify({ ...good, tabs: [{ id: good.tabs[0].id, kind: "query" }] }))).toBeNull();
+  expect(parseSession(JSON.stringify({ ...good, layout: { kind: "split" } }))).toBeNull();
+  expect(parseSession(JSON.stringify({ ...good, groups: {} }))).toBeNull();
+  expect(parseSession(JSON.stringify({ ...good, tabs: "x" }))).toBeNull();
+});
+
+/** A one-group session holding `tabs` in that order, showing `activeId`. */
+function oneGroup(list: unknown[], activeId: string | null): string {
+  const ids = list.map((x) => (x as { id: string }).id);
+  return JSON.stringify({
+    version: 1,
+    layout: { kind: "group", id: "g1" },
+    activeGroupId: "g1",
+    groups: { g1: { tabIds: ids, activeId } },
+    tabs: list,
+  });
+}
+const queryTab = (id: string, text = `SELECT '${id}'`) => ({
+  id,
+  kind: "query",
+  title: id,
+  connectionId: null,
+  database: null,
+  text,
+  dirty: false,
+});
+
+test("parseSession drops an invalid tab alone and keeps the others", async () => {
+  const broken = { id: "t2", kind: "query" };
+  const s = parseSession(oneGroup([queryTab("t1"), broken, queryTab("t3")], "t1"))!;
+  expect(s).not.toBeNull();
+  expect(s.tabs.map((x) => x.id)).toEqual(["t1", "t3"]);
+  expect(s.groups.g1).toEqual({ tabIds: ["t1", "t3"], activeId: "t1" });
+
+  // An unknown kind (from a newer version) is dropped too.
+  const future = { id: "t4", kind: "chart", connectionId: "c1" };
+  expect(parseSession(oneGroup([future, queryTab("t5")], "t5"))!.groups.g1).toEqual({ tabIds: ["t5"], activeId: "t5" });
+});
+
+test("parseSession shows a neighbour when the active tab was the invalid one", async () => {
+  const broken = { id: "t2", kind: "query", text: 42 };
+  const s = parseSession(oneGroup([queryTab("t1"), broken, queryTab("t3")], "t2"))!;
+  expect(s.groups.g1).toEqual({ tabIds: ["t1", "t3"], activeId: "t1" });
+  const first = parseSession(oneGroup([broken, queryTab("t3")], "t2"))!;
+  expect(first.groups.g1).toEqual({ tabIds: ["t3"], activeId: "t3" });
+  const none = parseSession(oneGroup([broken], "t2"))!;
+  expect(none.tabs).toEqual([]);
+  expect(none.groups.g1).toEqual({ tabIds: [], activeId: null });
+});
+
+test("parseSession tolerates group lists that do not match the tabs, never losing a valid tab", async () => {
+  const json = JSON.stringify({
+    version: 1,
+    layout: { kind: "split", dir: "row", sizes: [1, 1], children: [{ kind: "group", id: "g1" }, { kind: "group", id: "g2" }] },
+    activeGroupId: "g2",
+    groups: {
+      // "nope" is no tab; "t1" sits in two groups; "t3" in none; a duplicate tab id.
+      g1: { tabIds: ["nope", "t1", 7], activeId: "nope" },
+      g2: { tabIds: ["t1", "t2"], activeId: "t1" },
+    },
+    tabs: [queryTab("t1"), queryTab("t2"), queryTab("t3"), queryTab("t1", "SELECT twin")],
+  });
+  const s = parseSession(json)!;
+  expect(s.tabs.map((x) => [x.id, (x as { text: string }).text])).toEqual([
+    ["t1", "SELECT 't1'"],
+    ["t2", "SELECT 't2'"],
+    ["t3", "SELECT 't3'"],
+  ]);
+  expect(s.groups.g1).toEqual({ tabIds: ["t1"], activeId: "t1" });
+  // An unplaced tab joins the active group.
+  expect(s.groups.g2).toEqual({ tabIds: ["t2", "t3"], activeId: "t2" });
+
+  restore(tabs, s, known);
+  expect(tabs.list.map((x) => x.pane!.text())).toEqual(["SELECT 't1'", "SELECT 't2'", "SELECT 't3'"]);
+});
+
+test("an autosave held until an edit saves nothing, even on close, until the user types", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const id = tabs.open({ kind: "query" });
+  const save = vi.fn(async (_json: string) => {});
+  const stop = tabs.startAutosave(save, { holdUntilEdit: true });
+  flushSync();
+  await Promise.resolve();
+
+  tabs.open({ kind: "query", sql: "SELECT opened" });
+  tabs.splitActive("row");
+  flushSync();
+  vi.advanceTimersByTime(10_000);
+  await closeRequested!();
+  expect(save).not.toHaveBeenCalled();
+
+  tabs.list.find((x) => x.id === id)!.pane!.edits++;
+  flushSync();
+  vi.advanceTimersByTime(1000);
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(parseSession(save.mock.calls[0][0])!.tabs.map((x) => x.id)).toContain(id);
+  // From then on it saves as usual.
+  tabs.open({ kind: "query" });
+  flushSync();
+  await closeRequested!();
+  expect(save).toHaveBeenCalledTimes(2);
+  stop();
 });
 
 test("a tab whose connection no longer exists restores unbound, with its text and a notice", async () => {
