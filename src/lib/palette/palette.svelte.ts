@@ -2,10 +2,12 @@
 // selection. Palette.svelte only renders it; grouping and keys live in hits.ts.
 import { t } from "../i18n/t";
 import * as ipc from "../ipc";
-import type { PaletteHit, SearchResponse } from "../ipc";
+import type { PaletteHit, SavedQueryHit, SearchResponse } from "../ipc";
 import { explorer } from "../explorer/tree.svelte";
 import { objectTabs, type ObjectTarget } from "../explorer/tree";
-import { canRun, groupHits, type PaletteAction, type PaletteGroup } from "./hits";
+import { queryError } from "../queries/queries.svelte";
+import { tabs } from "../tabs/tabs.svelte";
+import { canRun, groupHits, groupQueries, type PaletteAction, type PaletteGroup, type PaletteItem, type QueryGroup } from "./hits";
 
 /** Rows shown; the footer still counts every match. */
 const LIMIT = 50;
@@ -19,8 +21,28 @@ class PaletteStore {
   error = $state<string | null>(null);
 
   readonly groups: PaletteGroup[] = $derived(groupHits(this.response?.hits ?? []));
-  /** Hits in display order, which the selection indexes. */
+  /** Object hits in display order. */
   readonly flat: PaletteHit[] = $derived(this.groups.flatMap((g) => g.hits));
+  /** Saved query hits by database; shown below the objects. */
+  readonly queryGroups: QueryGroup[] = $derived(groupQueries(this.response?.queries ?? []));
+  /** Saved query hits in display order. */
+  readonly queryHits: SavedQueryHit[] = $derived(this.queryGroups.flatMap((g) => g.queries));
+  /** Every row in display order (objects, then saved queries), which the selection indexes. */
+  readonly items: PaletteItem[] = $derived([
+    ...this.flat.map((hit): PaletteItem => ({ kind: "object", hit })),
+    ...this.queryHits.map((query): PaletteItem => ({ kind: "query", query })),
+  ]);
+  /**
+   * The footer's counts: the backend's object matches and databases, plus the saved query hits and
+   * their databases that no shown object already counts (saved queries belong to a database name).
+   */
+  readonly counts = $derived.by(() => {
+    const res = this.response;
+    if (!res) return { matches: 0, databases: 0 };
+    const counted = new Set(res.hits.map((h) => h.database));
+    const extra = new Set(res.queries.map((q) => q.database).filter((d) => !counted.has(d)));
+    return { matches: res.totalMatches + res.queries.length, databases: res.databasesMatched + extra.size };
+  });
 
   private token = 0;
   /** Bumped on every show and hide, so a late subscription from a closed palette is dropped. */
@@ -73,15 +95,15 @@ class PaletteStore {
     try {
       res = await ipc.searchObjects(query, LIMIT);
     } catch {
-      res = { hits: [], totalMatches: 0, databasesMatched: 0, indexing: 0 };
+      res = { hits: [], totalMatches: 0, databasesMatched: 0, indexing: 0, queries: [] };
     }
     if (token !== this.token || !this.isOpen) return;
     this.response = res;
-    this.selected = refresh ? Math.min(this.selected, Math.max(res.hits.length - 1, 0)) : 0;
+    this.selected = refresh ? Math.min(this.selected, Math.max(res.hits.length + res.queries.length - 1, 0)) : 0;
   }
 
   move(delta: number): void {
-    const n = this.flat.length;
+    const n = this.items.length;
     if (n > 0) this.selected = (this.selected + delta + n) % n;
   }
 
@@ -92,8 +114,13 @@ class PaletteStore {
    * Select top 10 opens a query tab, which connects on its own.
    */
   async choose(action: PaletteAction, index = this.selected): Promise<void> {
-    const hit = this.flat[index];
-    if (!hit) return;
+    const item = this.items[index];
+    if (!item) return;
+    if (item.kind === "query") {
+      if (action === "open") await this.openQuery(item.query.database, item.query.name);
+      return;
+    }
+    const hit = item.hit;
     const kind = hit.object.kind;
     if (!canRun(action, kind)) return;
     this.hide();
@@ -119,6 +146,16 @@ class PaletteStore {
       if (error === null) open();
       else this.fail(t("palette.connectFailed", { name: hit.connectionName, error }));
     });
+  }
+
+  /** Opens a saved query in a tab bound to the connection `explorer.savedQueryConnection` picks. */
+  private async openQuery(database: string, name: string): Promise<void> {
+    this.hide();
+    try {
+      await tabs.openSavedQuery({ database, name }, explorer.savedQueryConnection(database));
+    } catch (e) {
+      this.fail(t("palette.openFailed", { name, error: queryError(e) }));
+    }
   }
 
   private fail(message: string): void {

@@ -178,3 +178,119 @@ test("beforepaste is cancelled on the tree so WebKit fires paste there, but not 
   flushSync();
   expect(before(folder.querySelector("input")!)).toBe(false);
 });
+
+// ---- dragging connections and folders (pointer events) ----
+
+const pointer = (type: string, x: number, y: number) =>
+  new PointerEvent(type, { clientX: x, clientY: y, button: 0, pointerId: 1, bubbles: true, cancelable: true });
+const row = (name: string) => items().find((el) => el.querySelector(".lab")?.textContent === name)!;
+
+/** Presses on `from`, then moves past the threshold with `over` under the pointer. */
+function dragOver(from: HTMLElement, over: Element | null) {
+  from.dispatchEvent(pointer("pointerdown", 0, 0));
+  document.elementFromPoint = vi.fn(() => over);
+  document.body.dispatchEvent(pointer("pointermove", 0, 20));
+  flushSync();
+}
+const release = () => {
+  document.body.dispatchEvent(pointer("pointerup", 0, 20));
+  flushSync();
+};
+const highlighted = () => items().filter((el) => el.classList.contains("drop"));
+
+const fb: Folder = { id: "fb", name: "Cliente B", parentId: null };
+
+test("dragging a connection onto a folder moves it there", async () => {
+  vi.mocked(ipc.moveConnection).mockResolvedValue();
+  vi.mocked(ipc.listConnections).mockResolvedValue([{ ...conn, folderId: "fb" }]);
+  explorer.folders = [...folders, fb];
+  flushSync();
+  void explorer.expand("fa");
+  flushSync();
+
+  dragOver(row("Sales"), row("Cliente B").querySelector(".lab"));
+  expect(highlighted()).toEqual([row("Cliente B")]);
+  release();
+  expect(highlighted()).toEqual([]);
+  await settle();
+  expect(ipc.moveConnection).toHaveBeenCalledWith("c1", "fb");
+});
+
+test("dragging a connection to the empty area of the tree moves it to the top level", async () => {
+  vi.mocked(ipc.moveConnection).mockResolvedValue();
+  vi.mocked(ipc.listConnections).mockResolvedValue([{ ...conn, folderId: null }]);
+  void explorer.expand("fa");
+  flushSync();
+  dragOver(row("Sales"), document.querySelector('[role="tree"]'));
+  expect(highlighted()).toEqual([]);
+  release();
+  await settle();
+  expect(ipc.moveConnection).toHaveBeenCalledWith("c1", null);
+});
+
+test("dropping a connection on the folder it is already in does nothing", async () => {
+  void explorer.expand("fa");
+  flushSync();
+  dragOver(row("Sales"), row("Cliente A"));
+  expect(highlighted()).toEqual([]);
+  release();
+  await settle();
+  expect(ipc.moveConnection).not.toHaveBeenCalled();
+});
+
+test("a folder moves into another folder but never into its own subfolder", async () => {
+  vi.mocked(ipc.moveFolder).mockResolvedValue();
+  vi.mocked(ipc.listFolders).mockResolvedValue([]);
+  explorer.folders = [...folders, { id: "fs", name: "Sub", parentId: "fa" }, fb];
+  flushSync();
+  void explorer.expand("fa");
+  flushSync();
+
+  dragOver(row("Cliente A"), row("Sub"));
+  expect(highlighted()).toEqual([]);
+  release();
+  await settle();
+  expect(ipc.moveFolder).not.toHaveBeenCalled();
+
+  dragOver(row("Cliente A"), row("Cliente B"));
+  expect(highlighted()).toEqual([row("Cliente B")]);
+  release();
+  await settle();
+  expect(ipc.moveFolder).toHaveBeenCalledWith("fa", "fb");
+});
+
+test("Escape ends a tree drag without moving anything", async () => {
+  explorer.folders = [...folders, fb];
+  flushSync();
+  void explorer.expand("fa");
+  flushSync();
+  dragOver(row("Sales"), row("Cliente B"));
+  expect(highlighted()).toHaveLength(1);
+  key(document.body, "Escape");
+  flushSync();
+  expect(highlighted()).toEqual([]);
+  release();
+  await settle();
+  expect(ipc.moveConnection).not.toHaveBeenCalled();
+});
+
+test("a row being renamed does not start a drag", async () => {
+  explorer.folders = [...folders, fb];
+  flushSync();
+  void explorer.expand("fa");
+  flushSync();
+  const sales = row("Sales");
+  explorer.focusKey = "c1";
+  flushSync();
+  key(sales, "F2");
+  flushSync();
+  dragOver(sales.querySelector("input")!, items().find((el) => el.textContent?.includes("Cliente B"))!);
+  expect(highlighted()).toEqual([]);
+  release();
+  await settle();
+  expect(ipc.moveConnection).not.toHaveBeenCalled();
+});
+
+test("no row is draggable the HTML5 way", () => {
+  expect(document.querySelectorAll("[draggable]")).toHaveLength(0);
+});

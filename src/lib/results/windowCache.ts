@@ -19,6 +19,8 @@ export class WindowCache {
   private inflight = new Set<number>();
   private failed = new Set<number>();
   private destroyed = false;
+  /** Grows on `clear()`; answers to requests made before it are dropped. */
+  private generation = 0;
   private total = 0;
   private range = { start: 0, end: 0 };
   /** Message of the last failed fetch; cleared by a successful fetch or `retry()`. */
@@ -58,6 +60,16 @@ export class WindowCache {
     this.ensure(this.range.start, this.range.end, this.total);
   }
 
+  /** Drops every row and ignores the answers still on their way (the view changed). */
+  clear(): void {
+    this.generation++;
+    this.windows.clear();
+    this.inflight.clear();
+    this.failed.clear();
+    this.error = null;
+    this.onChange();
+  }
+
   destroy(): void {
     this.destroyed = true;
   }
@@ -91,9 +103,11 @@ export class WindowCache {
     if (this.destroyed || this.inflight.has(offset) || !this.incomplete(offset)) return;
     this.inflight.add(offset);
     const totalAtRequest = this.total;
+    const generation = this.generation;
+    const stale = () => this.destroyed || generation !== this.generation;
     try {
       const rows = await this.fetch(offset, this.size);
-      if (this.destroyed) return;
+      if (stale()) return;
       // A response never shrinks a window (rows only grow while streaming).
       if (rows.length >= (this.windows.get(offset)?.length ?? 0)) {
         this.windows.delete(offset);
@@ -105,13 +119,14 @@ export class WindowCache {
       if (this.failed.size === 0) this.error = null;
       this.onChange();
     } catch (e) {
-      if (this.destroyed) return;
+      if (stale()) return;
       this.failed.add(offset);
       this.error = String(e);
       this.onChange();
       return;
     } finally {
-      this.inflight.delete(offset);
+      // After a clear the offset may be in flight again, for the new view.
+      if (generation === this.generation) this.inflight.delete(offset);
     }
     // Only a `total` that grew during the request can make another fetch useful;
     // otherwise a short or empty answer would loop forever.

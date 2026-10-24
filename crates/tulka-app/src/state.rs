@@ -19,10 +19,13 @@
 //! `cancel_query` clones it under the lock and cancels after releasing it.
 //! Each result buffer sits behind its own `Arc<tokio::sync::RwLock<_>>`: the
 //! tabs lock is held only to clone that `Arc`, then rows are appended (one
-//! chunk of at most 500 rows per write), read by `fetch_rows`, or formatted by
-//! `copy_results` on a blocking thread, under the buffer's own lock. So
-//! `fetch_rows` and `copy_results` see the rows already received while the
-//! run goes on, and a large copy never blocks other tabs or the runtime.
+//! chunk of at most 500 rows per write), read by `fetch_rows`, formatted by
+//! `copy_results` or sorted and filtered by `set_result_view` (both on a
+//! blocking thread), under the buffer's own lock. So `fetch_rows` and
+//! `copy_results` see the rows already received while the run goes on, and a
+//! large copy or sort never blocks other tabs or the runtime.
+//! `set_result_view` fails with `"busy"` while the tab runs (`cancel` is
+//! `Some`), so a view never changes under rows still arriving.
 //!
 //! `close_session` removes the tab, records when it was closed and cancels a
 //! running query; `open_session` replaces the tab (cancelling a run on the old
@@ -42,7 +45,10 @@
 //! `spawn_blocking`. The two mutexes are never held together.
 //!
 //! The Explorer (sessions, background indexing, metadata cache and search
-//! index) has its own state and locks; see [`crate::explorer`].
+//! index) has its own state and locks; see [`crate::explorer`]. So do the
+//! saved queries; see [`crate::queries`]. The paths of `.sql` files from
+//! disk the file commands may touch sit behind their own short-held mutex;
+//! see [`crate::files`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,9 +59,11 @@ use tulka_core::{
     AppConfig, CancelHandle, ConfigStore, Driver, KeyringStore, SecretStore, Session,
 };
 use tulka_mssql::MssqlDriver;
-use tulka_store::MetaCache;
+use tulka_store::{MetaCache, SessionStore};
 
 use crate::explorer::Explorer;
+use crate::files::AllowedFiles;
+use crate::queries::{QueriesStore, SavedQueries};
 use crate::results::ResultBuffer;
 use crate::types::AppEvents;
 
@@ -74,6 +82,13 @@ pub struct AppState {
     /// Explorer sessions, the metadata cache, the search index and the
     /// event sink; shared with the background indexing tasks.
     pub(crate) explorer: Arc<Explorer>,
+    /// The workspace session. Independent of the connections config: it
+    /// works even when that file is read-only.
+    pub(crate) session: Arc<SessionStore>,
+    /// The saved `.sql` files and their palette index.
+    pub(crate) queries: Arc<SavedQueries>,
+    /// The `.sql` files from disk the file commands may read and write.
+    pub(crate) files: AllowedFiles,
 }
 
 /// A result buffer shared between the run that fills it and the commands
@@ -126,6 +141,9 @@ impl AppState {
             tabs: std::sync::Mutex::new(Tabs::default()),
             next_generation: AtomicU64::new(1),
             explorer: Explorer::empty(),
+            session: Arc::new(SessionStore::in_memory()),
+            queries: SavedQueries::unavailable(),
+            files: AllowedFiles::default(),
         })
     }
 
@@ -147,6 +165,9 @@ impl AppState {
             tabs: std::sync::Mutex::new(Tabs::default()),
             next_generation: AtomicU64::new(1),
             explorer: Explorer::empty(),
+            session: Arc::new(SessionStore::in_memory()),
+            queries: SavedQueries::unavailable(),
+            files: AllowedFiles::default(),
         }
     }
 
@@ -159,6 +180,20 @@ impl AppState {
     /// [`AppEvent`]: crate::types::AppEvent
     pub fn with_metadata(mut self, cache: Arc<MetaCache>, events: Arc<dyn AppEvents>) -> Self {
         self.explorer = Explorer::start(cache, events);
+        self
+    }
+
+    /// Persists the workspace session in `store` instead of memory.
+    pub fn with_session(mut self, store: Arc<SessionStore>) -> Self {
+        self.session = store;
+        self
+    }
+
+    /// Keeps saved queries in `store`; without it nothing is saved. The
+    /// palette index of their names loads on a background thread: this
+    /// returns at once.
+    pub fn with_queries(mut self, store: QueriesStore) -> Self {
+        self.queries = SavedQueries::start(store);
         self
     }
 
@@ -181,10 +216,11 @@ impl AppState {
     }
 
     /// The production state: the per-user config file, the OS keychain, the
-    /// SQL Server driver and the per-user metadata cache (see
-    /// [`MetaCache::open_default`]), with events sent to `events`. Never
-    /// fails, and does not wait for the search index (see
-    /// [`AppState::with_metadata`]).
+    /// SQL Server driver, the per-user metadata cache (see
+    /// [`MetaCache::open_default`]) and saved queries (see
+    /// [`QueriesStore::open_default`]), with events sent to `events`. Never
+    /// fails, and does not wait for the search indexes (see
+    /// [`AppState::with_metadata`] and [`AppState::with_queries`]).
     pub fn open_default(events: Arc<dyn AppEvents>) -> Self {
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore::new());
         let drivers: Vec<Arc<dyn Driver>> = vec![Arc::new(MssqlDriver)];
@@ -192,7 +228,10 @@ impl AppState {
             Ok(config) => Self::open(config, secrets, drivers),
             Err(e) => Self::new_read_only(e.to_string(), secrets, drivers),
         };
-        state.with_metadata(Arc::new(MetaCache::open_default()), events)
+        state
+            .with_metadata(Arc::new(MetaCache::open_default()), events)
+            .with_session(Arc::new(SessionStore::open_default()))
+            .with_queries(QueriesStore::open_default())
     }
 
     /// Fails when the state is read-only.
@@ -214,6 +253,12 @@ impl AppState {
     /// while it was held does not leave the tabs unusable.
     pub(crate) fn tabs(&self) -> MutexGuard<'_, Tabs> {
         self.tabs.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// How many closed tab ids are remembered (bounded; see `close_session`).
+    #[doc(hidden)]
+    pub fn closed_tab_count(&self) -> usize {
+        self.tabs().closed_at.len()
     }
 
     pub(crate) fn new_generation(&self) -> u64 {

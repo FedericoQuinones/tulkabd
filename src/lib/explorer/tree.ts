@@ -44,6 +44,8 @@ export const OBJECT_KINDS: ObjectKind[] = ["table", "view", "procedure"];
 export const keyOf = {
   db: (c: string, d: string) => JSON.stringify(["d", c, d]),
   group: (c: string, d: string, k: ObjectKind) => JSON.stringify(["g", c, d, k]),
+  saved: (c: string, d: string) => JSON.stringify(["q", c, d]),
+  savedQuery: (c: string, d: string, name: string) => JSON.stringify(["s", c, d, name]),
   object: (c: string, d: string, o: DbObject) => JSON.stringify(["o", c, d, o.kind, o.schema, o.name]),
   column: (objectKey: string, name: string) => JSON.stringify(["col", objectKey, name]),
   notice: (parent: string, tag: string) => JSON.stringify(["n", parent, tag]),
@@ -156,6 +158,9 @@ export type Row =
   | (RowBase & { kind: "connection"; conn: ConnectionConfig; status: ConnStatus })
   | (RowBase & { kind: "database"; connectionId: string; db: CachedDatabase; indexing: boolean })
   | (RowBase & { kind: "group"; connectionId: string; database: string; objectKind: ObjectKind; count: number | null })
+  /** "Saved queries" under a database: those saved for a database of that name, whatever the connection. */
+  | (RowBase & { kind: "saved"; connectionId: string; database: string; count: number })
+  | (RowBase & { kind: "savedQuery"; connectionId: string; database: string; name: string })
   | (RowBase & { kind: "object"; connectionId: string; database: string; object: DbObject })
   | (RowBase & { kind: "column"; column: ColumnInfo })
   | (RowBase & { kind: "notice"; tone: "error" | "muted"; text: string; action: NoticeAction | null });
@@ -186,7 +191,7 @@ export function navigate(rows: Row[], focusKey: string | null, key: string): Nav
       if (r.parent !== null && rows.some((x) => x.key === r.parent)) return { focus: r.parent };
       return null;
     case "Enter":
-      if (r.kind === "notice" && r.action) return { activate: r.key };
+      if ((r.kind === "notice" && r.action) || r.kind === "savedQuery") return { activate: r.key };
       if (r.expandable) return r.expanded ? { collapse: r.key } : { expand: r.key };
       return null;
   }
@@ -213,6 +218,8 @@ export interface MenuStore {
   copyName(object: DbObject): unknown;
   duplicate(id: string): unknown;
   copyConnectionString(id: string, includePassword: boolean): unknown;
+  openSavedQuery(connectionId: string, database: string, name: string): unknown;
+  revealSavedQuery(database: string, name: string): unknown;
 }
 
 /** Menu actions that need a dialog or an inline editor, provided by the tree component. */
@@ -313,6 +320,20 @@ export function buildMenu(row: Row, ui: MenuActions, store: MenuStore): MenuItem
         separator: true,
       });
       return items;
+    }
+    case "savedQuery": {
+      const { connectionId, database, name } = row;
+      return [
+        { id: "open", label: t("explorer.menu.open"), run: () => store.openSavedQuery(connectionId, database, name) },
+        { id: "rename", label: t("explorer.menu.rename"), run: () => ui.rename(row) },
+        { id: "delete", label: t("explorer.menu.delete"), run: () => ui.remove(row), danger: true },
+        {
+          id: "reveal",
+          label: t("explorer.menu.reveal"),
+          run: () => store.revealSavedQuery(database, name),
+          separator: true,
+        },
+      ];
     }
     default:
       return [];

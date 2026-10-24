@@ -94,6 +94,22 @@ export interface CopyOutcome {
   rows: number;
   tokens: number;
 }
+/** A filter on one column of a result; filters combine with AND. */
+export type ColumnFilter =
+  | { kind: "isNull"; column: number }
+  | { kind: "notNull"; column: number }
+  /**
+   * Exact text (case-sensitive); numbers also match with thousands separators, long text and
+   * binary also as the grid shortens them (ending in "…"); NULL never.
+   */
+  | { kind: "equals"; column: number; text: string };
+/** How a received result is shown: filtered, then sorted (stable). All empty = rows as received. */
+export interface ViewSpec {
+  sort: { column: number; descending: boolean } | null;
+  /** Substring of the cell text as the grid shows it, in any column, ignoring case. */
+  text: string | null;
+  columns: ColumnFilter[];
+}
 
 export type ObjectKind = "table" | "view" | "procedure";
 export interface DbObject {
@@ -158,6 +174,22 @@ export interface SearchResponse {
   databasesMatched: number;
   /** Databases still queued or being indexed (at least 1 while the startup index loads). */
   indexing: number;
+  /** Saved queries whose name matches, best first, at most 20. Empty for a folder-scoped search. */
+  queries: SavedQueryHit[];
+}
+export interface SavedQueryHit {
+  database: string;
+  name: string;
+  /** Matched positions in `name` as Unicode code points, not UTF-16 offsets: index `Array.from(name)`. */
+  indices: number[];
+}
+/** A query saved as `<data dir>/queries/<database>/<name>.sql`. */
+export interface SavedQuery {
+  /** The database, compared exactly; on a case-insensitive file system names differing only in case share one folder. */
+  database: string;
+  name: string;
+  /** Last change of the file, Unix milliseconds (0 if unknown). */
+  modifiedMs: number;
 }
 export interface CompletionMetadata {
   schemas: string[];
@@ -197,7 +229,10 @@ export type AppEvent =
 /**
  * Command errors arrive as plain strings. Sentinels: `"password_required"`, `"disconnected"`,
  * `"busy"` (the tab's session is in use), `"closed"` (tab closed, or explorer disconnected or reconnected, while connecting),
- * `"not_connected"` (no explorer session), `"not_found"`, `"cycle"` and `"empty_name"` (folders).
+ * `"not_connected"` (no explorer session), `"not_found"` (an unknown folder, connection or database, a saved query or
+ * file that does not exist), `"cycle"` (folders), `"empty_name"` (folders and saved queries), `"exists"` (saved
+ * queries), and for `.sql` files `"not_allowed"` (a path never allowed in this run), `"not_text"` (also saved
+ * queries) and `"too_large"` (over 20 MB).
  */
 export const listConnections = () => invoke<ConnectionConfig[]>("list_connections");
 
@@ -235,6 +270,15 @@ export const cancelQuery = (tabId: string) => invoke<void>("cancel_query", { tab
 export const fetchRows = (tabId: string, resultIndex: number, offset: number, limit: number) =>
   invoke<Value[][]>("fetch_rows", { tabId, resultIndex, offset, limit });
 
+/**
+ * Sorts and filters a received result without rerunning it; returns the visible row count.
+ * `fetchRows` and `copyResults` then use visible-row indexes. Fails with "busy" while the tab runs.
+ * Calls on one result are not ordered by the backend: the UI must wait for one before sending
+ * the next (or drop stale replies), or an older view may be applied last.
+ */
+export const setResultView = (tabId: string, resultIndex: number, view: ViewSpec) =>
+  invoke<number>("set_result_view", { tabId, resultIndex, view });
+
 export const copyResults = (
   tabId: string,
   resultIndex: number,
@@ -260,6 +304,14 @@ export const moveFolder = (id: string, parentId: string | null) =>
 export const listExpanded = () => invoke<string[]>("list_expanded");
 /** Replaces the set of expanded folder and connection ids. */
 export const setExpanded = (ids: string[]) => invoke<void>("set_expanded", { ids });
+/** Interface preferences kept in `config.json`. */
+export interface Preferences {
+  /** Zoom of the editor and the result grid, in percent (70 to 200). */
+  zoom: number;
+}
+export const getPreferences = () => invoke<Preferences>("get_preferences");
+/** Stores the zoom (percent); resolves to the value kept, brought into 70 to 200. */
+export const setZoom = (zoom: number) => invoke<number>("set_zoom", { zoom });
 /**
  * Parses an ADO.NET, ODBC, JDBC or `sqlserver://` connection string. Errors are codes that never
  * contain the text: `"empty"`, `"no_server"`, `"bad_port"`, `"bad_value:<key>"`, `"unsupported_auth"`,
@@ -299,6 +351,70 @@ export const searchObjects = (query: string, limit: number) =>
 export const completionMetadata = (connectionId: string, database: string) =>
   invoke<CompletionMetadata>("completion_metadata", { connectionId, database });
 
+/** Saved queries of `database`, or of every database, sorted by database and name. */
+export const listSavedQueries = (database?: string) =>
+  invoke<SavedQuery[]>("list_saved_queries", { database: database ?? null });
+/** With `\n` line breaks. Rejects with `"not_found"` when the query does not exist, `"not_text"` when its file is not text. */
+export const readSavedQuery = (database: string, name: string) =>
+  invoke<string>("read_saved_query", { database, name });
+/** Rejects with `"exists"` when the name is taken and `overwrite` is false, `"empty_name"` on a blank name. */
+export const saveQuery = (database: string, name: string, text: string, overwrite: boolean) =>
+  invoke<void>("save_query", { database, name, text, overwrite });
+/** Rejects with `"not_found"`, `"exists"` (the new name is taken) or `"empty_name"`. */
+export const renameSavedQuery = (database: string, name: string, newName: string) =>
+  invoke<void>("rename_saved_query", { database, name, newName });
+/** Rejects with `"not_found"` when the query does not exist. */
+export const deleteSavedQuery = (database: string, name: string) =>
+  invoke<void>("delete_saved_query", { database, name });
+/** Shows the query's `.sql` file in the system file manager. */
+export const revealSavedQuery = (database: string, name: string) =>
+  invoke<void>("reveal_saved_query", { database, name });
+
+/** How a `.sql` file from disk is encoded; Ctrl+S writes it back the same way. */
+export type FileEncoding = "utf8" | "utf8Bom" | "utf16Le" | "utf16Be";
+/** The line ending a `.sql` file is written back with (its more frequent one when read). */
+export type LineEnding = "lf" | "crlf";
+export interface OpenedFile {
+  path: string;
+  /** The file name, the tab's title. */
+  name: string;
+  /** With `\n` line breaks. */
+  text: string;
+  encoding: FileEncoding;
+  lineEnding: LineEnding;
+}
+
+/**
+ * Shows the native open dialog for `.sql` files (several at once); the backend may then read and
+ * write the picked paths, which it returns. `filterName` labels the `*.sql` filter. Empty when cancelled.
+ */
+export const pickSqlFiles = (filterName: string) => invoke<string[]>("pick_sql_files", { filterName });
+/**
+ * Lets the backend read and write `.sql` paths dropped on the window or restored with the session.
+ * It accepts any absolute `.sql` path: the allowed list is advisory, not a security boundary.
+ */
+export const allowDroppedPaths = (paths: string[]) => invoke<void>("allow_dropped_paths", { paths });
+/**
+ * For each path, whether the backend allows it and its file still exists: `false` when it is not
+ * allowed or not there, `null` when it could not be checked (no permission, an I/O error). Rejects
+ * only when the check could not run at all.
+ */
+export const sqlFilesExist = (paths: string[]) => invoke<(boolean | null)[]>("sql_files_exist", { paths });
+/**
+ * Rejects with `"not_allowed"`, `"not_found"`, `"too_large"` (over 20 MB), `"not_text"` or why it
+ * could not be read.
+ */
+export const readSqlFile = (path: string) => invoke<OpenedFile>("read_sql_file", { path });
+/** Writes atomically, recreating a deleted file. Rejects with `"not_allowed"` or why it could not be written. */
+export const writeSqlFile = (path: string, text: string, encoding: FileEncoding, lineEnding: LineEnding) =>
+  invoke<void>("write_sql_file", { path, text, encoding, lineEnding });
+
 /** Subscribes to the explorer and indexing events. Call the returned function to stop. */
 export const onAppEvent = (cb: (e: AppEvent) => void): Promise<UnlistenFn> =>
   listen<AppEvent>("app-event", (ev) => cb(ev.payload));
+
+/** The saved workspace session (opaque JSON owned by the UI), or `null` when there is none. */
+export const loadSession = () => invoke<string | null>("load_session");
+
+/** Replaces the saved workspace session. Works even when the connections file is read-only. */
+export const saveSession = (json: string) => invoke<void>("save_session", { json });

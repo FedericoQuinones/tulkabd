@@ -4,11 +4,14 @@
   import type { ConnectionConfig, Folder, ParsedConnection } from "../ipc";
   import { parsePasted } from "../connections/connstr";
   import { connections } from "../connections/store.svelte";
+  import { startDrag } from "../drag/pointerDrag";
   import ContextMenu from "./ContextMenu.svelte";
   import FolderDialog, { type FolderDialogMode } from "./FolderDialog.svelte";
   import TreeNode from "./TreeNode.svelte";
-  import { canMoveFolder, navigate, type DragItem, type MenuActions, type MenuItem, type Row } from "./tree";
+  import { canMoveFolder, keyOf, navigate, type DragItem, type MenuActions, type MenuItem, type Row } from "./tree";
   import { explorer, menuFor } from "./tree.svelte";
+  import { queryError } from "../queries/queries.svelte";
+  import { tabs } from "../tabs/tabs.svelte";
 
   interface Props {
     onnewconnection: (folderId?: string | null) => void;
@@ -27,7 +30,6 @@
   let menu = $state<{ items: MenuItem[]; x: number; y: number; label: string; returnTo: HTMLElement | null } | null>(null);
   let dialog = $state<FolderDialogMode | null>(null);
   let renaming = $state<string | null>(null);
-  let drag = $state<DragItem | null>(null);
   let dropKey = $state<string | null>(null);
 
   const rows = $derived(explorer.rows);
@@ -81,6 +83,15 @@
           confirm: t("explorer.menu.delete"),
           run: () => explorer.deleteFolder(f.id),
         };
+      } else if (row.kind === "savedQuery") {
+        const { database, name } = row;
+        dialog = {
+          kind: "confirm",
+          title: t("queries.delete.title"),
+          message: t("queries.delete.message", { name, database }),
+          confirm: t("explorer.menu.delete"),
+          run: () => tabs.deleteSavedQuery(database, name).catch((e) => (explorer.error = queryError(e))),
+        };
       }
     },
     newSubfolder: (folder: Folder) => (dialog = { kind: "create", parent: folder }),
@@ -98,6 +109,8 @@
         return row.db.name;
       case "object":
         return `${row.object.schema}.${row.object.name}`;
+      case "savedQuery":
+        return row.name;
       default:
         return "";
     }
@@ -135,6 +148,7 @@
   function onrowclick(row: Row) {
     explorer.focusKey = row.key;
     if (row.expandable) explorer.toggle(row.key);
+    else if (row.kind === "savedQuery") void explorer.openSavedQuery(row.connectionId, row.database, row.name);
   }
 
   async function onrename(row: Row, value: string | null) {
@@ -144,6 +158,14 @@
     if (name === "") return;
     if (row.kind === "folder" && name !== row.folder.name) await explorer.renameFolder(row.folder.id, name);
     else if (row.kind === "connection" && name !== row.conn.name) await explorer.renameConnection(row.conn, name);
+    else if (row.kind === "savedQuery" && name !== row.name) {
+      try {
+        await tabs.renameSavedQuery(row.database, row.name, name);
+        explorer.focusKey = keyOf.savedQuery(row.connectionId, row.database, name);
+      } catch (e) {
+        explorer.error = queryError(e);
+      }
+    }
   }
 
   function onkeydown(e: KeyboardEvent) {
@@ -156,7 +178,7 @@
       openMenu(row, r.left + 24, r.bottom);
       return;
     }
-    if (row && e.key === "F2" && (row.kind === "folder" || row.kind === "connection")) {
+    if (row && e.key === "F2" && (row.kind === "folder" || row.kind === "connection" || row.kind === "savedQuery")) {
       e.preventDefault();
       renaming = row.key;
       return;
@@ -170,6 +192,7 @@
     else {
       const target = rows.find((r) => r.key === nav.activate);
       if (target?.kind === "notice") void target.action?.run();
+      else if (target?.kind === "savedQuery") void explorer.openSavedQuery(target.connectionId, target.database, target.name);
     }
   }
 
@@ -210,59 +233,53 @@
     return () => el.removeEventListener("beforepaste", onbeforepaste);
   });
 
-  // ---- drag and drop (connections and folders) ----
+  // ---- dragging connections and folders (pointer events) ----
+
+  /**
+   * The row a drop on `el` lands on: every row is marked `tree:<key>` and the empty area `tree`
+   * (`null`, the top level). `undefined` for anything else, such as a tab strip.
+   */
+  function dropRow(el: Element | null): Row | null | undefined {
+    const v = el?.getAttribute("data-drop");
+    if (v === "tree") return null;
+    if (!v?.startsWith("tree:")) return undefined;
+    return rows.find((r) => r.key === v.slice("tree:".length));
+  }
 
   /** The folder a drop on this row lands in; `undefined` when the row takes no drops. */
-  function dropFolder(row: Row | null): string | null | undefined {
+  function dropFolder(row: Row | null | undefined): string | null | undefined {
     if (row === null) return null;
-    if (row.kind === "folder") return row.folder.id;
-    if (row.kind === "connection") return row.conn.folderId ?? null;
+    if (row?.kind === "folder") return row.folder.id;
+    if (row?.kind === "connection") return row.conn.folderId ?? null;
     return undefined;
   }
 
-  function canDrop(target: string | null | undefined): target is string | null {
-    if (!drag || target === undefined) return false;
-    if (drag.kind === "folder") {
-      const f = explorer.folders.find((x) => x.id === drag!.id);
-      return !!f && (f.parentId ?? null) !== target && canMoveFolder(explorer.folders, drag.id, target);
+  function canDrop(item: DragItem, target: string | null | undefined): target is string | null {
+    if (target === undefined) return false;
+    if (item.kind === "folder") {
+      const f = explorer.folders.find((x) => x.id === item.id);
+      return !!f && (f.parentId ?? null) !== target && canMoveFolder(explorer.folders, item.id, target);
     }
-    const c = connections.list.find((x) => x.id === drag!.id);
+    const c = connections.list.find((x) => x.id === item.id);
     return !!c && (c.folderId ?? null) !== target;
   }
 
-  function ondragstart(row: Row, e: DragEvent) {
+  function ondragpress(row: Row, e: PointerEvent) {
     if (row.kind !== "folder" && row.kind !== "connection") return;
-    drag = row.kind === "folder" ? { kind: "folder", id: row.folder.id } : { kind: "connection", id: row.conn.id };
-    // WebKit only starts a drag that carries data.
-    e.dataTransfer?.setData("text/plain", rowName(row));
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-  }
-
-  function ondragover(row: Row | null, e: DragEvent) {
-    e.stopPropagation();
-    const target = dropFolder(row);
-    if (!canDrop(target)) {
-      dropKey = null;
-      return;
-    }
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-    dropKey = row?.kind === "folder" ? row.key : null;
-  }
-
-  function ondrop(row: Row | null, e: DragEvent) {
-    e.stopPropagation();
-    e.preventDefault();
-    const target = dropFolder(row);
-    const item = drag;
-    const ok = canDrop(target);
-    ondragend();
-    if (item && ok) void explorer.move(item, target as string | null);
-  }
-
-  function ondragend() {
-    drag = null;
-    dropKey = null;
+    const item: DragItem = row.kind === "folder" ? { kind: "folder", id: row.folder.id } : { kind: "connection", id: row.conn.id };
+    startDrag(e, {
+      payload: { kind: "tree", key: row.key },
+      onover: (el) => {
+        const over = dropRow(el);
+        dropKey = over?.kind === "folder" && canDrop(item, dropFolder(over)) ? over.key : null;
+      },
+      ondrop: (el) => {
+        dropKey = null;
+        const target = dropFolder(dropRow(el));
+        if (canDrop(item, target)) void explorer.move(item, target);
+      },
+      oncancel: () => (dropKey = null),
+    });
   }
 </script>
 
@@ -335,8 +352,7 @@
       bind:this={treeEl}
       {onkeydown}
       {onpaste}
-      ondragover={(e) => ondragover(null, e)}
-      ondrop={(e) => ondrop(null, e)}
+      data-drop="tree"
     >
       {#each rows as row (row.key)}
         <TreeNode
@@ -348,10 +364,7 @@
           onclick={onrowclick}
           onmenu={openMenu}
           {onrename}
-          {ondragstart}
-          {ondragover}
-          {ondrop}
-          {ondragend}
+          {ondragpress}
         />
       {/each}
       {#if rows.length === 0 && explorer.filter !== ""}

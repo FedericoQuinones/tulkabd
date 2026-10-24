@@ -152,6 +152,33 @@ pub struct AppConfig {
     /// Ids of the folders and connections open in the tree.
     #[serde(default)]
     pub expanded: Vec<String>,
+    /// User preferences; a config written before they existed gets the defaults.
+    #[serde(default)]
+    pub preferences: Preferences,
+}
+
+/// Lowest zoom of the editor and the grid, in percent.
+pub const ZOOM_MIN: u16 = 70;
+/// Highest zoom of the editor and the grid, in percent.
+pub const ZOOM_MAX: u16 = 200;
+
+/// Brings a zoom level into `ZOOM_MIN..=ZOOM_MAX`.
+pub fn clamp_zoom(zoom: u16) -> u16 {
+    zoom.clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
+/// Settings of the interface that survive restarts.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Preferences {
+    /// Zoom of the editor and the result grid, in percent (70 to 200).
+    pub zoom: u16,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self { zoom: 100 }
+    }
 }
 
 impl Default for AppConfig {
@@ -161,6 +188,7 @@ impl Default for AppConfig {
             connections: Vec::new(),
             folders: Vec::new(),
             expanded: Vec::new(),
+            preferences: Preferences::default(),
         }
     }
 }
@@ -219,7 +247,9 @@ impl ConfigStore {
                 version.map_or(0, |v| u32::try_from(v).unwrap_or(u32::MAX)),
             ));
         }
-        Ok(serde_json::from_value(value)?)
+        let mut config: AppConfig = serde_json::from_value(value)?;
+        config.preferences.zoom = clamp_zoom(config.preferences.zoom);
+        Ok(config)
     }
 
     /// Saves the config atomically: the JSON is written and synced to a
@@ -264,6 +294,28 @@ impl ConfigStore {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn config_without_preferences_loads_with_zoom_100() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{"version": 1, "connections": []}"#).unwrap();
+        assert_eq!(ConfigStore::at(&path).load().unwrap().preferences.zoom, 100);
+    }
+
+    #[test]
+    fn stored_zoom_is_clamped_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        for (stored, expected) in [(500, 200), (10, 70), (130, 130)] {
+            let text = format!(r#"{{"version": 1, "preferences": {{"zoom": {stored}}}}}"#);
+            fs::write(&path, text).unwrap();
+            assert_eq!(
+                ConfigStore::at(&path).load().unwrap().preferences.zoom,
+                expected
+            );
+        }
+    }
 
     #[test]
     fn production_defaults() {
@@ -349,7 +401,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(AppConfig::default()).unwrap(),
-            json!({"version": 1, "connections": [], "folders": [], "expanded": []})
+            json!({"version": 1, "connections": [], "folders": [], "expanded": [], "preferences": {"zoom": 100}})
         );
     }
 

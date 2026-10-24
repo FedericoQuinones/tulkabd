@@ -1,39 +1,240 @@
-<script lang="ts">
-  import { t } from "../i18n/t";
-  import { connections } from "../connections/store.svelte";
-  import { ENVIRONMENTS } from "../connections/env";
-  import { tabs, type Tab } from "./tabs.svelte";
+<script lang="ts" module>
+  /**
+   * Where the tab being dragged would land: a slot of a group's strip (0 = before its first tab), or
+   * `slot: null` for the group's editor area, which puts it last. Each strip and group shows its own.
+   */
+  export const tabDrop = $state<{ over: { groupId: string; slot: number | null } | null }>({ over: null });
+</script>
 
-  function color(tab: Tab): string {
-    const id = tabs.binding(tab).connectionId;
-    const conn = connections.list.find((c) => c.id === id);
-    return conn ? ENVIRONMENTS.find((e) => e.id === conn.environment)!.color : "var(--control)";
+<script lang="ts">
+  import { startDrag } from "../drag/pointerDrag";
+  import ContextMenu from "../explorer/ContextMenu.svelte";
+  import type { MenuItem } from "../explorer/tree";
+  import { t } from "../i18n/t";
+  import { groups, MAX_GROUPS } from "../workspace/layout";
+  import { envColor, tabs, type Tab } from "./tabs.svelte";
+
+  let { groupId }: { groupId: string } = $props();
+
+  const full = $derived(groups(tabs.layout).length >= MAX_GROUPS);
+  const list = $derived(tabs.tabsIn(groupId));
+  const mark = $derived(tabDrop.over?.groupId === groupId ? tabDrop.over.slot : null);
+
+  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+
+  /** The open menu: the "+" button's or a tab's. `trigger` gets the focus back when it closes. */
+  let menu = $state<{ items: MenuItem[]; x: number; y: number; label: string; trigger: HTMLElement | null } | null>(null);
+
+  function addMenu(e: MouseEvent) {
+    const trigger = e.currentTarget as HTMLElement;
+    const r = trigger.getBoundingClientRect();
+    const items: MenuItem[] = [
+      {
+        id: "new",
+        label: t("tabs.new"),
+        hint: t(isMac ? "tabs.newKey.mac" : "tabs.newKey.other"),
+        run: () => {
+          tabs.focusGroup(groupId);
+          tabs.newTab();
+        },
+      },
+      {
+        id: "open",
+        label: t("tabs.openFile"),
+        hint: t(isMac ? "tabs.openKey.mac" : "tabs.openKey.other"),
+        run: () => {
+          tabs.focusGroup(groupId);
+          return tabs.pickFiles();
+        },
+      },
+    ];
+    menu = { items, x: r.left, y: r.bottom, label: t("tabs.addMenu"), trigger };
+  }
+
+  function tabMenu(tab: Tab, x: number, y: number, trigger: HTMLElement | null) {
+    const items: MenuItem[] = [];
+    if (tab.pane) items.push({ id: "saveAsQuery", label: t("tabs.saveAsQuery"), run: () => tabs.saveAsQuery(tab.id) });
+    items.push({ id: "close", label: t("tabs.closeTab"), run: () => tabs.close(tab.id) });
+    menu = { items, x, y, label: t("tabs.menu"), trigger };
+  }
+
+  function oncontextmenu(tab: Tab, e: MouseEvent) {
+    e.preventDefault();
+    tabMenu(tab, e.clientX, e.clientY, (e.currentTarget as HTMLElement).querySelector<HTMLElement>('[role="tab"]'));
+  }
+
+  /** The menu key or Shift+F10 on a tab opens its menu below it. */
+  function onkeydown(tab: Tab, e: KeyboardEvent) {
+    if (e.key !== "ContextMenu" && !(e.key === "F10" && e.shiftKey)) return;
+    e.preventDefault();
+    const el = e.currentTarget as HTMLElement;
+    const r = el.getBoundingClientRect();
+    tabMenu(tab, r.left, r.bottom, el);
+  }
+
+  function closeMenu(refocus: boolean) {
+    const trigger = menu?.trigger;
+    // A picked item had the focus: give it back to what opened the menu.
+    const fromMenu = !!document.activeElement?.closest('[role="menu"]');
+    menu = null;
+    if (refocus || fromMenu) trigger?.focus();
+  }
+
+  function splitFrom(dir: "row" | "column") {
+    tabs.focusGroup(groupId);
+    tabs.splitActive(dir);
+  }
+
+  /** The slot of a strip a tab dropped at `x` takes: how many of its tabs have their middle left of `x`. */
+  function slotAt(strip: Element, x: number): number {
+    let slot = 0;
+    for (const el of strip.querySelectorAll(".tab")) {
+      const r = el.getBoundingClientRect();
+      if (r.left + r.width / 2 < x) slot++;
+    }
+    return slot;
+  }
+
+  /**
+   * Where a tab dropped on `el` goes: a strip (`tabs:<group>`) at the slot under `x`, or a group's
+   * editor area (`group:<group>`), except its own group's. Null for anything else.
+   */
+  function dropAt(el: Element | null, x: number, tabId: string): { groupId: string; slot: number | null } | null {
+    const v = el?.getAttribute("data-drop") ?? "";
+    if (v.startsWith("tabs:")) return { groupId: v.slice("tabs:".length), slot: slotAt(el!, x) };
+    if (v.startsWith("group:")) {
+      const id = v.slice("group:".length);
+      return id === tabs.groupOf(tabId) ? null : { groupId: id, slot: null };
+    }
+    return null;
+  }
+
+  function ondragpress(tabId: string, e: PointerEvent) {
+    let x = e.clientX;
+    startDrag(e, {
+      payload: { kind: "tab", tabId },
+      onover: (el, px) => {
+        x = px;
+        tabDrop.over = dropAt(el, px, tabId);
+      },
+      ondrop: (el) => {
+        tabDrop.over = null;
+        const to = dropAt(el, x, tabId);
+        if (!to) return;
+        if (to.slot === null) {
+          tabs.moveTab(tabId, to.groupId, tabs.tabsIn(to.groupId).length);
+          return;
+        }
+        // The slot counts the dragged tab itself when it is in that strip; moveTab wants its final index.
+        const from = tabs.tabsIn(to.groupId).findIndex((tab) => tab.id === tabId);
+        tabs.moveTab(tabId, to.groupId, from >= 0 && from < to.slot ? to.slot - 1 : to.slot);
+      },
+      oncancel: () => (tabDrop.over = null),
+    });
   }
 </script>
 
-<div class="tabs" role="tablist" aria-label={t("tabs.label")}>
-  {#each tabs.list as tab (tab.id)}
-    {@const on = tab.id === tabs.activeId}
-    <div class="tab" class:on style:--env={color(tab)}>
-      <button type="button" role="tab" aria-selected={on} class="main" onclick={() => tabs.activate(tab.id)}>
-        <span class="dot" style:background={color(tab)}></span>
-        <span class="lab">{tab.title}</span>
-      </button>
-      <button type="button" class="x" aria-label={t("tabs.close", { title: tab.title })} onclick={() => tabs.close(tab.id)}>
-        <svg viewBox="0 0 16 16" width="10" height="10"><path d="M3 3l10 10M13 3L3 13" /></svg>
-      </button>
-    </div>
-  {/each}
-  <button type="button" class="add" aria-label={t("tabs.new")} onclick={() => tabs.newTab()}>+</button>
+<div class="bar">
+  <div class="tabs" role="tablist" aria-label={t("tabs.label")} data-drop="tabs:{groupId}">
+    {#each list as tab, i (tab.id)}
+      {@const on = tab.id === tabs.activeIn(groupId)?.id}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="tab"
+        class:on
+        class:mark-before={mark === i}
+        class:mark-after={mark === list.length && i === list.length - 1}
+        style:--env={envColor(tab)}
+        onpointerdown={(e) => ondragpress(tab.id, e)}
+        oncontextmenu={(e) => oncontextmenu(tab, e)}
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={on}
+          aria-haspopup="menu"
+          class="main"
+          title={tab.file?.path}
+          onclick={() => tabs.activate(tab.id)}
+          onkeydown={(e) => onkeydown(tab, e)}
+        >
+          <span class="dot" style:background={envColor(tab)}></span>
+          <span class="lab">{tab.title}</span>
+          {#if tab.dirty}<span class="mod" title={t("tabs.unsaved")}><span class="sr">{t("tabs.unsaved")}</span></span>{/if}
+        </button>
+        <button type="button" class="x" aria-label={t("tabs.close", { title: tab.title })} onclick={() => tabs.close(tab.id)}>
+          <svg viewBox="0 0 16 16" width="10" height="10"><path d="M3 3l10 10M13 3L3 13" /></svg>
+        </button>
+      </div>
+    {/each}
+    <button
+      type="button"
+      class="add"
+      aria-label={t("tabs.addMenu")}
+      title={t("tabs.addMenu")}
+      aria-haspopup="menu"
+      aria-expanded={menu?.label === t("tabs.addMenu")}
+      onclick={addMenu}>+</button
+    >
+  </div>
+  <div class="actions">
+    <button type="button" class="icon" aria-label={t("tabs.splitRight")} title={t("tabs.splitRight")} disabled={full} onclick={() => splitFrom("row")}>
+      <svg viewBox="0 0 16 16" width="14" height="14"><rect x="2" y="3" width="12" height="10" rx="1.5" /><path d="M8 3v10" /></svg>
+    </button>
+    <button type="button" class="icon" aria-label={t("tabs.splitDown")} title={t("tabs.splitDown")} disabled={full} onclick={() => splitFrom("column")}>
+      <svg viewBox="0 0 16 16" width="14" height="14"><rect x="2" y="3" width="12" height="10" rx="1.5" /><path d="M2 8h12" /></svg>
+    </button>
+  </div>
 </div>
 
+{#if menu}
+  <ContextMenu items={menu.items} x={menu.x} y={menu.y} label={menu.label} onclose={closeMenu} />
+{/if}
+
 <style>
-  .tabs {
+  .bar {
     display: flex;
     align-items: stretch;
     height: 36px;
     border-bottom: 1px solid var(--border);
+  }
+  .tabs {
+    display: flex;
+    align-items: stretch;
+    flex: 1;
+    min-width: 0;
     overflow-x: auto;
+  }
+  .actions {
+    display: flex;
+    align-items: center;
+    flex: none;
+    gap: 2px;
+    padding: 0 6px;
+  }
+  .icon {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border: 0;
+    border-radius: 4px;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .icon svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.25;
+  }
+  .icon:hover:not(:disabled) {
+    color: var(--text);
+    background: var(--raised);
+  }
+  .icon:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
   .tab {
     position: relative;
@@ -44,6 +245,13 @@
   }
   .tab.on {
     color: var(--text);
+  }
+  /* Where a dragged tab would land. */
+  .tab.mark-before {
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .tab.mark-after {
+    box-shadow: inset -2px 0 0 var(--accent);
   }
   .tab.on::after {
     content: "";
@@ -77,6 +285,23 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
+  }
+  /* Unsaved changes: a hollow ring, so it never reads as the environment dot. */
+  .mod {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    margin-left: -2px;
+    border: 1.5px solid var(--soft);
+    border-radius: 50%;
+  }
+  .sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .x {
     display: grid;

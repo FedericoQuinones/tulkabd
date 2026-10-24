@@ -14,13 +14,10 @@
     onclick: (row: Row) => void;
     onmenu: (row: Row, x: number, y: number) => void;
     onrename: (row: Row, name: string | null) => void;
-    ondragstart: (row: Row, e: DragEvent) => void;
-    ondragover: (row: Row, e: DragEvent) => void;
-    ondrop: (row: Row, e: DragEvent) => void;
-    ondragend: () => void;
+    /** A press on a folder or connection row that is not being renamed: it may become a drag. */
+    ondragpress: (row: Row, e: PointerEvent) => void;
   }
-  let { row, focused, env, renaming, dropTarget, onclick, onmenu, onrename, ondragstart, ondragover, ondrop, ondragend }: Props =
-    $props();
+  let { row, focused, env, renaming, dropTarget, onclick, onmenu, onrename, ondragpress }: Props = $props();
 
   // 16x16 icons drawn with the 1.5px stroke of svg.i (theme.css).
   const icons = {
@@ -29,12 +26,14 @@
     table: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 6.5h12M6 6.5V13"/>',
     view: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 6.5h12" stroke-dasharray="2 1.5"/>',
     procedure: '<path d="M5 3 2 8l3 5M11 3l3 5-3 5"/>',
+    saved: '<path d="M8 1.8l1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.6l-3.8 2 .7-4.3-3.1-3 4.3-.6z"/>',
+    savedQuery: '<path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13M6.5 8.5h4M6.5 11h4"/>',
   };
 
   const name = $derived(
-    row.kind === "folder" ? row.folder.name : row.kind === "connection" ? row.conn.name : "",
+    row.kind === "folder" ? row.folder.name : row.kind === "connection" ? row.conn.name : row.kind === "savedQuery" ? row.name : "",
   );
-  const draggable = $derived((row.kind === "folder" || row.kind === "connection") && !renaming);
+  const movable = $derived((row.kind === "folder" || row.kind === "connection") && !renaming);
   const dimmed = $derived(
     (row.kind === "connection" && row.status !== "connected") || (row.kind === "database" && row.db.noAccess),
   );
@@ -74,16 +73,15 @@
   class:drop={dropTarget}
   style:padding-left="{6 + (row.level - 1) * 14}px"
   style:--env={env ?? "var(--accent)"}
-  draggable={draggable ? "true" : undefined}
+  data-drop="tree:{row.key}"
   onclick={() => onclick(row)}
   oncontextmenu={(e) => {
     e.preventDefault();
     onmenu(row, e.clientX, e.clientY);
   }}
-  ondragstart={(e) => ondragstart(row, e)}
-  ondragover={(e) => ondragover(row, e)}
-  ondrop={(e) => ondrop(row, e)}
-  {ondragend}
+  onpointerdown={(e) => {
+    if (movable) ondragpress(row, e);
+  }}
 >
   <span class="c" aria-hidden="true">{row.expandable ? (row.expanded ? "▾" : "▸") : ""}</span>
   {#if row.kind === "folder"}
@@ -94,13 +92,19 @@
     <svg class="i ic" viewBox="0 0 16 16" aria-hidden="true">{@html icons.database}</svg>
   {:else if row.kind === "group"}
     <svg class="i ic" viewBox="0 0 16 16" aria-hidden="true">{@html icons[row.objectKind]}</svg>
+  {:else if row.kind === "saved" || row.kind === "savedQuery"}
+    <svg class="i ic" viewBox="0 0 16 16" aria-hidden="true">{@html icons[row.kind]}</svg>
   {/if}
 
   {#if renaming}
     <input
       bind:this={input}
       bind:value
-      aria-label={row.kind === "folder" ? t("explorer.renameFolder") : t("connection.rename.label")}
+      aria-label={row.kind === "folder"
+        ? t("explorer.renameFolder")
+        : row.kind === "savedQuery"
+          ? t("queries.rename.label")
+          : t("connection.rename.label")}
       onclick={(e) => e.stopPropagation()}
       onblur={() => finish(true)}
       onkeydown={(e) => {
@@ -122,6 +126,11 @@
   {:else if row.kind === "group"}
     <span class="lab">{t(`explorer.group.${row.objectKind}`)}</span>
     {#if row.count !== null}<span class="tail num">{row.count}</span>{/if}
+  {:else if row.kind === "saved"}
+    <span class="lab">{t("explorer.group.saved")}</span>
+    <span class="tail num">{row.count}</span>
+  {:else if row.kind === "savedQuery"}
+    <span class="lab">{row.name}</span>
   {:else if row.kind === "object"}
     <span class="lab">{row.object.schema}.{row.object.name}</span>
   {:else if row.kind === "column"}

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tauri::{AppHandle, State};
-use tulka_app::tulka_core::{ConnectionConfig, Folder, ParsedConnection, ServerInfo};
+use tulka_app::tulka_core::{ConnectionConfig, Folder, ParsedConnection, Preferences, ServerInfo};
 use tulka_app::{AppState, Clipboard, SaveConnectionResult};
 
 use super::PluginClipboard;
@@ -128,4 +128,15 @@ pub async fn copy_connection_string(
 ) -> Result<bool, String> {
     let clipboard: Arc<dyn Clipboard> = Arc::new(PluginClipboard(app));
     tulka_app::copy_connection_string(&state, clipboard, id, include_password).await
+}
+
+#[tauri::command]
+pub async fn get_preferences(state: State<'_, AppState>) -> Result<Preferences, String> {
+    Ok(tulka_app::get_preferences(&state).await)
+}
+
+/// Stores the zoom (percent) and returns the value kept, brought into 70 to 200.
+#[tauri::command]
+pub async fn set_zoom(state: State<'_, AppState>, zoom: u16) -> Result<u16, String> {
+    tulka_app::set_zoom(&state, zoom).await
 }

@@ -139,18 +139,9 @@ impl SearchIndex {
     /// Fuzzy search over `schema.name`. Ties on score order shorter names
     /// first, then alphabetically (case-insensitive).
     pub fn search(&self, query: &str, scope: &SearchScope, limit: usize) -> SearchResults {
-        let query = query.trim();
-        if query.is_empty() {
+        let Some(pattern) = fuzzy_pattern(query) else {
             return SearchResults::default();
-        }
-        // Plain fuzzy words: `$`, `^`, `!` and `'` are name characters, not
-        // operators (`Sheet1$` is a common Excel-import name).
-        let pattern = Pattern::new(
-            query,
-            CaseMatching::Smart,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-        );
+        };
         let allowed: Vec<bool> = self
             .dbs
             .iter()
@@ -280,6 +271,99 @@ impl SearchIndex {
                 .then_with(|| lower_key(x).cmp(lower_key(y)))
                 .then(a.1.cmp(&b.1))
         })
+    }
+}
+
+/// The palette's matcher, shared by objects and saved queries; `None` for a
+/// blank query.
+fn fuzzy_pattern(query: &str) -> Option<Pattern> {
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+    // Plain fuzzy words: `$`, `^`, `!` and `'` are name characters, not
+    // operators (`Sheet1$` is a common Excel-import name).
+    Some(Pattern::new(
+        query,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    ))
+}
+
+/// One saved query to index.
+pub struct SavedQueryEntry {
+    pub database: String,
+    pub name: String,
+}
+
+/// One match of [`SavedQueryIndex::search`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedQueryMatch {
+    pub database: String,
+    pub name: String,
+    /// Positions in `name` to highlight, in characters (code points).
+    pub indices: Vec<u32>,
+}
+
+/// Fuzzy index over the names of the saved queries, with the same matcher as
+/// [`SearchIndex`]. Small (one entry per `.sql` file), so it is rebuilt
+/// whole after every change.
+#[derive(Default)]
+pub struct SavedQueryIndex {
+    entries: Vec<(SavedQueryEntry, Utf32String)>,
+}
+
+impl SavedQueryIndex {
+    pub fn build(entries: Vec<SavedQueryEntry>) -> Self {
+        let entries = entries
+            .into_iter()
+            .map(|e| {
+                let haystack = Utf32String::from(e.name.as_str());
+                (e, haystack)
+            })
+            .collect();
+        SavedQueryIndex { entries }
+    }
+
+    /// The best `limit` matches of `query` in the names: higher score
+    /// first, then shorter name, then alphabetical (case-insensitive), then
+    /// by database.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<SavedQueryMatch> {
+        let Some(pattern) = fuzzy_pattern(query) else {
+            return Vec::new();
+        };
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut top: Vec<(u32, &SavedQueryEntry, &Utf32String)> = self
+            .entries
+            .iter()
+            .filter_map(|(e, h)| Some((pattern.score(h.slice(..), &mut matcher)?, e, h)))
+            .collect();
+        top.sort_by(|(sa, a, ha), (sb, b, hb)| {
+            sb.cmp(sa)
+                .then(ha.len().cmp(&hb.len()))
+                .then_with(|| {
+                    let lower =
+                        |s: &str| s.chars().flat_map(char::to_lowercase).collect::<String>();
+                    lower(&a.name).cmp(&lower(&b.name))
+                })
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.database.cmp(&b.database))
+        });
+        top.truncate(limit);
+        top.into_iter()
+            .map(|(_, e, h)| {
+                let mut indices = Vec::new();
+                pattern.indices(h.slice(..), &mut matcher, &mut indices);
+                indices.sort_unstable();
+                indices.dedup();
+                SavedQueryMatch {
+                    database: e.database.clone(),
+                    name: e.name.clone(),
+                    indices,
+                }
+            })
+            .collect()
     }
 }
 
@@ -467,6 +551,54 @@ mod tests {
         assert!(v["totalMatches"].is_number());
         assert!(v["databasesMatched"].is_number());
         assert!(v["hits"][0]["connectionId"].is_string());
+    }
+
+    fn saved(entries: &[(&str, &str)]) -> SavedQueryIndex {
+        SavedQueryIndex::build(
+            entries
+                .iter()
+                .map(|(d, n)| SavedQueryEntry {
+                    database: d.to_string(),
+                    name: n.to_string(),
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn saved_queries_match_names_with_code_point_indices() {
+        let idx = saved(&[
+            ("Ventas", "Reporte mensual"),
+            ("Ventas", "Clientes"),
+            ("Compras", "Año rep"),
+        ]);
+        let r = idx.search("rep", 20);
+        let got: Vec<_> = r
+            .iter()
+            .map(|m| (m.name.as_str(), m.indices.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Año rep", vec![4, 5, 6]),
+                ("Reporte mensual", vec![0, 1, 2])
+            ]
+        );
+        assert!(idx.search("  ", 20).is_empty());
+        assert!(idx.search("REP", 20).is_empty(), "smart case");
+    }
+
+    #[test]
+    fn saved_queries_ties_and_limit() {
+        let idx = saved(&[("b", "rep"), ("a", "rep"), ("a", "Rep"), ("a", "rep2")]);
+        let r = idx.search("rep", 3);
+        let got: Vec<_> = r
+            .iter()
+            .map(|m| (m.database.as_str(), m.name.as_str()))
+            .collect();
+        // Same score and length: name case-insensitively, then exact name,
+        // then database; the longer `rep2` is cut by the limit.
+        assert_eq!(got, [("a", "Rep"), ("a", "rep"), ("b", "rep")]);
     }
 
     fn lcg(s: &mut u64) -> usize {

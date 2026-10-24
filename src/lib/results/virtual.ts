@@ -1,3 +1,27 @@
+/** Row height of the result grid at 100 % zoom, in px. */
+export const BASE_ROW_HEIGHT = 34;
+
+/** Row height of the result grid at `zoom` percent, rounded to whole pixels. */
+export function rowHeight(zoom: number): number {
+  return Math.round((BASE_ROW_HEIGHT * zoom) / 100);
+}
+
+/** Height of the grid's header row at 100 % zoom, in px. */
+export const BASE_HEADER_HEIGHT = 36;
+
+/** Height of the grid's header row at `zoom` percent, rounded to whole pixels. */
+export function headerHeight(zoom: number): number {
+  return Math.round((BASE_HEADER_HEIGHT * zoom) / 100);
+}
+
+/**
+ * Scroll position that keeps the same row (and the same part of it) at the top after the row
+ * height changed from `oldRowHeight` to `newRowHeight`.
+ */
+export function anchoredScrollTop(scrollTop: number, oldRowHeight: number, newRowHeight: number): number {
+  return (scrollTop / oldRowHeight) * newRowHeight;
+}
+
 /** Rows of the window requested from `fetch_rows`. */
 export const WINDOW_SIZE = 200;
 

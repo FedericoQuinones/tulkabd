@@ -49,9 +49,9 @@
     const atEnd = input.selectionStart === input.value.length && input.selectionEnd === input.value.length;
     const key = paletteKey(e, isMac, atEnd);
     if (!key) return;
-    const hit = palette.flat[palette.selected];
-    // ArrowRight on a table, or with nothing selected, keeps moving the caret.
-    if (key === "definition" && (!hit || hit.object.kind === "table")) return;
+    const item = palette.items[palette.selected];
+    // ArrowRight on a table or a saved query, or with nothing selected, keeps moving the caret.
+    if (key === "definition" && (item?.kind !== "object" || item.hit.object.kind === "table")) return;
     e.preventDefault();
     e.stopPropagation();
     if (key === "close") close();
@@ -81,7 +81,7 @@
       role="combobox"
       aria-expanded="true"
       aria-controls="palette-list"
-      aria-activedescendant={palette.flat.length > 0 ? `palette-${palette.selected}` : undefined}
+      aria-activedescendant={palette.items.length > 0 ? `palette-${palette.selected}` : undefined}
       aria-autocomplete="list"
       placeholder={t("palette.placeholder")}
       spellcheck="false"
@@ -119,7 +119,32 @@
           </div>
         {/each}
       {/each}
-      {#if res && palette.query.trim() !== "" && res.hits.length === 0}
+      {#each palette.queryGroups as group (group.key)}
+        <div class="group" role="presentation">
+          <span class="path">{t("palette.savedQueries")} › {group.database}</span>
+        </div>
+        {#each group.queries as query (query)}
+          {@const i = palette.flat.length + palette.queryHits.indexOf(query)}
+          <div
+            id="palette-{i}"
+            class="row"
+            class:on={i === palette.selected}
+            role="option"
+            tabindex="-1"
+            aria-selected={i === palette.selected}
+            onmousemove={() => (palette.selected = i)}
+            onclick={() => void palette.choose("open", i)}
+          >
+            <span class="kind">{t("palette.kind.query")}</span>
+            <span class="name">
+              {#each highlight(query.name, query.indices) as seg, j (j)}
+                {#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}
+              {/each}
+            </span>
+          </div>
+        {/each}
+      {/each}
+      {#if res && palette.query.trim() !== "" && res.hits.length === 0 && res.queries.length === 0}
         <p class="none">{t("palette.none")}</p>
       {/if}
     </div>
@@ -127,8 +152,8 @@
       {#if res && palette.query.trim() !== ""}
         <span>
           {t("palette.footer", {
-            matches: count(res.totalMatches, "palette.matchOne", "palette.matchMany"),
-            databases: count(res.databasesMatched, "palette.databaseOne", "palette.databaseMany"),
+            matches: count(palette.counts.matches, "palette.matchOne", "palette.matchMany"),
+            databases: count(palette.counts.databases, "palette.databaseOne", "palette.databaseMany"),
           })}
         </span>
       {/if}

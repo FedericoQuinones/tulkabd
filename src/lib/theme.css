@@ -27,6 +27,9 @@
   --radius-card: 6px;
   --radius-control: 999px;
   --font: "Public Sans", Inter, system-ui, sans-serif;
+  /* Editor and grid text: 100 % size and the zoom (percent, set from preferences). */
+  --code-size: 13px;
+  --code-zoom: 100;
   --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
 }
 
@@ -44,6 +47,12 @@ body {
   color: var(--text);
   font: 13px/1.5 var(--font);
   overflow: hidden;
+}
+
+/* A tab or Explorer row is being dragged (src/lib/drag/pointerDrag.ts). */
+:root[data-dragging],
+:root[data-dragging] * {
+  cursor: grabbing !important;
 }
 
 .mono,

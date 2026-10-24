@@ -3,6 +3,11 @@
 
 mod cache;
 mod search;
+mod session;
 
 pub use cache::{CachedDatabase, MetaCache, SCHEMA_VERSION};
-pub use search::{SearchEntry, SearchHit, SearchIndex, SearchResults, SearchScope};
+pub use search::{
+    SavedQueryEntry, SavedQueryIndex, SavedQueryMatch, SearchEntry, SearchHit, SearchIndex,
+    SearchResults, SearchScope,
+};
+pub use session::SessionStore;

@@ -53,6 +53,10 @@ export class PaneState {
   initialDoc = $state("");
   /** Bumped when `loadText` replaces the document; a mounted editor swaps its content. */
   docVersion = $state(0);
+  /** Bumped on every edit by the user (see `edited`); the session autosave watches it. */
+  edits = $state(0);
+  /** Set by the tabs store: hears every edit by the user, to mark the tab as unsaved. */
+  onedit: (() => void) | null = null;
   /** Inline notice shown above the editor (e.g. a definition that could not load). */
   notice = $state<string | null>(null);
   /** CodeMirror state saved when the editor unmounts, so text, cursor and undo survive tab switches. */
@@ -69,13 +73,30 @@ export class PaneState {
   liveDoc: (() => string) | null = null;
   private loadedText: string | null = null;
 
+  /** The last text `loadText` put in (a definition), or null; differing text means the user edited it. */
+  get lastLoaded(): string | null {
+    return this.loadedText;
+  }
+
+  /** The mounted editor reports an edit by the user (not text put in by `loadText`). */
+  edited(): void {
+    this.edits++;
+    this.onedit?.();
+  }
+
+  /** The editor text right now: the mounted editor's, else the state saved on unmount, else `initialDoc`. */
+  text(): string {
+    if (this.liveDoc) return this.liveDoc();
+    const saved = this.editorState as { doc?: string } | null;
+    return saved ? (saved.doc ?? "") : this.initialDoc;
+  }
+
   /**
    * Puts loaded text (a definition) into the editor. It only replaces the content while the user
    * has not edited the tab: the document is empty or still the previously loaded text.
    */
   loadText(text: string) {
-    const saved = this.editorState as { doc?: string } | null;
-    const current = this.liveDoc ? this.liveDoc() : saved ? (saved.doc ?? "") : this.initialDoc;
+    const current = this.text();
     if (current !== "" && current !== this.loadedText) return;
     this.loadedText = text;
     this.initialDoc = text;
@@ -83,12 +104,24 @@ export class PaneState {
     this.docVersion++;
   }
 
-  /** Closes the backend session, if one is open. */
+  /**
+   * Closes the backend session, if one is open or being opened. Closing while an open is in
+   * flight makes the backend reject that open, so it never lands after a newer one.
+   */
   async close(): Promise<void> {
     this.runId++;
-    if (!this.hasSession) return;
+    if (!this.hasSession && this.status !== "connecting") return;
     this.hasSession = false;
     await ipc.closeSession(this.tabId).catch(() => {});
+  }
+
+  /** Drops the session and the connection binding but keeps the editor text. */
+  unbind(): void {
+    void this.close();
+    this.session = null;
+    this.connectionId = null;
+    this.database = null;
+    this.status = "idle";
   }
 
   private hasSession = false;
@@ -103,7 +136,7 @@ export class PaneState {
   async open(conn: ConnectionConfig, password?: string, database?: string): Promise<OpenResult> {
     if (this.status === "connecting" || this.status === "running") return { kind: "busy" };
     const before = this.status;
-    this.runId++;
+    const token = ++this.runId;
     this.status = "connecting";
     try {
       if (this.hasSession) {
@@ -111,6 +144,10 @@ export class PaneState {
         await ipc.closeSession(this.tabId).catch(() => {});
       }
       const info = await ipc.openSession(this.tabId, conn.id, database, password);
+      if (token !== this.runId) {
+        // Unbound or closed while connecting: close() already told the backend, which rejects it.
+        return { kind: "busy" };
+      }
       this.hasSession = true;
       this.session = info;
       this.connectionId = conn.id;
@@ -121,6 +158,7 @@ export class PaneState {
       this.status = "idle";
       return { kind: "ok" };
     } catch (e) {
+      if (token !== this.runId) return { kind: "busy" };
       if (before === "disconnected" && this.connectionId === conn.id) {
         this.status = "disconnected";
       } else {

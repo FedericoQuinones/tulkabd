@@ -12,6 +12,7 @@
   import { runTarget } from "./runTarget";
   import { completionSource, sharedMetadata } from "./completion";
   import type { CompletionMetadata } from "../ipc";
+  import { zoom } from "../zoom.svelte";
 
   interface Props {
     /** Supplies the starting text and keeps the editor state across tab switches. */
@@ -19,17 +20,19 @@
     /** Ctrl/Cmd+Enter: receives the selection (or whole doc) to execute. */
     onrun: (target: { sql: string; lineOffset: number }) => void;
     oncursor: (pos: { line: number; col: number }) => void;
+    /** Takes the keyboard focus when mounted. */
+    autofocus?: boolean;
   }
-  let { pane, onrun, oncursor }: Props = $props();
+  let { pane, onrun, oncursor, autofocus = true }: Props = $props();
 
   let host: HTMLDivElement;
   let view: EditorView | undefined;
 
   const theme = EditorView.theme(
     {
-      "&": { height: "100%", color: "#ffffff", backgroundColor: "transparent", fontSize: "13px" },
+      "&": { height: "100%", color: "#ffffff", backgroundColor: "transparent", fontSize: "calc(var(--code-size) * var(--code-zoom) / 100)" },
       "&.cm-focused": { outline: "none" },
-      ".cm-scroller": { fontFamily: "var(--mono)", lineHeight: "22px", overflow: "auto" },
+      ".cm-scroller": { fontFamily: "var(--mono)", lineHeight: "calc(22px * var(--code-zoom) / 100)", overflow: "auto" },
       ".cm-content": { padding: "12px 0", caretColor: "#ffffff" },
       ".cm-line": { padding: "0 14px 0 0" },
       ".cm-gutters": { backgroundColor: "transparent", color: "#55565b", border: "none" },
@@ -97,18 +100,31 @@
     return built.source(ctx);
   }
 
+  // The zoom changes the font and line height through CSS: CodeMirror re-measures its lines.
+  $effect(() => {
+    void zoom.level;
+    view?.requestMeasure();
+  });
+
   let shownVersion = -1;
+  // True while `loadText`'s content goes in, which is not an edit by the user.
+  let loading = false;
   // `pane.loadText` swapped the document while the editor is mounted: show it.
   $effect(() => {
     const v = pane.docVersion;
     if (!view || v === shownVersion) return;
     shownVersion = v;
-    // Not undoable: Ctrl+Z must not empty a freshly loaded definition.
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: pane.initialDoc },
-      selection: { anchor: 0 },
-      annotations: Transaction.addToHistory.of(false),
-    });
+    // Not undoable: Ctrl+Z must not empty a freshly loaded definition. Not an edit either.
+    loading = true;
+    try {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: pane.initialDoc },
+        selection: { anchor: 0 },
+        annotations: Transaction.addToHistory.of(false),
+      });
+    } finally {
+      loading = false;
+    }
     pane.editorState = null;
   });
 
@@ -133,11 +149,13 @@
                 return true;
               },
             },
-            ...defaultKeymap,
+            // Ctrl+Shift+\ is the app's "split down", not "go to matching bracket".
+            ...defaultKeymap.filter((b) => b.key !== "Shift-Mod-\\"),
             ...historyKeymap,
           ]),
           EditorView.updateListener.of((u) => {
             if (u.selectionSet || u.docChanged) report(u.view);
+            if (u.docChanged && !loading) pane.edited();
           }),
     ];
     // Restore from the JSON saved on unmount: it carries text, selection and undo history, while
@@ -152,7 +170,7 @@
       state = EditorState.create({ doc: pane.initialDoc, extensions });
     }
     view = new EditorView({ parent: host, state });
-    view.focus();
+    if (autofocus) view.focus();
     report(view);
     pane.liveDoc = () => view?.state.doc.toString() ?? "";
     shownVersion = pane.docVersion;

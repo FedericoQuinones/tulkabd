@@ -987,6 +987,146 @@ async fn large_cells_are_capped_with_one_warning_and_trimmed_for_display() {
     assert!(!events.iter().any(|e| matches!(e, UiEvent::Message { .. })));
 }
 
+fn sort_by(column: usize, descending: bool) -> ViewSpec {
+    ViewSpec {
+        sort: Some(SortSpec { column, descending }),
+        ..ViewSpec::default()
+    }
+}
+
+#[tokio::test]
+async fn result_view_orders_fetch_and_copy() {
+    let (f, _) = connected("t1").await;
+    let (result, _) = run(&f.state, "t1", "rows 4").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    let visible = set_result_view(&f.state, "t1".into(), 0, sort_by(0, true))
+        .await
+        .unwrap();
+    assert_eq!(visible, 4);
+
+    let rows = fetch_rows(&f.state, "t1".into(), 0, 1, 2).await.unwrap();
+    assert_eq!(rows, vec![fake_row(2), fake_row(1)]);
+
+    let clipboard = Arc::new(FakeClipboard::default());
+    let out = copy_results(
+        &f.state,
+        "t1".into(),
+        0,
+        CopyMode::Excel,
+        Selection::All,
+        clipboard.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.rows, 4);
+    let reversed: Vec<_> = (0..4).rev().map(fake_row).collect();
+    let expected = to_excel_tsv(&fake_columns(), &reversed, system_decimal_separator());
+    assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+
+    // A filter copies only the visible rows.
+    let filter = ViewSpec {
+        text: Some("ROW\t2".into()),
+        ..ViewSpec::default()
+    };
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 0, filter)
+            .await
+            .unwrap(),
+        1
+    );
+    let out = copy_results(
+        &f.state,
+        "t1".into(),
+        0,
+        CopyMode::Ai,
+        Selection::All,
+        clipboard.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.rows, 1);
+    let expected = to_ai(&fake_columns(), &[fake_row(2)]);
+    assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+
+    // An empty spec gives back the original order.
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 0, ViewSpec::default())
+            .await
+            .unwrap(),
+        4
+    );
+    let rows = fetch_rows(&f.state, "t1".into(), 0, 0, 10).await.unwrap();
+    assert_eq!(rows, (0..4).map(fake_row).collect::<Vec<_>>());
+
+    // A new run starts without a view.
+    set_result_view(&f.state, "t1".into(), 0, sort_by(0, true))
+        .await
+        .unwrap();
+    run(&f.state, "t1", "rows 3").await.0.unwrap();
+    let rows = fetch_rows(&f.state, "t1".into(), 0, 0, 10).await.unwrap();
+    assert_eq!(rows, (0..3).map(fake_row).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn result_view_rejects_unknown_columns_and_results() {
+    let (f, _) = connected("t1").await;
+    run(&f.state, "t1", "rows 2").await.0.unwrap();
+    set_result_view(&f.state, "t1".into(), 0, sort_by(0, true))
+        .await
+        .unwrap();
+    let reversed = vec![fake_row(1), fake_row(0)];
+
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 0, sort_by(3, false)).await,
+        Err("column 3 does not exist".to_string())
+    );
+    let filter = ViewSpec {
+        columns: vec![ColumnFilter::IsNull { column: 9 }],
+        ..ViewSpec::default()
+    };
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 0, filter).await,
+        Err("column 9 does not exist".to_string())
+    );
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 1, sort_by(0, false)).await,
+        Err("result 1 does not exist".to_string())
+    );
+    assert_eq!(
+        set_result_view(&f.state, "nope".into(), 0, sort_by(0, false)).await,
+        Err("no session is open on this tab".to_string())
+    );
+    // A rejected view leaves the previous one in place.
+    let rows = fetch_rows(&f.state, "t1".into(), 0, 0, 10).await.unwrap();
+    assert_eq!(rows, reversed);
+}
+
+#[tokio::test]
+async fn result_view_is_busy_while_rows_arrive() {
+    let (f, _) = connected("t1").await;
+    let (sink, mut rx) = streamer();
+    let state = f.state.clone();
+    let running =
+        tokio::spawn(
+            async move { run_query(&state, "t1".into(), "rows 700; wait".into(), sink).await },
+        );
+    wait_for_total(&mut rx, 700).await;
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 0, sort_by(0, true)).await,
+        Err(BUSY.to_string())
+    );
+    cancel_query(&f.state, "t1".into()).await.unwrap();
+    tokio::time::timeout(TIMEOUT, running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 0, sort_by(0, true)).await,
+        Ok(700)
+    );
+}
+
 #[tokio::test]
 async fn copy_works_while_the_result_is_streaming() {
     let (f, _) = connected("t1").await;
@@ -1390,6 +1530,24 @@ async fn folders_move_connection_and_expanded_persist() {
 }
 
 #[tokio::test]
+async fn set_zoom_clamps_and_persists() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    assert_eq!(get_preferences(&f.state).await.zoom, 100);
+    assert_eq!(set_zoom(&f.state, 500).await.unwrap(), 200);
+    assert_eq!(set_zoom(&f.state, 20).await.unwrap(), 70);
+    assert_eq!(set_zoom(&f.state, 130).await.unwrap(), 130);
+    assert_eq!(get_preferences(&f.state).await.zoom, 130);
+    assert_eq!(
+        ConfigStore::at(f._dir.path().join("config.json"))
+            .load()
+            .unwrap()
+            .preferences
+            .zoom,
+        130
+    );
+}
+
+#[tokio::test]
 async fn folders_read_only_mode_rejects_everything() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.json");
@@ -1410,6 +1568,10 @@ async fn folders_read_only_mode_rejects_everything() {
     ro(move_folder(&state, "x".into(), None).await);
     ro(move_connection(&state, "x".into(), None).await);
     ro(set_expanded(&state, vec!["x".into()]).await);
+    assert!(set_zoom(&state, 150)
+        .await
+        .unwrap_err()
+        .contains("read-only"));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
 }
 
@@ -1764,4 +1926,35 @@ async fn duplicate_fails_on_keychain_errors_but_not_on_an_unavailable_keychain()
         .unwrap();
     assert!(!copy.password_saved);
     assert_eq!(list_connections(&f.state).await.len(), 3);
+}
+
+#[tokio::test]
+async fn closed_tab_generations_stay_bounded() {
+    let f = connected("t0").await.0;
+    for i in 0..300 {
+        close_session(&f.state, format!("gone-{i}")).await.unwrap();
+    }
+    assert_eq!(f.state.closed_tab_count(), 256);
+}
+
+#[tokio::test]
+async fn session_saves_even_when_the_config_is_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, "{ not json").unwrap();
+    let store = Arc::new(tulka_store::SessionStore::in_memory());
+    let state = AppState::open(
+        ConfigStore::at(&path),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakeDriver)],
+    )
+    .with_session(store);
+    assert!(state.startup_error().is_some());
+
+    assert_eq!(load_session(&state).await, None);
+    save_session(&state, r#"{"tabs":[]}"#.into()).await.unwrap();
+    assert_eq!(
+        load_session(&state).await.as_deref(),
+        Some(r#"{"tabs":[]}"#)
+    );
 }

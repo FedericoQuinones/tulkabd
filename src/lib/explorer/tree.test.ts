@@ -78,6 +78,10 @@ function label(r: Row): string {
       return `db:${r.db.name}`;
     case "group":
       return `group:${r.objectKind}`;
+    case "saved":
+      return `saved:${r.count}`;
+    case "savedQuery":
+      return `query:${r.name}`;
     case "object":
       return `${r.object.schema}.${r.object.name}`;
     case "column":
@@ -96,7 +100,7 @@ beforeEach(async () => {
   vi.mocked(ipc.listFolders).mockResolvedValue(folders);
   vi.mocked(ipc.listExpanded).mockResolvedValue([]);
   vi.mocked(ipc.listConnections).mockResolvedValue([sales, local, billing]);
-  vi.mocked(ipc.searchObjects).mockResolvedValue({ hits: [], totalMatches: 0, databasesMatched: 0, indexing: 0 });
+  vi.mocked(ipc.searchObjects).mockResolvedValue({ hits: [], totalMatches: 0, databasesMatched: 0, indexing: 0, queries: [] });
   vi.mocked(ipc.onAppEvent).mockResolvedValue(() => {});
   vi.mocked(ipc.closeSession).mockResolvedValue();
   connections.list = [sales, local, billing];
@@ -171,7 +175,7 @@ const hit = (object: PaletteHit["object"], database = "Ventas", connectionId = "
   object,
   indices: [],
 });
-const response = (hits: PaletteHit[]): SearchResponse => ({ hits, totalMatches: hits.length, databasesMatched: 1, indexing: 0 });
+const response = (hits: PaletteHit[]): SearchResponse => ({ hits, totalMatches: hits.length, databasesMatched: 1, indexing: 0, queries: [] });
 
 test("with 2+ characters the filter shows cached objects under their database", async () => {
   vi.mocked(ipc.searchObjects).mockResolvedValue(response([hit({ schema: "dbo", name: "Pedidos", kind: "table" })]));
@@ -573,4 +577,12 @@ test("a database known only from search hits is not shown as indexing", async ()
   const r = explorer.rows.find((x) => x.kind === "database");
   expect(r?.kind === "database" && r.db.name).toBe("Ventas");
   expect(r?.kind === "database" && r.indexing).toBe(false);
+});
+
+test("deleting a connection unbinds the tabs that used it", async () => {
+  vi.mocked(ipc.deleteConnection).mockResolvedValue();
+  const spy = vi.spyOn(tabs, "unbindConnection");
+  expect(await explorer.deleteConnection(local.id)).toBe(true);
+  expect(spy).toHaveBeenCalledWith(local.id);
+  spy.mockRestore();
 });

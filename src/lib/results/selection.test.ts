@@ -23,3 +23,7 @@ test("isSelected", () => {
   expect(isSelected({ kind: "rows", anchor: 1, focus: 1 }, 1, 9)).toBe(true);
   expect(isSelected(null, 0, 0)).toBe(false);
 });
+test("select all copies everything and covers every cell", () => {
+  expect(toIpcSelection({ kind: "all" })).toEqual({ kind: "all" });
+  expect(isSelected({ kind: "all" }, 70, 3)).toBe(true);
+});

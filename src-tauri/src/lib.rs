@@ -1,7 +1,7 @@
 mod commands;
 mod events;
 
-use commands::{connections as conn, explorer as ex, query};
+use commands::{connections as conn, explorer as ex, files, queries, query, session};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tauri::Manager;
@@ -9,8 +9,9 @@ use tulka_app::AppState;
 
 static STARTED: OnceLock<Instant> = OnceLock::new();
 
-/// Opt-in startup probe: with `TULKA_STARTUP_PROBE=1` the UI reports its first
-/// paint and the elapsed time since launch is printed to stdout. Local only.
+/// Opt-in startup probe: with `TULKA_STARTUP_PROBE=1` the UI reports the first
+/// paint of the restored workspace and the elapsed time since launch is printed
+/// to stdout. Local only.
 #[tauri::command]
 fn startup_probe() {
     if std::env::var_os("TULKA_STARTUP_PROBE").is_some_and(|v| v == "1")
@@ -36,6 +37,9 @@ pub fn run() {
     let _ = STARTED.set(Instant::now());
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        // For the open dialog of `pick_sql_files` (from Rust). No capability
+        // grants the webview a dialog permission.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // The state needs the AppHandle (to emit events), so it is built
             // here. Tauri runs setup before the webview can invoke a command.
@@ -61,6 +65,8 @@ pub fn run() {
             conn::move_folder,
             conn::list_expanded,
             conn::set_expanded,
+            conn::get_preferences,
+            conn::set_zoom,
             conn::list_server_databases,
             conn::parse_connection_string,
             conn::duplicate_connection,
@@ -80,8 +86,22 @@ pub fn run() {
             query::run_query,
             query::cancel_query,
             query::fetch_rows,
+            query::set_result_view,
             query::copy_results,
             query::close_session,
+            session::load_session,
+            session::save_session,
+            queries::list_saved_queries,
+            queries::read_saved_query,
+            queries::save_query,
+            queries::rename_saved_query,
+            queries::delete_saved_query,
+            queries::reveal_saved_query,
+            files::pick_sql_files,
+            files::allow_dropped_paths,
+            files::sql_files_exist,
+            files::read_sql_file,
+            files::write_sql_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

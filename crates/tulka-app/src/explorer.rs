@@ -853,6 +853,10 @@ pub async fn completion_metadata(
 /// (case-insensitive, segment by segment) and in their subfolders. So
 /// `"Proyecto X/ped"` and `"Cliente A/Proyecto X/ped"` both work. When no
 /// folder matches, the whole query is searched, slashes included.
+///
+/// Saved queries are matched by name with the same matcher, with their own
+/// limit of 20; a folder-scoped query finds none (they belong to a
+/// database, not to a connection).
 pub async fn search_objects(state: &AppState, query: String, limit: usize) -> SearchResponse {
     let config = {
         let c = state.connections.lock().await;
@@ -869,13 +873,18 @@ pub async fn search_objects(state: &AppState, query: String, limit: usize) -> Se
     };
 
     let index = state.explorer.index.clone();
-    let results = blocking(move || {
+    let saved = state.queries.clone();
+    let (results, queries) = blocking(move || {
+        let queries = match scope {
+            Some(_) => Vec::new(),
+            None => saved.search(&text),
+        };
         let scope = SearchScope {
             connection_ids: scope,
         };
         // The read lock covers the search only.
         let index = index.read().unwrap_or_else(PoisonError::into_inner);
-        index.search(&text, &scope, limit)
+        (index.search(&text, &scope, limit), queries)
     })
     .await
     .unwrap_or_default();
@@ -905,6 +914,7 @@ pub async fn search_objects(state: &AppState, query: String, limit: usize) -> Se
         total_matches: results.total_matches,
         databases_matched: results.databases_matched,
         indexing: state.explorer.indexing(),
+        queries,
     }
 }
 
