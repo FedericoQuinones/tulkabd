@@ -21,6 +21,7 @@ pub mod query;
 pub mod results;
 pub mod runlog;
 pub mod session;
+pub mod settings;
 pub mod state;
 pub mod types;
 
@@ -31,9 +32,9 @@ pub use connections::{
     set_expanded, set_preferences, set_zoom, test_connection,
 };
 pub use explorer::{
-    completion_metadata, connect_explorer, disconnect_explorer, explorer_columns,
-    explorer_databases, explorer_objects, object_definition, refresh_metadata, search_objects,
-    table_structure,
+    clear_metadata_cache, completion_metadata, connect_explorer, disconnect_explorer,
+    explorer_columns, explorer_databases, explorer_objects, object_definition, refresh_metadata,
+    search_objects, table_structure,
 };
 pub use files::{
     allow_paths, decode_text, encode_text, read_sql_file, sql_files_exist, write_sql_file,
@@ -57,6 +58,9 @@ pub use results::{
 };
 pub use runlog::{clear_run_log, list_run_log, log_cancelled_run, prune_run_log};
 pub use session::{load_session, save_session};
+pub use settings::{
+    data_locations, data_locations_in, reveal_target, reveal_target_in, DataLocations,
+};
 pub use state::{AppState, SharedBuffer, TabState};
 pub use types::{
     AppEvent, AppEvents, Clipboard, CompletionMetadata, ConnectionStatus, CopyMode, CopyOutcome,

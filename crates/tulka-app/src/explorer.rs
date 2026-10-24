@@ -729,6 +729,28 @@ pub async fn refresh_metadata(
     }
 }
 
+/// Empties the metadata cache and the search index, then queues a new
+/// indexing of every connected Explorer. Disconnected connections are filled
+/// again when they connect.
+pub async fn clear_metadata_cache(state: &AppState) {
+    state.explorer.with_cache(MetaCache::clear).await;
+    state
+        .explorer
+        .update_index(|index| *index = SearchIndex::default())
+        .await;
+    let connected: Vec<(String, Vec<String>)> = state
+        .explorer
+        .conns()
+        .iter()
+        .map(|(id, c)| (id.clone(), c.databases.clone()))
+        .collect();
+    for (id, databases) in connected {
+        let order = index_order(state, &id, &databases);
+        // Fails only if a disconnect came in meanwhile, which is fine.
+        let _ = state.explorer.enqueue(&id, order, false);
+    }
+}
+
 /// Cached databases of a connection, by name; works without a connection.
 pub async fn explorer_databases(state: &AppState, connection_id: String) -> Vec<CachedDatabase> {
     state

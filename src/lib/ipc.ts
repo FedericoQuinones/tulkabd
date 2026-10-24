@@ -512,3 +512,19 @@ export const loadSession = () => invoke<string | null>("load_session");
 
 /** Replaces the saved workspace session. Works even when the connections file is read-only. */
 export const saveSession = (json: string) => invoke<void>("save_session", { json });
+
+/** Where tulkabd keeps its files (full paths; empty when the platform has no such folder). */
+export interface DataLocations {
+  configFile: string;
+  dataDir: string;
+  queriesDir: string;
+  cacheFile: string;
+  runLogFile: string;
+  sessionFile: string;
+}
+export const dataLocations = () => invoke<DataLocations>("data_locations");
+/** Shows the config file, the saved queries folder or the data folder in the system file manager. */
+export type DataLocationKey = "config" | "queries" | "data";
+export const revealDataLocation = (which: DataLocationKey) => invoke<void>("reveal_data_location", { which });
+/** Empties the metadata cache and the search index; connected servers are indexed again. */
+export const clearMetadataCache = () => invoke<void>("clear_metadata_cache");

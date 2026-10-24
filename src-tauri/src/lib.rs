@@ -2,7 +2,7 @@ mod commands;
 mod events;
 
 use commands::{
-    connections as conn, explorer as ex, files, guard, queries, query, runlog, session,
+    connections as conn, explorer as ex, files, guard, queries, query, runlog, session, settings,
 };
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -122,6 +122,9 @@ pub fn run() {
             runlog::list_run_log,
             runlog::clear_run_log,
             runlog::log_cancelled_run,
+            settings::data_locations,
+            settings::reveal_data_location,
+            settings::clear_metadata_cache,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
