@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
   import type { Value } from "../ipc";
   import type { PaneResult } from "../pane/reduce";
   import { cellText } from "./cellText";
   import { isSelected, type GridSelection } from "./selection";
-  import { rowHeight, visibleRange } from "./virtual";
+  import { anchoredScrollTop, headerHeight, rowHeight, visibleRange } from "./virtual";
   import { zoom } from "../zoom.svelte";
   import { WindowCache } from "./windowCache";
 
@@ -19,7 +19,6 @@
   }
   let { tabId, resultIndex, result, final }: Props = $props();
 
-  const HEADER_HEIGHT = 36;
   const ID_WIDTH = 56;
   const NUMERIC = new Set(["int", "bigint", "smallint", "tinyint", "decimal", "numeric", "float", "real", "money", "smallmoney"]);
 
@@ -37,6 +36,7 @@
   let selection = $state<GridSelection | null>(null);
   let scrollTop = $state(0);
   let viewportHeight = $state(0);
+  let gridEl = $state<HTMLDivElement>();
   let widths = $state<number[]>([]);
 
   const columns = $derived(result.columns);
@@ -45,7 +45,22 @@
   const colWidth = (i: number) => widths[i] ?? (numeric[i] ? 120 : 180);
   const totalWidth = $derived(columns.reduce((sum, _, i) => sum + colWidth(i), ID_WIDTH));
   const rowH = $derived(rowHeight(zoom.level));
-  const range = $derived(visibleRange(scrollTop, Math.max(viewportHeight - HEADER_HEIGHT, 0), rowH, total));
+  const headH = $derived(headerHeight(zoom.level));
+  const range = $derived(visibleRange(scrollTop, Math.max(viewportHeight - headH, 0), rowH, total));
+
+  // A zoom change keeps the first visible row at the top. `scrollTop` still holds the position
+  // for the old row height here: the browser's own scroll event (if any) comes later.
+  let shownRowH = untrack(() => rowH);
+  $effect(() => {
+    const h = rowH;
+    untrack(() => {
+      if (h !== shownRowH && gridEl) {
+        scrollTop = anchoredScrollTop(scrollTop, shownRowH, h);
+        gridEl.scrollTop = scrollTop;
+      }
+      shownRowH = h;
+    });
+  });
   const indexes = $derived(Array.from({ length: range.end - range.start }, (_, i) => range.start + i));
 
   export function getSelection(): GridSelection | null {
@@ -101,18 +116,19 @@
     <button type="button" onclick={() => cache.retry()}>{t("results.retry")}</button>
   </div>
 {:else if total === 0 && final}
-  <div class="notice muted">{t("results.empty")}</div>
+  <div class="notice muted" style:top="{headH}px">{t("results.empty")}</div>
 {/if}
 <div
   class="grid"
   role="grid"
   aria-label={t("results.grid")}
   aria-rowcount={total}
+  bind:this={gridEl}
   bind:clientHeight={viewportHeight}
   onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}
 >
-  <div class="inner" style:width="{totalWidth}px" style:height="{HEADER_HEIGHT + total * rowH}px">
-    <div class="head" style:height="{HEADER_HEIGHT}px" role="row">
+  <div class="inner" style:width="{totalWidth}px" style:height="{headH + total * rowH}px">
+    <div class="head" style:height="{headH}px" role="row">
       <div class="id" style:width="{ID_WIDTH}px" role="columnheader">{t("results.rowNumber")}</div>
       {#each columns as c, i (i)}
         <div class="h" class:r={numeric[i]} style:width="{colWidth(i)}px" role="columnheader" title={c.typeName}>
@@ -124,7 +140,7 @@
     </div>
     {#each indexes as i (i)}
       {@const row = rowAt(i)}
-      <div class="row" style:top="{HEADER_HEIGHT + i * rowH}px" style:height="{rowH}px" role="row">
+      <div class="row" style:top="{headH + i * rowH}px" style:height="{rowH}px" role="row">
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <div
           class="id num"
@@ -177,7 +193,6 @@
     font-size: 12px;
   }
   .notice.muted {
-    top: 36px;
     bottom: auto;
     border: 0;
     background: none;
@@ -203,6 +218,7 @@
     min-width: 100%;
   }
   .head {
+    font-size: calc(12px * var(--code-zoom) / 100);
     position: sticky;
     top: 0;
     z-index: 2;
@@ -223,7 +239,6 @@
   .h {
     position: relative;
     color: var(--muted);
-    font-size: 12px;
   }
   .h.r {
     justify-content: flex-end;
@@ -250,7 +265,8 @@
     font-size: 12px;
     cursor: pointer;
   }
-  .row .id {
+  .row .id,
+  .head .id {
     font-size: calc(12px * var(--code-zoom) / 100);
   }
   .head .id {
