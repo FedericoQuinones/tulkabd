@@ -158,7 +158,8 @@
     <button type="button" class="rt" class:on={active === "messages"} onclick={() => (tab = "messages")}>
       {t("pane.messages")}
     </button>
-    <span class="grow"></span>
+    <!-- Always mounted: a live region announces changes of its text, not its arrival. -->
+    <span class="grow"><span class="meta num" aria-live="polite">{shown ?? ""}</span></span>
     {#if result}
       <input
         class="filter"
@@ -173,9 +174,6 @@
         oninput={(e) => onFilterInput(e.currentTarget.value)}
         onkeydown={onFilterKey}
       />
-    {/if}
-    {#if shown}
-      <span class="meta num" aria-live="polite">{shown}</span>
     {/if}
     {#if result?.truncated}
       <span class="warn">{t("results.truncated", { max: count(MAX_ROWS) })}</span>
@@ -243,6 +241,8 @@
   }
   .grow {
     flex: 1;
+    min-width: 0;
+    text-align: right;
   }
   .meta {
     color: var(--muted);

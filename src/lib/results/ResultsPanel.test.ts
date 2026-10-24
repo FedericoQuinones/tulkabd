@@ -289,3 +289,21 @@ test("nothing is copied while a view is on its way", async () => {
   await settle();
   expect(ipc.copyResults).toHaveBeenCalledTimes(1);
 });
+
+test("the row counter is one live region that stays and only changes its text", async () => {
+  vi.useFakeTimers();
+  open();
+  const live = document.querySelector('[aria-live="polite"]')!;
+  expect(live).not.toBeNull();
+  expect(live.textContent).toBe("");
+  type("ped");
+  vi.advanceTimersByTime(150);
+  await settle();
+  expect(document.querySelector('[aria-live="polite"]')).toBe(live);
+  expect(live.textContent).toBe("3 of 20 rows");
+  type("");
+  vi.advanceTimersByTime(150);
+  await settle();
+  expect(document.querySelector('[aria-live="polite"]')).toBe(live);
+  expect(live.textContent).toBe("");
+});
