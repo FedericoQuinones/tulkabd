@@ -149,3 +149,40 @@ test("the default bound is 50 windows of 200 rows", async () => {
   expect(c.get(10 * 200)).toEqual(row(10 * 200));
   expect(c.get(59 * 200 + 199)).toEqual(row(59 * 200 + 199));
 });
+
+test("clear drops the rows and the answers still on their way", async () => {
+  const pending: ((r: Value[][]) => void)[] = [];
+  const fetch = vi.fn(() => new Promise<Value[][]>((r) => pending.push(r)));
+  const c = new WindowCache(fetch);
+  c.ensure(0, 10, 10);
+  pending[0](rowsOf(0, 10));
+  await flush();
+  expect(c.get(0)).toEqual(row(0));
+  c.ensure(0, 10, 10); // complete: nothing to fetch
+  expect(fetch).toHaveBeenCalledTimes(1);
+  c.clear();
+  expect(c.get(0)).toBeUndefined();
+  c.ensure(0, 10, 10);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  c.clear();
+  // The answer to the request made before this clear belongs to the old view.
+  pending[1](rowsOf(50, 10));
+  await flush();
+  expect(c.get(0)).toBeUndefined();
+  c.ensure(0, 10, 10);
+  expect(fetch).toHaveBeenCalledTimes(3);
+  pending[2](rowsOf(70, 10));
+  await flush();
+  expect(c.get(0)).toEqual(row(70));
+});
+
+test("clear also clears the error", async () => {
+  const c = new WindowCache(async () => {
+    throw "boom";
+  });
+  c.ensure(0, 10, 10);
+  await flush();
+  expect(c.error).toBe("boom");
+  c.clear();
+  expect(c.error).toBeNull();
+});

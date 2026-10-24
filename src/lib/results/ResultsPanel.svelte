@@ -1,12 +1,14 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
+  import type { ViewSpec } from "../ipc";
   import type { PaneState } from "../pane/pane.svelte";
   import CopyToast from "./CopyToast.svelte";
   import MessagesView from "./MessagesView.svelte";
   import ResultGrid from "./ResultGrid.svelte";
   import { toIpcSelection } from "./selection";
+  import { isFiltered, resultView, type ResultView } from "./view";
 
   interface Props {
     pane: PaneState;
@@ -17,6 +19,7 @@
   const MAX_ROWS = 100_000;
   const TOAST_MS = 2500;
   const ERROR_TOAST_MS = 5000;
+  const FILTER_DEBOUNCE_MS = 150;
 
   let tab = $state<number | "messages">(0);
   let grid = $state<ResultGrid>();
@@ -34,6 +37,71 @@
   const active = $derived(tab !== "messages" && pane.results[tab] ? tab : "messages");
   const result = $derived(active === "messages" ? null : pane.results[active]);
   const count = (n: number) => n.toLocaleString("en-US");
+  // Sorting and filtering wait for the run to end (D4); the backend says "busy" before that.
+  const ready = $derived(pane.status !== "running");
+
+  /** Sends the view of result `index` of run `run`; a later run has new results without a view. */
+  function sender(index: number, run: number) {
+    return (spec: ViewSpec) =>
+      run === pane.runCount ? ipc.setResultView(pane.tabId, index, spec) : Promise.reject(new Error("stale run"));
+  }
+  const view = $derived(active === "messages" ? null : resultView(pane, pane.runCount, active, sender(active, pane.runCount)));
+
+  // `viewVersion` grows on each change of the active view, so the template reads it again.
+  let viewVersion = $state(0);
+  let filterText = $state("");
+  let filterTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingFilter: (() => void) | null = null;
+
+  $effect(() => {
+    const v = view;
+    untrack(() => {
+      // Text typed for the previous result still goes to it.
+      flushFilter();
+      filterText = v?.spec.text ?? "";
+    });
+    if (!v) return;
+    return v.subscribe((error) => {
+      viewVersion++;
+      if (error === null) return;
+      show(t("results.viewFailed", { error }), true);
+      // The backend kept its previous view; so does the field, unless more is being typed.
+      if (!pendingFilter) filterText = v.spec.text ?? "";
+    });
+  });
+
+  function applyFilter(v: ResultView, text: string) {
+    pendingFilter = null;
+    clearTimeout(filterTimer);
+    const next = text === "" ? null : text;
+    if ((v.spec.text ?? null) !== next) v.set({ ...v.spec, text: next });
+  }
+
+  function flushFilter() {
+    pendingFilter?.();
+  }
+
+  function onFilterInput(text: string) {
+    filterText = text;
+    const v = view;
+    if (!v) return;
+    clearTimeout(filterTimer);
+    pendingFilter = () => applyFilter(v, text);
+    filterTimer = setTimeout(() => applyFilter(v, text), FILTER_DEBOUNCE_MS);
+  }
+
+  function onFilterKey(e: KeyboardEvent) {
+    if (e.key !== "Escape" || filterText === "") return;
+    e.preventDefault();
+    filterText = "";
+    if (view) applyFilter(view, "");
+  }
+
+  const shown = $derived.by(() => {
+    void viewVersion;
+    if (!view || !result || view.visible === null || !isFiltered(view.applied)) return null;
+    return t("results.rowsShown", { shown: count(view.visible), total: count(result.total) });
+  });
 
   const finishedAt = $derived.by(() => {
     const raw = pane.summary?.finishedAt;
@@ -47,7 +115,10 @@
     toast = { text, error };
     toastTimer = setTimeout(() => (toast = null), error ? ERROR_TOAST_MS : TOAST_MS);
   }
-  onDestroy(() => clearTimeout(toastTimer));
+  onDestroy(() => {
+    clearTimeout(toastTimer);
+    flushFilter();
+  });
 
   async function copy(mode: "excel" | "ai") {
     if (active === "messages" || !result || copying) return;
@@ -85,6 +156,24 @@
       {t("pane.messages")}
     </button>
     <span class="grow"></span>
+    {#if result}
+      <input
+        class="filter"
+        type="search"
+        spellcheck="false"
+        autocomplete="off"
+        placeholder={t("results.filterRows")}
+        aria-label={t("results.filterRows")}
+        title={ready ? undefined : t("results.viewWhenDone")}
+        disabled={!ready}
+        value={filterText}
+        oninput={(e) => onFilterInput(e.currentTarget.value)}
+        onkeydown={onFilterKey}
+      />
+    {/if}
+    {#if shown}
+      <span class="meta num" aria-live="polite">{shown}</span>
+    {/if}
     {#if result?.truncated}
       <span class="warn">{t("results.truncated", { max: count(MAX_ROWS) })}</span>
     {/if}
@@ -97,10 +186,11 @@
   <div class="body">
     {#if active === "messages" || !result}
       <MessagesView messages={pane.messages} {onjump} />
-    {:else}
+    {:else if view}
       {#key `${pane.runCount}:${active}`}
-        <ResultGrid bind:this={grid} tabId={pane.tabId} resultIndex={active} {result}
+        <ResultGrid bind:this={grid} tabId={pane.tabId} resultIndex={active} {result} {view} {ready}
           final={pane.status !== "running" || pane.results.length > active + 1}
+          oncopy={() => copy("excel")}
         />
       {/key}
     {/if}
@@ -155,6 +245,28 @@
     color: var(--muted);
     font-size: 12px;
     white-space: nowrap;
+  }
+  .filter {
+    width: 180px;
+    min-width: 0;
+    height: 28px;
+    padding: 0 9px;
+    border: 1px solid var(--control);
+    border-radius: var(--radius-control);
+    background: none;
+    color: var(--text);
+    font: inherit;
+    font-size: 12.5px;
+    outline: none;
+  }
+  .filter:focus {
+    border-color: var(--accent);
+  }
+  .filter::placeholder {
+    color: var(--muted);
+  }
+  .filter:disabled {
+    opacity: 0.4;
   }
   .warn {
     color: var(--warning);
