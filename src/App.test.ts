@@ -6,18 +6,17 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (cmd: string) => (cmd.startsWith("list_") ? [] : null)),
   Channel: class {},
 }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ onCloseRequested: vi.fn(async () => () => {}) }),
 }));
-type DropHandler = (e: { payload: { type: string; paths?: string[] } }) => void;
+type DropHandler = (e: { payload: string[] }) => void;
 const drop = vi.hoisted(() => ({ handler: null as DropHandler | null }));
-vi.mock("@tauri-apps/api/webview", () => ({
-  getCurrentWebview: () => ({
-    onDragDropEvent: vi.fn(async (h: DropHandler) => {
-      drop.handler = h;
-      return () => (drop.handler = null);
-    }),
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (name: string, h: DropHandler) => {
+    if (name === "sql-files-dropped") drop.handler = h;
+    return () => {
+      if (name === "sql-files-dropped") drop.handler = null;
+    };
   }),
 }));
 
@@ -327,7 +326,7 @@ test("the startup probe fires only once the restored workspace is painted", asyn
   }
 });
 
-test("files dropped on the window open in tabs; other files are ignored", async () => {
+test("drop event opens the accepted files", async () => {
   const defaultInvoke = vi.mocked(invoke).getMockImplementation()!;
   vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
     if (cmd === "read_sql_file") {
@@ -340,15 +339,12 @@ test("files dropped on the window open in tabs; other files are ignored", async 
     await new Promise((r) => setTimeout(r, 0));
     flushSync();
     vi.mocked(invoke).mockClear();
-    drop.handler!({ payload: { type: "over" } });
-    drop.handler!({ payload: { type: "drop", paths: ["/a.sql", "/notes.txt"] } });
+    // The backend already allowed these paths; the UI only opens them.
+    drop.handler!({ payload: ["/a.sql"] });
     await new Promise((r) => setTimeout(r, 0));
     flushSync();
     const calls = vi.mocked(invoke).mock.calls.map(([cmd, args]) => [cmd, args]);
-    expect(calls.slice(0, 2)).toEqual([
-      ["allow_dropped_paths", { paths: ["/a.sql"] }],
-      ["read_sql_file", { path: "/a.sql" }],
-    ]);
+    expect(calls).toEqual([["read_sql_file", { path: "/a.sql" }]]);
     const titles = [...document.querySelectorAll('.group [role="tab"]')].map((x) => x.textContent!.trim());
     expect(titles).toEqual(["a.sql"]);
   } finally {

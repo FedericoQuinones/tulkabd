@@ -640,16 +640,8 @@ export class TabsStore {
       // Written back in place, in its own encoding and line endings; never asks for a name.
       const { path, encoding, lineEnding } = tab.file;
       const edits = pane.edits;
-      const write = () => ipc.writeSqlFile(path, pane.text(), encoding, lineEnding);
       try {
-        try {
-          await write();
-        } catch (e) {
-          if (String(e) !== "not_allowed") throw e;
-          // A restored tab whose path the backend could not take at startup: allow it again.
-          await ipc.allowDroppedPaths([path]);
-          await write();
-        }
+        await ipc.writeSqlFile(path, pane.text(), encoding, lineEnding);
       } catch (e) {
         this.saveNotice(pane, t("files.saveFailed", { error: fileErrorText(e) }));
         return;
@@ -768,18 +760,6 @@ export class TabsStore {
       return;
     }
     if (paths.length) await this.openFiles(paths);
-  }
-
-  /** Paths dropped on the window: the `.sql` ones are allowed in the backend, then opened. */
-  async dropFiles(paths: string[]): Promise<void> {
-    const sql = paths.filter((p) => /\.sql$/i.test(p));
-    if (!sql.length) return;
-    try {
-      await ipc.allowDroppedPaths(sql);
-    } catch {
-      // Reading them says why.
-    }
-    await this.openFiles(sql);
   }
 
   private tabOfFile(path: string): Tab | undefined {

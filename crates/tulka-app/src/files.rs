@@ -13,15 +13,16 @@
 //!
 //! # Allowed paths
 //!
-//! The file commands only read or write paths allowed in this run: those
-//! the user picked in the open dialog (allowed by the backend itself), and
-//! those the UI passes to [`allow_paths`] (files dropped on the window and
-//! the files of the restored session). Only absolute paths ending in `.sql`
-//! are allowed; any other path fails with [`NOT_ALLOWED`].
+//! The file commands only read or write a path the user chose: picked in the
+//! open dialog or dropped on the window, in this run or an earlier one
+//! (the list is kept in the session file, the newest 500). Only absolute
+//! paths ending in `.sql` are allowed; any other path fails with
+//! [`NOT_ALLOWED`].
 //!
-//! The list is advisory, not a security boundary: it keeps the UI to the
-//! files the user chose, but the UI can add any `.sql` path to it, so code
-//! running in the webview can read and write any `.sql` file the user can.
+//! Nothing the webview can call adds to the list. [`allow_paths`] is public
+//! only because the Tauri shell is another crate: it must be called with
+//! paths from the native open dialog or the native drop event, never with
+//! paths that came from the UI.
 //!
 //! # Writes
 //!
@@ -161,12 +162,15 @@ pub fn encode_text(text: &str, encoding: FileEncoding, line_ending: LineEnding) 
     }
 }
 
-/// The paths the file commands may touch (see the module docs: advisory,
-/// the UI can add to it).
+/// The paths the file commands may touch (see the module docs).
 #[derive(Default)]
 pub(crate) struct AllowedFiles(Mutex<HashSet<PathBuf>>);
 
 impl AllowedFiles {
+    pub(crate) fn from_paths(paths: Vec<PathBuf>) -> Self {
+        Self(Mutex::new(paths.into_iter().collect()))
+    }
+
     fn contains(&self, path: &Path) -> bool {
         self.0
             .lock()
@@ -183,17 +187,21 @@ fn is_sql_file_path(path: &Path) -> bool {
             .is_some_and(|e| e.eq_ignore_ascii_case("sql"))
 }
 
-/// Lets the file commands read and write `paths` from now on. Meant for the
-/// ones the user picked, dropped on the window or that came back with the
-/// restored session, but nothing checks where they came from. Returns those
-/// accepted, in order: absolute paths ending in `.sql`.
+/// Lets the file commands read and write `paths` from now on, and in later
+/// runs. Only for paths the user chose in the native open dialog or dropped
+/// on the window, read by the Tauri shell itself: the webview must have no
+/// way to reach this. Returns those accepted, in order: absolute paths
+/// ending in `.sql`.
 pub fn allow_paths(state: &AppState, paths: Vec<String>) -> Vec<String> {
     let accepted: Vec<String> = paths
         .into_iter()
         .filter(|p| is_sql_file_path(Path::new(p)))
         .collect();
     let mut set = state.files.0.lock().unwrap_or_else(PoisonError::into_inner);
-    set.extend(accepted.iter().map(PathBuf::from));
+    let accepted_paths: Vec<PathBuf> = accepted.iter().map(PathBuf::from).collect();
+    set.extend(accepted_paths.iter().cloned());
+    drop(set);
+    state.session.remember_allowed(&accepted_paths);
     accepted
 }
 

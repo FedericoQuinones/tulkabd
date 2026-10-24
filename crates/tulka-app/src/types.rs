@@ -20,8 +20,8 @@ pub const NOT_FOUND: &str = "not_found";
 pub const EMPTY_NAME: &str = "empty_name";
 /// Saved-query command error: a query with that name already exists.
 pub const EXISTS: &str = "exists";
-/// File command error: the path was never allowed in this run (picked in
-/// the open dialog, or passed to `allow_paths` by the UI).
+/// File command error: the user never picked or dropped the path (in this
+/// run or an earlier one).
 pub const NOT_ALLOWED: &str = "not_allowed";
 /// File or saved-query command error: the file is not text, neither UTF-8
 /// nor UTF-16 with a BOM, or it holds NUL characters.

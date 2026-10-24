@@ -219,18 +219,17 @@ function restoredTab(s: SessionTab, known: { connectionIds: Set<string> }): Tab 
 }
 
 /**
- * Lets the backend read and write the restored tabs' files, then checks they are still there. A tab
+ * Checks the restored tabs' files are still there (the backend remembers the ones the user picked or
+ * dropped in earlier runs; any other path counts as missing). A tab
  * whose file is gone stops being a file tab (Ctrl+S would recreate a file the user moved or deleted):
  * it keeps its text, now unsaved, with a notice. Tabs are found by their pane, so a tab closed or
  * replaced meanwhile is left alone. Only a file reported missing (`false`) is dropped: when the
- * paths cannot be allowed, the check fails or a file cannot be checked (`null`), the tab keeps its
- * file; Ctrl+S allows a file tab's path again before writing it.
+ * check fails or a file cannot be checked (`null`), the tab keeps its file.
  */
 async function checkFiles(store: TabsStore, files: { pane: PaneState; path: string }[]): Promise<void> {
   const paths = files.map((f) => f.path);
   let exists: (boolean | null)[];
   try {
-    await ipc.allowDroppedPaths(paths);
     exists = await ipc.sqlFilesExist(paths);
   } catch {
     return;
@@ -250,9 +249,8 @@ async function checkFiles(store: TabsStore, files: { pane: PaneState; path: stri
 /**
  * Replaces the store's workspace with a saved session. Connects nothing: a bound query tab opens
  * its session on its first Run. A tab whose connection is not in `known` keeps its text, unbound,
- * with a notice. Definition tabs try to load their text (it needs the Explorer connected). The
- * backend may read and write the files of restored file tabs again; a tab whose file is
- * gone keeps its text but not the file, with a notice (see `checkFiles`).
+ * with a notice. Definition tabs try to load their text (it needs the Explorer connected). A tab whose
+ * file is gone keeps its text but not the file, with a notice (see `checkFiles`).
  */
 export function restore(store: TabsStore, s: SessionV1, known: { connectionIds: Set<string> }): void {
   const list = s.tabs.map((x) => restoredTab(x, known));

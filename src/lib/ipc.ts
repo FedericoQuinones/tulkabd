@@ -484,11 +484,6 @@ export interface OpenedFile {
  */
 export const pickSqlFiles = (filterName: string) => invoke<string[]>("pick_sql_files", { filterName });
 /**
- * Lets the backend read and write `.sql` paths dropped on the window or restored with the session.
- * It accepts any absolute `.sql` path: the allowed list is advisory, not a security boundary.
- */
-export const allowDroppedPaths = (paths: string[]) => invoke<void>("allow_dropped_paths", { paths });
-/**
  * For each path, whether the backend allows it and its file still exists: `false` when it is not
  * allowed or not there, `null` when it could not be checked (no permission, an I/O error). Rejects
  * only when the check could not run at all.
@@ -504,6 +499,13 @@ export const writeSqlFile = (path: string, text: string, encoding: FileEncoding,
   invoke<void>("write_sql_file", { path, text, encoding, lineEnding });
 
 /** Subscribes to the explorer and indexing events. Call the returned function to stop. */
+/**
+ * `.sql` files the user dropped on the window. The backend has already allowed them (it reads the
+ * native drop itself); the UI cannot allow a path, only open what arrives here.
+ */
+export const onSqlFilesDropped = (cb: (paths: string[]) => void): Promise<UnlistenFn> =>
+  listen<string[]>("sql-files-dropped", (ev) => cb(ev.payload));
+
 export const onAppEvent = (cb: (e: AppEvent) => void): Promise<UnlistenFn> =>
   listen<AppEvent>("app-event", (ev) => cb(ev.payload));
 

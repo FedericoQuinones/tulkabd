@@ -6,7 +6,7 @@ use commands::{
 };
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
-use tauri::Manager;
+use tauri::{DragDropEvent, Emitter, Manager, WindowEvent};
 use tulka_app::AppState;
 
 static STARTED: OnceLock<Instant> = OnceLock::new();
@@ -60,6 +60,20 @@ pub fn run() {
             });
             Ok(())
         })
+        // Files dropped on the window are allowed here, from the native event,
+        // before the UI hears of them: the webview cannot allow a path itself.
+        .on_window_event(|window, event| {
+            if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
+                let paths = paths
+                    .iter()
+                    .filter_map(|p| p.to_str().map(str::to_owned))
+                    .collect();
+                let accepted = tulka_app::allow_paths(&window.state::<AppState>(), paths);
+                if !accepted.is_empty() {
+                    let _ = window.emit("sql-files-dropped", accepted);
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             startup_probe,
             probe_log,
@@ -112,7 +126,6 @@ pub fn run() {
             queries::delete_saved_query,
             queries::reveal_saved_query,
             files::pick_sql_files,
-            files::allow_dropped_paths,
             files::sql_files_exist,
             files::read_sql_file,
             files::write_sql_file,

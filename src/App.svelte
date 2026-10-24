@@ -1,11 +1,10 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { t } from "./lib/i18n/t";
   import Rail from "./lib/shell/Rail.svelte";
   import StatusBar from "./lib/shell/StatusBar.svelte";
-  import { loadSession, onAppEvent, saveSession, type ConnectionConfig, type ParsedConnection } from "./lib/ipc";
+  import { loadSession, onAppEvent, onSqlFilesDropped, saveSession, type ConnectionConfig, type ParsedConnection } from "./lib/ipc";
   import ConnectionDialog from "./lib/connections/ConnectionDialog.svelte";
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
   import TransactionDialog from "./lib/tabs/TransactionDialog.svelte";
@@ -69,21 +68,15 @@
     stopDrop?.();
   });
 
-  // `.sql` files dropped on the window open in tabs. The native drop (dragDropEnabled) only sees
-  // files from outside: tabs and tree items move with pointer events, not HTML drag and drop.
-  try {
-    getCurrentWebview()
-      .onDragDropEvent((e) => {
-        if (e.payload.type === "drop") void tabs.dropFiles(e.payload.paths);
-      })
-      .then((fn) => {
-        if (destroyed) fn();
-        else stopDrop = fn;
-      })
-      .catch(() => {});
-  } catch {
-    // Outside Tauri (tests): nothing is ever dropped.
-  }
+  // `.sql` files dropped on the window open in tabs. The backend reads the native drop, allows the
+  // `.sql` paths and sends the accepted ones here; tabs and tree items move with pointer events,
+  // not HTML drag and drop, so only files from outside arrive.
+  onSqlFilesDropped((paths) => void tabs.openFiles(paths))
+    .then((fn) => {
+      if (destroyed) fn();
+      else stopDrop = fn;
+    })
+    .catch(() => {});
   async function restoreSession() {
     // `undefined` when the saved session could not be loaded at all.
     const [json, loaded] = await Promise.all([

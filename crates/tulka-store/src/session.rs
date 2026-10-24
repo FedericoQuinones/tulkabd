@@ -10,11 +10,23 @@ const SESSION_VERSION: i64 = 1;
 /// How long a call waits on a file locked by another process.
 const BUSY_TIMEOUT: Duration = Duration::from_millis(200);
 
-const SCHEMA: &str = "
+/// How many allowed `.sql` paths are remembered; the oldest go first.
+const MAX_ALLOWED_FILES: i64 = 500;
+
+const SESSION_TABLE: &str = "
 CREATE TABLE session (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     json TEXT NOT NULL,
     saved_at INTEGER NOT NULL
+);
+";
+
+/// Created on every open, without a new `user_version`: a session file from
+/// before it existed just gains the table.
+const ALLOWED_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS allowed_file (
+    path TEXT PRIMARY KEY,
+    at INTEGER NOT NULL
 );
 ";
 
@@ -65,13 +77,15 @@ fn try_open(path: &Path) -> Result<Connection, OpenError> {
     } else {
         init(&conn)?;
     }
+    conn.execute_batch(ALLOWED_TABLE)?;
     // `journal_mode` returns a row, so it cannot go through `pragma_update`.
     let _ = conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()));
     Ok(conn)
 }
 
 fn init(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)?;
+    conn.execute_batch(SESSION_TABLE)?;
+    conn.execute_batch(ALLOWED_TABLE)?;
     conn.pragma_update(None, "user_version", SESSION_VERSION)
 }
 
@@ -155,6 +169,49 @@ impl SessionStore {
             tx.commit()
         };
         run(&mut conn).map_err(|e| format!("could not save the session: {e}"))
+    }
+
+    /// The `.sql` paths the user picked or dropped in earlier runs (at most
+    /// 500, the newest). Empty when they cannot be read.
+    pub fn allowed_files(&self) -> Vec<PathBuf> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT path FROM allowed_file ORDER BY at") else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
+            return Vec::new();
+        };
+        rows.filter_map(Result::ok).map(PathBuf::from).collect()
+    }
+
+    /// Remembers `paths` as the newest allowed ones (a known path is moved to
+    /// the newest) and drops the oldest beyond 500. A failure is ignored: the
+    /// paths are still allowed in this run, they are only not remembered.
+    pub fn remember_allowed(&self, paths: &[PathBuf]) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let mut conn = self.lock();
+        let run = |conn: &mut Connection| -> rusqlite::Result<()> {
+            let tx = conn.transaction()?;
+            for path in paths {
+                // Strictly after every path already there, so the order
+                // holds when several land in the same millisecond.
+                tx.execute(
+                    "INSERT INTO allowed_file (path, at)
+                     VALUES (?1, MAX(?2, COALESCE((SELECT MAX(at) + 1 FROM allowed_file), 0)))
+                     ON CONFLICT (path) DO UPDATE SET at = excluded.at",
+                    params![path.to_string_lossy(), now],
+                )?;
+            }
+            tx.execute(
+                "DELETE FROM allowed_file WHERE path NOT IN
+                 (SELECT path FROM allowed_file ORDER BY at DESC LIMIT ?1)",
+                params![MAX_ALLOWED_FILES],
+            )?;
+            tx.commit()
+        };
+        let _ = run(&mut conn);
     }
 }
 
@@ -286,5 +343,67 @@ mod tests {
         assert_eq!(store.load(), None);
         store.save("{}").unwrap();
         assert_eq!(store.load().as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn allowed_files_round_trip_and_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let store = SessionStore::open(&path);
+        assert!(store.allowed_files().is_empty());
+        let a = PathBuf::from("/q/a.sql");
+        let b = PathBuf::from("/q/b.sql");
+        store.remember_allowed(&[a.clone(), b.clone()]);
+        // Remembering a path again does not duplicate it.
+        store.remember_allowed(std::slice::from_ref(&a));
+        let mut got = store.allowed_files();
+        got.sort();
+        assert_eq!(got, [a.clone(), b.clone()]);
+        drop(store);
+        let mut got = SessionStore::open(&path).allowed_files();
+        got.sort();
+        assert_eq!(got, [a, b]);
+    }
+
+    #[test]
+    fn allowed_files_keep_the_newest_500() {
+        let store = SessionStore::in_memory();
+        // One call per path, so each has its own, increasing, timestamp order.
+        for i in 0..520 {
+            store.remember_allowed(&[PathBuf::from(format!("/q/{i}.sql"))]);
+        }
+        let got = store.allowed_files();
+        assert_eq!(got.len(), 500);
+        assert!(!got.contains(&PathBuf::from("/q/0.sql")));
+        assert!(!got.contains(&PathBuf::from("/q/19.sql")));
+        assert!(got.contains(&PathBuf::from("/q/20.sql")));
+        assert!(got.contains(&PathBuf::from("/q/519.sql")));
+        // A path seen again is the newest, so it survives the next trim.
+        store.remember_allowed(&[PathBuf::from("/q/20.sql")]);
+        store.remember_allowed(&[PathBuf::from("/q/new.sql")]);
+        let got = store.allowed_files();
+        assert!(got.contains(&PathBuf::from("/q/20.sql")));
+        assert!(!got.contains(&PathBuf::from("/q/21.sql")));
+    }
+
+    #[test]
+    fn a_session_file_without_the_allowed_table_gets_it_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SESSION_TABLE).unwrap();
+            conn.pragma_update(None, "user_version", SESSION_VERSION)
+                .unwrap();
+            conn.execute(
+                "INSERT INTO session (id, json, saved_at) VALUES (1, 'kept', 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let store = SessionStore::open(&path);
+        assert_eq!(store.load().as_deref(), Some("kept"));
+        store.remember_allowed(&[PathBuf::from("/q/a.sql")]);
+        assert_eq!(store.allowed_files(), [PathBuf::from("/q/a.sql")]);
     }
 }

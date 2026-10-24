@@ -16,7 +16,6 @@ vi.mock("../ipc", () => ({
   startupError: vi.fn(),
   completionMetadata: vi.fn(),
   onAppEvent: vi.fn(),
-  allowDroppedPaths: vi.fn(),
   sqlFilesExist: vi.fn(),
   transactionCount: vi.fn(),
 }));
@@ -61,7 +60,6 @@ beforeEach(async () => {
   vi.mocked(ipc.tableStructure).mockRejectedValue("not_connected");
   vi.mocked(ipc.completionMetadata).mockResolvedValue({ schemas: [], objects: [], columns: {} } as never);
   vi.mocked(ipc.onAppEvent).mockResolvedValue(() => {});
-  vi.mocked(ipc.allowDroppedPaths).mockResolvedValue();
   vi.mocked(ipc.sqlFilesExist).mockImplementation(async (paths) => paths.map(() => true));
   connections.list = [conn, nopw];
   closeRequested = null;
@@ -134,17 +132,14 @@ test("restored tabs keep savedQuery, file and dirty", async () => {
   expect(back.dirty).toBe(true);
 });
 
-test("restore lets the backend read and write the restored tabs' files", async () => {
+test("restore never asks to allow paths", async () => {
   const a = tabs.open({ kind: "query" });
-  tabs.open({ kind: "query" });
-  const b = tabs.open({ kind: "query" });
   tabs.list.find((x) => x.id === a)!.file = { path: "/home/u/a.sql", encoding: "utf8", lineEnding: "lf" };
-  tabs.list.find((x) => x.id === b)!.file = { path: "C:\\sql\\b.sql", encoding: "utf16Le", lineEnding: "crlf" };
   const json = JSON.stringify(snapshot(tabs));
   await tabs.reset();
   restore(tabs, parseSession(json)!, known);
-  expect(ipc.allowDroppedPaths).toHaveBeenCalledTimes(1);
-  expect(ipc.allowDroppedPaths).toHaveBeenCalledWith(["/home/u/a.sql", "C:\\sql\\b.sql"]);
+  await flush();
+  expect(ipc.sqlFilesExist).toHaveBeenCalledWith(["/home/u/a.sql"]);
 });
 
 /** A saved session with file tabs on `paths`, each with unsaved text and not dirty. */
@@ -160,15 +155,9 @@ async function sessionWithFiles(paths: string[]): Promise<string> {
 
 test("a restored file tab whose file is gone keeps its text, loses the file and says so", async () => {
   const json = await sessionWithFiles(["/sql/here.sql", "/sql/gone.sql"]);
-  const order: string[] = [];
-  vi.mocked(ipc.allowDroppedPaths).mockImplementation(async () => void order.push("allow"));
-  vi.mocked(ipc.sqlFilesExist).mockImplementation(async (paths) => {
-    order.push("exist");
-    return paths.map((p) => p !== "/sql/gone.sql");
-  });
+  vi.mocked(ipc.sqlFilesExist).mockImplementation(async (paths) => paths.map((p) => p !== "/sql/gone.sql"));
   restore(tabs, parseSession(json)!, known);
   await flush();
-  expect(order).toEqual(["allow", "exist"]);
   expect(ipc.sqlFilesExist).toHaveBeenCalledWith(["/sql/here.sql", "/sql/gone.sql"]);
   const [here, gone] = tabs.list;
   expect(here.file?.path).toBe("/sql/here.sql");
@@ -193,16 +182,6 @@ test("a restored file tab that lost both its connection and its file keeps both 
   const notice = tabs.list[0].pane!.notice!;
   expect(notice).toContain(t("tabs.restoredWithoutConnection"));
   expect(notice).toContain(t("tabs.restoredWithoutFile", { path: "/gone.sql" }));
-});
-
-test("when the restored paths cannot be allowed, file tabs keep their file and nothing is checked", async () => {
-  const json = await sessionWithFiles(["/sql/a.sql"]);
-  vi.mocked(ipc.allowDroppedPaths).mockRejectedValue("internal error");
-  restore(tabs, parseSession(json)!, known);
-  await flush();
-  expect(ipc.sqlFilesExist).not.toHaveBeenCalled();
-  expect(tabs.list[0].file?.path).toBe("/sql/a.sql");
-  expect(tabs.list[0].pane!.notice).toBeNull();
 });
 
 test("a restored file tab keeps its file when the check fails or cannot tell", async () => {
@@ -239,14 +218,6 @@ test("the file check of a restore leaves alone a tab closed or replaced meanwhil
   await flush();
   expect(fresh.file?.path).toBe("/sql/gone.sql");
   expect(fresh.pane!.notice).toBeNull();
-});
-
-test("restore without file tabs allows nothing", async () => {
-  tabs.open({ kind: "query" });
-  const json = JSON.stringify(snapshot(tabs));
-  await tabs.reset();
-  restore(tabs, parseSession(json)!, known);
-  expect(ipc.allowDroppedPaths).not.toHaveBeenCalled();
 });
 
 test("parseSession returns null for garbage, another version, null or a broken structure", async () => {

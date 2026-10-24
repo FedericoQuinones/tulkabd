@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tulka_app::*;
 use tulka_core::{ConfigStore, MemoryStore};
+use tulka_store::SessionStore;
 
 /// `s` as UTF-16 LE with a BOM, the way SSMS saves.
 fn utf16le_bom(s: &str) -> Vec<u8> {
@@ -231,6 +232,53 @@ async fn paths_that_were_not_allowed_are_neither_read_nor_written() {
     .await;
     assert_eq!(err.unwrap_err(), NOT_ALLOWED);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 1");
+}
+
+#[tokio::test]
+async fn paths_allowed_in_a_previous_run_are_allowed_after_restart() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("session.db");
+    let file = dir.path().join("kept.sql");
+    std::fs::write(&file, "SELECT 1").unwrap();
+    let path = path_string(&file);
+    {
+        let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
+        let accepted = allow_paths(&st, vec![path.clone()]);
+        assert_eq!(accepted, std::slice::from_ref(&path));
+    }
+    let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
+    assert_eq!(
+        read_sql_file(&st, path.clone()).await.unwrap().text,
+        "SELECT 1"
+    );
+    assert_eq!(
+        sql_files_exist(&st, vec![path]).await.unwrap(),
+        [Some(true)]
+    );
+}
+
+#[tokio::test]
+async fn a_path_never_allowed_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("session.db");
+    let allowed = dir.path().join("a.sql");
+    let other = dir.path().join("b.sql");
+    std::fs::write(&allowed, "SELECT 1").unwrap();
+    std::fs::write(&other, "SELECT 2").unwrap();
+    {
+        let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
+        allow_paths(&st, vec![path_string(&allowed)]);
+    }
+    let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
+    let other = path_string(&other);
+    assert_eq!(
+        read_sql_file(&st, other.clone()).await.unwrap_err(),
+        NOT_ALLOWED
+    );
+    assert_eq!(
+        sql_files_exist(&st, vec![other]).await.unwrap(),
+        [Some(false)]
+    );
 }
 
 #[tokio::test]

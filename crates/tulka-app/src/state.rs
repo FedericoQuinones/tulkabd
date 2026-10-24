@@ -197,7 +197,9 @@ impl AppState {
     }
 
     /// Persists the workspace session in `store` instead of memory.
+    /// The `.sql` paths the user allowed in earlier runs are allowed again.
     pub fn with_session(mut self, store: Arc<SessionStore>) -> Self {
+        self.files = AllowedFiles::from_paths(store.allowed_files());
         self.session = store;
         self
     }
