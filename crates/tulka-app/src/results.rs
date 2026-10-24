@@ -36,7 +36,7 @@ pub struct ResultBuffer {
     pub truncated: bool,
     /// Indexes into `rows` of the visible rows, in display order, set by
     /// [`ResultBuffer::set_view`]; `None` shows every row in arrival order.
-    pub view: Option<Vec<u32>>,
+    view: Option<Vec<u32>>,
 }
 
 /// How a received result is shown: filtered, then sorted. Every filter must
@@ -196,6 +196,11 @@ impl ResultBuffer {
         self.view = Some(view);
     }
 
+    /// Whether a view (sort or filter) is set.
+    pub fn has_view(&self) -> bool {
+        self.view.is_some()
+    }
+
     /// How many rows the view shows.
     pub fn visible_len(&self) -> usize {
         self.view.as_ref().map_or(self.rows.len(), Vec::len)
@@ -222,6 +227,8 @@ impl ResultBuffer {
     /// Text and binary cells of the kept rows are capped at
     /// [`MAX_CELL_BYTES`]; returns whether any was.
     pub fn push_rows(&mut self, mut rows: Vec<Vec<Value>>) -> bool {
+        // Views are only set once a run ended, and a run gets new buffers.
+        debug_assert!(self.view.is_none(), "rows pushed under a view");
         let room = self.cap.saturating_sub(self.rows.len());
         if rows.len() > room {
             rows.truncate(room);
@@ -1217,7 +1224,7 @@ mod tests {
             text: Some(String::new()),
             ..ViewSpec::default()
         });
-        assert_eq!(b.view, None);
+        assert!(!b.has_view());
         assert_eq!(first_cells(&b), vec![Value::Int(2), Value::Int(1)]);
         assert_eq!(b.visible_len(), 2);
     }
@@ -1283,9 +1290,18 @@ mod tests {
             .map(|r| {
                 (0..20)
                     .map(|c| match c % 5 {
+                        _ if c == 7 => Value::Text(format!("Ferretería {}", r % 1000)),
                         0 => Value::Int(((r * 7919) % 100_003) as i64),
                         1 => Value::Decimal(format!("{}.{:02}", (r * 31) % 9973, r % 100)),
                         2 => Value::Text(format!("Cliente {} pedido {}", r % 977, r)),
+                        _ if c == 19 => Value::DateTimeOffset(format!(
+                            "2026-{:02}-{:02} {:02}:00:00.1234567 {}{:02}:30",
+                            r % 12 + 1,
+                            r % 28 + 1,
+                            r % 24,
+                            if r % 2 == 0 { '-' } else { '+' },
+                            r % 14
+                        )),
                         3 => Value::DateTime(format!(
                             "2026-{:02}-{:02} 10:00:00",
                             r % 12 + 1,
@@ -1312,11 +1328,20 @@ mod tests {
             ("sort decimal", sorted(1, true)),
             ("sort text", sorted(2, false)),
             ("sort datetime", sorted(3, false)),
+            ("sort non-ASCII text", sorted(7, false)),
+            ("sort datetimeoffset", sorted(19, true)),
             ("sort float with nulls", sorted(4, true)),
             (
                 "text filter",
                 ViewSpec {
                     text: Some("pedido 9".into()),
+                    ..ViewSpec::default()
+                },
+            ),
+            (
+                "non-ASCII text filter",
+                ViewSpec {
+                    text: Some("RÍA 9".into()),
                     ..ViewSpec::default()
                 },
             ),

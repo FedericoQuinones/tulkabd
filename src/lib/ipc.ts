@@ -270,6 +270,8 @@ export const fetchRows = (tabId: string, resultIndex: number, offset: number, li
 /**
  * Sorts and filters a received result without rerunning it; returns the visible row count.
  * `fetchRows` and `copyResults` then use visible-row indexes. Fails with "busy" while the tab runs.
+ * Calls on one result are not ordered by the backend: the UI must wait for one before sending
+ * the next (or drop stale replies), or an older view may be applied last.
  */
 export const setResultView = (tabId: string, resultIndex: number, view: ViewSpec) =>
   invoke<number>("set_result_view", { tabId, resultIndex, view });

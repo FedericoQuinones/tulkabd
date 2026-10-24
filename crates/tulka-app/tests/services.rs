@@ -1071,24 +1071,34 @@ async fn result_view_orders_fetch_and_copy() {
 async fn result_view_rejects_unknown_columns_and_results() {
     let (f, _) = connected("t1").await;
     run(&f.state, "t1", "rows 2").await.0.unwrap();
-    assert!(set_result_view(&f.state, "t1".into(), 0, sort_by(3, false))
+    set_result_view(&f.state, "t1".into(), 0, sort_by(0, true))
         .await
-        .is_err());
+        .unwrap();
+    let reversed = vec![fake_row(1), fake_row(0)];
+
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 0, sort_by(3, false)).await,
+        Err("column 3 does not exist".to_string())
+    );
     let filter = ViewSpec {
         columns: vec![ColumnFilter::IsNull { column: 9 }],
         ..ViewSpec::default()
     };
-    assert!(set_result_view(&f.state, "t1".into(), 0, filter)
-        .await
-        .is_err());
-    assert!(set_result_view(&f.state, "t1".into(), 1, sort_by(0, false))
-        .await
-        .is_err());
-    assert!(
-        set_result_view(&f.state, "nope".into(), 0, sort_by(0, false))
-            .await
-            .is_err()
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 0, filter).await,
+        Err("column 9 does not exist".to_string())
     );
+    assert_eq!(
+        set_result_view(&f.state, "t1".into(), 1, sort_by(0, false)).await,
+        Err("result 1 does not exist".to_string())
+    );
+    assert_eq!(
+        set_result_view(&f.state, "nope".into(), 0, sort_by(0, false)).await,
+        Err("no session is open on this tab".to_string())
+    );
+    // A rejected view leaves the previous one in place.
+    let rows = fetch_rows(&f.state, "t1".into(), 0, 0, 10).await.unwrap();
+    assert_eq!(rows, reversed);
 }
 
 #[tokio::test]
