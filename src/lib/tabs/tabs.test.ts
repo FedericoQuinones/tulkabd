@@ -28,6 +28,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 import * as ipc from "../ipc";
+import { CHECK_TIMEOUT_MS, END_RETRIES, END_RETRY_MS } from "./tabs.svelte";
 import { connections } from "../connections/store.svelte";
 import { groups } from "../workspace/layout";
 import { tabs } from "./tabs.svelte";
@@ -499,4 +500,106 @@ test("the session is saved before the window close asks", async () => {
   await flush();
   await closeRequested!({ preventDefault: vi.fn() });
   expect(save).toHaveBeenCalledTimes(1);
+});
+
+// ------------------------------------------------------------------ dead connections and running tabs
+
+test("a count that never answers is unknown after the timeout", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockReturnValue(new Promise(() => {}));
+  vi.useFakeTimers();
+  try {
+    const asking = tabs.requestClose(id);
+    await vi.advanceTimersByTimeAsync(CHECK_TIMEOUT_MS + 1);
+    await asking;
+  } finally {
+    vi.useRealTimers();
+  }
+  expect(tabs.closePrompt?.items[0]).toMatchObject({ tabId: id, state: "unknown" });
+  expect(tabs.list.some((x) => x.id === id)).toBe(true);
+});
+
+test("a rollback that finds the session busy closes the session instead", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await tabs.requestClose(id);
+  vi.mocked(ipc.endTransactions).mockRejectedValue("busy");
+  await tabs.answerClose(false);
+  expect(ipc.closeSession).toHaveBeenCalledWith(id);
+  expect(tabs.list.some((x) => x.id === id)).toBe(false);
+  expect(tabs.closePrompt).toBeNull();
+});
+
+test("a rollback on a lost connection counts as done", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await tabs.requestClose(id);
+  vi.mocked(ipc.endTransactions).mockRejectedValue("disconnected");
+  await tabs.answerClose(false);
+  expect(tabs.list.some((x) => x.id === id)).toBe(false);
+});
+
+test("a failed commit never closes the session, and the error has no raw sentinel", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await tabs.requestClose(id);
+  vi.mocked(ipc.endTransactions).mockRejectedValue("busy");
+  await tabs.answerClose(true);
+  expect(ipc.closeSession).not.toHaveBeenCalled();
+  expect(tabs.list.some((x) => x.id === id)).toBe(true);
+  expect(tabs.closePrompt?.error).toBe("Could not end the transaction: the query is still running. The tab stays open.");
+  vi.mocked(ipc.endTransactions).mockRejectedValue("disconnected");
+  await tabs.answerClose(true);
+  expect(tabs.closePrompt?.error).toBe("Could not end the transaction: the connection was lost. The tab stays open.");
+});
+
+test("a window rollback closes the session of a tab that cannot answer", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  vi.mocked(ipc.endTransactions).mockRejectedValue("busy");
+  await armWindowClose();
+  await closeRequested!({ preventDefault: vi.fn() });
+  await tabs.answerClose(false);
+  expect(ipc.closeSession).toHaveBeenCalledWith(id);
+  expect(destroy).toHaveBeenCalledTimes(1);
+});
+
+test("a running tab is retried END_RETRIES times, then rolled back by closing; a commit gives up", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockRejectedValue("busy");
+  await tabs.requestClose(id);
+  vi.mocked(ipc.endTransactions).mockRejectedValue("busy");
+  vi.useFakeTimers();
+  try {
+    const answering = tabs.answerClose(false);
+    await vi.advanceTimersByTimeAsync(END_RETRY_MS * (END_RETRIES + 1));
+    await answering;
+  } finally {
+    vi.useRealTimers();
+  }
+  expect(ipc.endTransactions).toHaveBeenCalledTimes(END_RETRIES);
+  expect(ipc.closeSession).toHaveBeenCalledWith(id);
+  expect(tabs.list.some((x) => x.id === id)).toBe(false);
+});
+
+test("a running tab cannot be committed", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockRejectedValue("busy");
+  await tabs.requestClose(id);
+  await tabs.answerClose(true);
+  expect(ipc.endTransactions).not.toHaveBeenCalled();
+  expect(ipc.cancelQuery).not.toHaveBeenCalled();
+  expect(tabs.list.some((x) => x.id === id)).toBe(true);
+});
+
+test("a window close while a tab prompt is open keeps the window", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await armWindowClose();
+  await tabs.requestClose(id);
+  expect(tabs.closePrompt?.scope).toBe("tab");
+  const preventDefault = vi.fn();
+  await closeRequested!({ preventDefault });
+  expect(preventDefault).toHaveBeenCalledTimes(1);
+  expect(destroy).not.toHaveBeenCalled();
 });

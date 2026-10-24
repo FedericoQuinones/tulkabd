@@ -88,6 +88,17 @@ export const END_RETRY_MS = 50;
 /** Attempts before giving up on a tab whose query does not stop. */
 export const END_RETRIES = 100;
 
+/** Longest wait for a tab to say how many transactions it holds before it counts as unknown. */
+export const CHECK_TIMEOUT_MS = 3000;
+
+/** A rejection of the transaction commands as user text: sentinels become words. */
+function txErrorText(e: unknown): string {
+  const text = errorText(e);
+  if (text === "busy") return t("tx.error.busy");
+  if (text === "disconnected") return t("tx.error.disconnected");
+  return text;
+}
+
 /** A tab to ask about before it closes, and where it runs. */
 export interface CloseItem {
   tabId: string;
@@ -377,10 +388,17 @@ export class TabsStore {
   /** What the tab's session holds. A tab with no session or a lost one holds nothing. */
   private async checkTab(tab: Tab): Promise<CloseCheck> {
     if (!tab.pane || tab.pane.status === "disconnected") return { tabId: tab.id, state: "none", count: 0 };
+    // A dead connection can leave the question unanswered; the user is then asked.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject("timeout"), CHECK_TIMEOUT_MS);
+    });
     try {
-      return checkFrom(tab.id, { count: await ipc.transactionCount(tab.id) });
+      return checkFrom(tab.id, { count: await Promise.race([ipc.transactionCount(tab.id), timeout]) });
     } catch (error) {
       return checkFrom(tab.id, { error });
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -407,17 +425,27 @@ export class TabsStore {
     this.closePrompt = { scope: "window", items: this.itemsOf(plan.tabs), busy: false, error: null };
   }
 
-  /** Ends the transactions of one listed tab; a running tab is cancelled first. */
+  /**
+   * Ends the transactions of one listed tab; a running tab is cancelled first. A rollback that
+   * cannot reach the session (still busy, or the connection is gone) closes the session instead:
+   * the server undoes an open transaction when its connection goes away. A commit never does.
+   */
   private async endOne(item: CloseItem, commit: boolean): Promise<void> {
-    if (item.state === "open") return ipc.endTransactions(item.tabId, commit);
-    await ipc.cancelQuery(item.tabId).catch(() => {});
+    const running = item.state === "unknown";
+    if (running) await ipc.cancelQuery(item.tabId).catch(() => {});
     for (let attempt = 1; ; attempt++) {
       try {
         return await ipc.endTransactions(item.tabId, commit);
       } catch (e) {
+        const text = errorText(e);
         // The cancelled query still holds the session for a moment.
-        if (errorText(e) !== "busy" || attempt >= END_RETRIES) throw e;
-        await new Promise((r) => setTimeout(r, END_RETRY_MS));
+        if (text === "busy" && running && attempt < END_RETRIES) {
+          await new Promise((r) => setTimeout(r, END_RETRY_MS));
+          continue;
+        }
+        if (!commit && text === "disconnected") return;
+        if (!commit && text === "busy") return ipc.closeSession(item.tabId);
+        throw e;
       }
     }
   }
@@ -429,13 +457,15 @@ export class TabsStore {
   async answerClose(commit: boolean): Promise<void> {
     const prompt = this.closePrompt;
     if (!prompt || prompt.busy) return;
+    // What a running query did so far is not worth committing: it can only be rolled back.
+    if (commit && prompt.items.some((x) => x.state === "unknown")) return;
     this.closePrompt = { ...prompt, busy: true, error: null };
     const left = [...prompt.items];
     while (left.length > 0) {
       try {
         await this.endOne(left[0], commit);
       } catch (e) {
-        this.closePrompt = { ...prompt, items: left, busy: false, error: t("tx.failed", { error: errorText(e) }) };
+        this.closePrompt = { ...prompt, items: left, busy: false, error: t("tx.failed", { error: txErrorText(e) }) };
         return;
       }
       const [done] = left.splice(0, 1);

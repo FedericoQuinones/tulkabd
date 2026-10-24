@@ -12,6 +12,8 @@
   let { prompt, onanswer, oncancel }: Props = $props();
 
   const all = $derived(prompt.scope === "window");
+  // A running query can only be rolled back: committing would keep half of its work.
+  const canCommit = $derived(!prompt.items.some((x) => x.state === "unknown"));
   let panel: HTMLElement;
   let cancelButton: HTMLButtonElement;
 
@@ -77,9 +79,11 @@
       <button type="button" class="ghost" disabled={prompt.busy} onclick={() => onanswer(false)}>
         {t(all ? "tx.rollbackAll" : "tx.rollback")}
       </button>
-      <button type="button" class="primary" disabled={prompt.busy} onclick={() => onanswer(true)}>
-        {t(all ? "tx.commitAll" : "tx.commit")}
-      </button>
+      {#if canCommit}
+        <button type="button" class="primary" disabled={prompt.busy} onclick={() => onanswer(true)}>
+          {t(all ? "tx.commitAll" : "tx.commit")}
+        </button>
+      {/if}
     </div>
   </div>
 </div>
