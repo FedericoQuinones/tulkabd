@@ -137,9 +137,16 @@ test("restore never asks to allow paths", async () => {
   tabs.list.find((x) => x.id === a)!.file = { path: "/home/u/a.sql", encoding: "utf8", lineEnding: "lf" };
   const json = JSON.stringify(snapshot(tabs));
   await tabs.reset();
+  vi.mocked(ipc.sqlFilesExist).mockResolvedValue([true]);
+  vi.clearAllMocks();
   restore(tabs, parseSession(json)!, known);
   await flush();
   expect(ipc.sqlFilesExist).toHaveBeenCalledWith(["/home/u/a.sql"]);
+  // The only ipc call a restore makes for its files is the existence check.
+  const called = Object.entries(ipc)
+    .filter(([, fn]) => vi.isMockFunction(fn) && fn.mock.calls.length > 0)
+    .map(([name]) => name);
+  expect(called).toEqual(["sqlFilesExist"]);
 });
 
 /** A saved session with file tabs on `paths`, each with unsaved text and not dirty. */

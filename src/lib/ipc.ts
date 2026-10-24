@@ -498,7 +498,6 @@ export const readSqlFile = (path: string) => invoke<OpenedFile>("read_sql_file",
 export const writeSqlFile = (path: string, text: string, encoding: FileEncoding, lineEnding: LineEnding) =>
   invoke<void>("write_sql_file", { path, text, encoding, lineEnding });
 
-/** Subscribes to the explorer and indexing events. Call the returned function to stop. */
 /**
  * `.sql` files the user dropped on the window. The backend has already allowed them (it reads the
  * native drop itself); the UI cannot allow a path, only open what arrives here.
@@ -506,6 +505,7 @@ export const writeSqlFile = (path: string, text: string, encoding: FileEncoding,
 export const onSqlFilesDropped = (cb: (paths: string[]) => void): Promise<UnlistenFn> =>
   listen<string[]>("sql-files-dropped", (ev) => cb(ev.payload));
 
+/** Subscribes to the explorer and indexing events. Call the returned function to stop. */
 export const onAppEvent = (cb: (e: AppEvent) => void): Promise<UnlistenFn> =>
   listen<AppEvent>("app-event", (ev) => cb(ev.payload));
 

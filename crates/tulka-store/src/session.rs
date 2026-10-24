@@ -34,6 +34,11 @@ CREATE TABLE IF NOT EXISTS allowed_file (
 /// file, separate from the metadata cache. The JSON is opaque to the backend:
 /// its format belongs to the UI. It holds editor text, never passwords, and is
 /// never logged. Every call is blocking.
+///
+/// The file also holds the `.sql` paths the user picked or dropped
+/// (`allowed_file`). They are written only by the backend from the native
+/// dialog and drop events; the session JSON, which the UI writes, never adds
+/// to them.
 pub struct SessionStore {
     conn: Mutex<Connection>,
 }
@@ -77,7 +82,9 @@ fn try_open(path: &Path) -> Result<Connection, OpenError> {
     } else {
         init(&conn)?;
     }
-    conn.execute_batch(ALLOWED_TABLE)?;
+    // Not essential: on a file that cannot be written the session still
+    // loads, and the allowed paths are just not remembered.
+    let _ = conn.execute_batch(ALLOWED_TABLE);
     // `journal_mode` returns a row, so it cannot go through `pragma_update`.
     let _ = conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()));
     Ok(conn)
@@ -184,25 +191,34 @@ impl SessionStore {
         rows.filter_map(Result::ok).map(PathBuf::from).collect()
     }
 
-    /// Remembers `paths` as the newest allowed ones (a known path is moved to
-    /// the newest) and drops the oldest beyond 500. A failure is ignored: the
-    /// paths are still allowed in this run, they are only not remembered.
+    /// Remembers `paths` as the newest allowed ones, in order (a known path
+    /// is moved to the newest), and drops the oldest beyond 500. Only the
+    /// last 500 of a batch are written. A failure is ignored: the paths are
+    /// still allowed in this run, they are only not remembered.
     pub fn remember_allowed(&self, paths: &[PathBuf]) {
+        let keep = &paths[paths.len().saturating_sub(MAX_ALLOWED_FILES as usize)..];
+        if keep.is_empty() {
+            return;
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
         let mut conn = self.lock();
         let run = |conn: &mut Connection| -> rusqlite::Result<()> {
             let tx = conn.transaction()?;
-            for path in paths {
-                // Strictly after every path already there, so the order
-                // holds when several land in the same millisecond.
-                tx.execute(
-                    "INSERT INTO allowed_file (path, at)
-                     VALUES (?1, MAX(?2, COALESCE((SELECT MAX(at) + 1 FROM allowed_file), 0)))
+            // Strictly after every path already there, so the order holds
+            // when several land in the same millisecond.
+            let newest: Option<i64> =
+                tx.query_row("SELECT MAX(at) FROM allowed_file", [], |r| r.get(0))?;
+            let base = newest.map_or(now, |n| now.max(n + 1));
+            {
+                let mut insert = tx.prepare_cached(
+                    "INSERT INTO allowed_file (path, at) VALUES (?1, ?2)
                      ON CONFLICT (path) DO UPDATE SET at = excluded.at",
-                    params![path.to_string_lossy(), now],
                 )?;
+                for (i, path) in keep.iter().enumerate() {
+                    insert.execute(params![path.to_string_lossy(), base + i as i64])?;
+                }
             }
             tx.execute(
                 "DELETE FROM allowed_file WHERE path NOT IN
@@ -405,5 +421,54 @@ mod tests {
         assert_eq!(store.load().as_deref(), Some("kept"));
         store.remember_allowed(&[PathBuf::from("/q/a.sql")]);
         assert_eq!(store.allowed_files(), [PathBuf::from("/q/a.sql")]);
+    }
+
+    #[test]
+    fn a_big_batch_is_fast_and_keeps_the_last_500_of_it() {
+        let store = SessionStore::in_memory();
+        let paths: Vec<PathBuf> = (0..2000)
+            .map(|i| PathBuf::from(format!("/q/{i}.sql")))
+            .collect();
+        let start = std::time::Instant::now();
+        store.remember_allowed(&paths);
+        assert!(start.elapsed() < Duration::from_millis(200));
+        let got = store.allowed_files();
+        assert_eq!(got.len(), 500);
+        assert_eq!(got.first(), Some(&PathBuf::from("/q/1500.sql")));
+        assert_eq!(got.last(), Some(&PathBuf::from("/q/1999.sql")));
+    }
+
+    #[test]
+    fn remembering_nothing_opens_no_transaction() {
+        let store = SessionStore::in_memory();
+        // Another connection would see a write lock if a transaction were open;
+        // here it is enough that nothing changes and nothing fails.
+        store.remember_allowed(&[]);
+        assert!(store.allowed_files().is_empty());
+    }
+
+    #[test]
+    fn a_read_only_session_file_without_the_allowed_table_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SESSION_TABLE).unwrap();
+            conn.pragma_update(None, "user_version", SESSION_VERSION)
+                .unwrap();
+            conn.execute(
+                "INSERT INTO session (id, json, saved_at) VALUES (1, 'kept', 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+        // The table cannot be created on a read-only file: opening goes on.
+        let store = SessionStore::open(&path);
+        assert_eq!(store.load().as_deref(), Some("kept"));
+        assert!(store.allowed_files().is_empty());
+        store.remember_allowed(&[PathBuf::from("/q/a.sql")]);
     }
 }

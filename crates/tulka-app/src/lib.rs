@@ -37,8 +37,9 @@ pub use explorer::{
     search_objects, table_structure,
 };
 pub use files::{
-    allow_paths, decode_text, encode_text, read_sql_file, sql_files_exist, write_sql_file,
-    FileEncoding, LineEnding, OpenedFile, TextFile, MAX_SQL_FILE_BYTES,
+    accept_dropped_files, allow_paths, decode_text, encode_text, read_sql_file,
+    remember_allowed_files, sql_files_exist, write_sql_file, FileEncoding, LineEnding, OpenedFile,
+    TextFile, MAX_SQL_FILE_BYTES,
 };
 pub use guard::{
     effective_guard, guard_off_for_session, set_connection_guard, set_guard_off_for_session,

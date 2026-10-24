@@ -187,22 +187,44 @@ fn is_sql_file_path(path: &Path) -> bool {
             .is_some_and(|e| e.eq_ignore_ascii_case("sql"))
 }
 
-/// Lets the file commands read and write `paths` from now on, and in later
-/// runs. Only for paths the user chose in the native open dialog or dropped
-/// on the window, read by the Tauri shell itself: the webview must have no
-/// way to reach this. Returns those accepted, in order: absolute paths
-/// ending in `.sql`.
-pub fn allow_paths(state: &AppState, paths: Vec<String>) -> Vec<String> {
+/// Allows the accepted paths in memory (this run) and returns them.
+fn allow_in_memory(state: &AppState, paths: Vec<String>, must_be_file: bool) -> Vec<String> {
     let accepted: Vec<String> = paths
         .into_iter()
-        .filter(|p| is_sql_file_path(Path::new(p)))
+        .filter(|p| {
+            let p = Path::new(p);
+            is_sql_file_path(p) && (!must_be_file || p.is_file())
+        })
         .collect();
     let mut set = state.files.0.lock().unwrap_or_else(PoisonError::into_inner);
-    let accepted_paths: Vec<PathBuf> = accepted.iter().map(PathBuf::from).collect();
-    set.extend(accepted_paths.iter().cloned());
-    drop(set);
-    state.session.remember_allowed(&accepted_paths);
+    set.extend(accepted.iter().map(PathBuf::from));
     accepted
+}
+
+/// Remembers `paths` for later runs (see [`allow_paths`]). Blocking: a
+/// caller on an event thread runs it elsewhere.
+pub fn remember_allowed_files(state: &AppState, paths: &[String]) {
+    let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    state.session.remember_allowed(&paths);
+}
+
+/// Lets the file commands read and write `paths` from now on, and in later
+/// runs. Only for paths the user chose in the native open dialog, read by
+/// the Tauri shell itself: the webview must have no way to reach this.
+/// Returns those accepted, in order: absolute paths ending in `.sql`.
+pub fn allow_paths(state: &AppState, paths: Vec<String>) -> Vec<String> {
+    let accepted = allow_in_memory(state, paths, false);
+    remember_allowed_files(state, &accepted);
+    accepted
+}
+
+/// Like [`allow_paths`] for the paths of a native drop on the window, which
+/// may be folders: only existing files count. Allows them in memory at once
+/// and returns the accepted ones; the caller then runs
+/// [`remember_allowed_files`] off its event thread, as a big drop writes many
+/// rows.
+pub fn accept_dropped_files(state: &AppState, paths: Vec<String>) -> Vec<String> {
+    allow_in_memory(state, paths, true)
 }
 
 fn check_allowed(state: &AppState, path: &str) -> Result<PathBuf, String> {
@@ -218,6 +240,7 @@ fn check_allowed(state: &AppState, path: &str) -> Result<PathBuf, String> {
 /// longer exists, [`TOO_LARGE`] over [`MAX_SQL_FILE_BYTES`], [`NOT_TEXT`].
 pub async fn read_sql_file(state: &AppState, path: String) -> Result<OpenedFile, String> {
     let p = check_allowed(state, &path)?;
+    let session = state.session.clone();
     blocking(move || {
         let fail = |e: std::io::Error| match e.kind() {
             ErrorKind::NotFound => NOT_FOUND.to_string(),
@@ -228,6 +251,8 @@ pub async fn read_sql_file(state: &AppState, path: String) -> Result<OpenedFile,
         }
         let bytes = fs::read(&p).map_err(fail)?;
         let file = decode_text(&bytes)?;
+        // A file in use stays among the newest remembered paths.
+        session.remember_allowed(std::slice::from_ref(&p));
         let name = p
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -292,6 +317,7 @@ pub async fn write_sql_file(
     line_ending: LineEnding,
 ) -> Result<(), String> {
     let p = check_allowed(state, &path)?;
+    let session = state.session.clone();
     blocking(move || {
         let fail = |e: &dyn std::fmt::Display| format!("could not save {}: {e}", p.display());
         let bytes = encode_text(&text, encoding, line_ending);
@@ -304,7 +330,9 @@ pub async fn write_sql_file(
             Err(_) => None,
         };
         let dir = target.parent().ok_or_else(|| fail(&"it has no folder"))?;
-        write_atomic(dir, &target, &bytes, permissions).map_err(|e| fail(&e))
+        write_atomic(dir, &target, &bytes, permissions).map_err(|e| fail(&e))?;
+        session.remember_allowed(std::slice::from_ref(&p));
+        Ok(())
     })
     .await?
 }
