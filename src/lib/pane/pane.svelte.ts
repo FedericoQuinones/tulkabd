@@ -2,6 +2,7 @@ import { t } from "../i18n/t";
 import * as ipc from "../ipc";
 import type { ConnectionConfig, GuardFinding, GuardLevel, RunSummary, SessionInfo } from "../ipc";
 import { connections } from "../connections/store.svelte";
+import { prefs } from "../settings/prefs.svelte";
 import { pushDisconnectedMessage, reduceEvent, type PaneBody, type PaneMessage, type PaneResult } from "./reduce";
 
 export type PaneStatus = "idle" | "connecting" | "running" | "disconnected";
@@ -46,6 +47,8 @@ export class PaneState {
   summary = $state<RunSummary | null>(null);
   /** Increments on every run start; the results view uses it to drop its row cache. */
   runCount = $state(0);
+  /** The row limit in force when the last run started; later preference changes do not apply to it. */
+  runMaxRows = $state(prefs.maxRows);
   session = $state<SessionInfo | null>(null);
   /** Editor cursor, shown in the status bar. */
   cursor = $state({ line: 1, col: 1 });
@@ -264,6 +267,7 @@ export class PaneState {
     this.status = "running";
     const id = ++this.runId;
     this.runCount++;
+    this.runMaxRows = prefs.maxRows;
     this.results = [];
     this.messages = [];
     this.summary = null;

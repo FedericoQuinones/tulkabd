@@ -15,6 +15,7 @@ vi.mock("../ipc", () => ({
 import * as ipc from "../ipc";
 import { PaneState } from "./pane.svelte";
 import { connections } from "../connections/store.svelte";
+import { prefs } from "../settings/prefs.svelte";
 
 const pane = new PaneState("t1");
 
@@ -272,4 +273,15 @@ test("unbind and close drop the guard prompt, the blocked list and the toast", a
     expect(pane.guardToast).toBeNull();
     await pane.open(conn);
   }
+});
+
+test("a run remembers the row limit it started with", async () => {
+  prefs.value.maxRows = 1_000;
+  const r = startRun();
+  prefs.value.maxRows = 500;
+  expect(pane.runMaxRows).toBe(1_000);
+  r.d.resolve(ok);
+  await r.done;
+  expect(pane.runMaxRows).toBe(1_000);
+  prefs.value.maxRows = 100_000;
 });

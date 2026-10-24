@@ -3,7 +3,6 @@
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
   import type { ViewSpec } from "../ipc";
-  import { prefs } from "../settings/prefs.svelte";
   import type { PaneState } from "../pane/pane.svelte";
   import CopyToast from "./CopyToast.svelte";
   import MessagesView from "./MessagesView.svelte";
@@ -176,7 +175,7 @@
       />
     {/if}
     {#if result?.truncated}
-      <span class="warn">{t("results.truncated", { max: count(prefs.maxRows) })}</span>
+      <span class="warn">{t("results.truncated", { max: count(pane.runMaxRows) })}</span>
     {/if}
     {#if pane.summary}
       <span class="meta num">{t("results.elapsed", { ms: count(pane.summary.elapsedMs) })}{finishedAt ? ` · ${finishedAt}` : ""}</span>
