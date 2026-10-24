@@ -210,7 +210,7 @@ export class PaneState {
     };
     const cancelledLine = () => this.messages.push({ kind: "info", text: t("pane.cancelled"), line: null });
     try {
-      const summary = await ipc.runQuery(this.tabId, sql, (e) => {
+      const summary = await ipc.runQuery(this.tabId, sql, false, (e) => {
         if (id === this.runId) reduceEvent(body, e, lineOffset);
       });
       if (id !== this.runId) return;

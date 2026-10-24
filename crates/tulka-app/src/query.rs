@@ -157,15 +157,27 @@ pub async fn use_database(
 /// summary is returned once the script ended. Fails with `"disconnected"`
 /// after a lost connection, until `open_session` is called again, and with
 /// `"busy"` while another command uses the session.
+///
+/// Before the session is touched, the script is analyzed with the driver's
+/// guard, according to the connection's effective level (see
+/// [`crate::guard::effective_guard`]). If dangerous statements are found,
+/// nothing is sent to the server: with `block` the summary is `Blocked`,
+/// with `confirm` and `confirmed == false` it is `NeedsConfirmation`; both
+/// carry the `findings`. This happens here, in the backend, so no caller can
+/// skip it; `confirmed` never overrides `block`.
 pub async fn run_query<F>(
     state: &AppState,
     tab_id: String,
     sql: String,
+    confirmed: bool,
     on_event: F,
 ) -> Result<RunSummary, String>
 where
     F: Fn(UiEvent) + Send + Sync,
 {
+    if let Some(held) = crate::guard::check(state, &tab_id, &sql, confirmed).await? {
+        return Ok(held);
+    }
     let (checkout, mut session) = Checkout::take(state, &tab_id, true)?;
     let started = Instant::now();
     let (tx, rx) = mpsc::channel(EVENT_QUEUE);
@@ -211,6 +223,7 @@ where
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
         finished_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         outcome,
+        findings: Vec::new(),
     })
 }
 

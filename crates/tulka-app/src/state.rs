@@ -50,7 +50,7 @@
 //! disk the file commands may touch sit behind their own short-held mutex;
 //! see [`crate::files`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, MutexGuard, PoisonError};
 
@@ -89,6 +89,9 @@ pub struct AppState {
     pub(crate) queries: Arc<SavedQueries>,
     /// The `.sql` files from disk the file commands may read and write.
     pub(crate) files: AllowedFiles,
+    /// Connections whose guard is switched off until the app closes. Only
+    /// held for short, non-async critical sections.
+    pub(crate) guard_off_session: std::sync::Mutex<HashSet<String>>,
 }
 
 /// A result buffer shared between the run that fills it and the commands
@@ -144,6 +147,7 @@ impl AppState {
             session: Arc::new(SessionStore::in_memory()),
             queries: SavedQueries::unavailable(),
             files: AllowedFiles::default(),
+            guard_off_session: std::sync::Mutex::default(),
         })
     }
 
@@ -168,6 +172,7 @@ impl AppState {
             session: Arc::new(SessionStore::in_memory()),
             queries: SavedQueries::unavailable(),
             files: AllowedFiles::default(),
+            guard_off_session: std::sync::Mutex::default(),
         }
     }
 

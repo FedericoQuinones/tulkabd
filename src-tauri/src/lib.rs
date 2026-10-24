@@ -1,7 +1,7 @@
 mod commands;
 mod events;
 
-use commands::{connections as conn, explorer as ex, files, queries, query, session};
+use commands::{connections as conn, explorer as ex, files, guard, queries, query, session};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tauri::Manager;
@@ -102,6 +102,9 @@ pub fn run() {
             files::sql_files_exist,
             files::read_sql_file,
             files::write_sql_file,
+            guard::set_guard_off_for_session,
+            guard::set_connection_guard,
+            guard::guard_off_for_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

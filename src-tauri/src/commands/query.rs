@@ -34,10 +34,11 @@ pub async fn run_query(
     state: State<'_, AppState>,
     tab_id: String,
     sql: String,
+    confirmed: bool,
     on_event: Channel<UiEvent>,
 ) -> Result<RunSummary, String> {
     // A send fails only when the window is gone; there is nobody to tell.
-    tulka_app::run_query(&state, tab_id, sql, move |ev| {
+    tulka_app::run_query(&state, tab_id, sql, confirmed, move |ev| {
         let _ = on_event.send(ev);
     })
     .await

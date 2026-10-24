@@ -226,7 +226,7 @@ pub fn parse_connection_string(text: String) -> Result<ParsedConnection, String>
 
 /// Applies `f` to a copy of the config and persists it; the in-memory config
 /// is replaced only when both succeed.
-async fn mutate<T>(
+pub(crate) async fn mutate<T>(
     state: &AppState,
     f: impl FnOnce(&mut AppConfig) -> Result<T, String>,
 ) -> Result<T, String> {

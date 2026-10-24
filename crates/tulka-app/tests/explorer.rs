@@ -1183,8 +1183,10 @@ async fn delete_connection_closes_its_sessions_and_forgets_its_cache() {
     let r = search(&f, "pedidos").await;
     assert_eq!(r.hits.len(), 1);
     assert_eq!(r.hits[0].connection_id, "other");
-    assert!(run_query(&f.state, "t1".into(), "SELECT 1".into(), |_| {})
-        .await
-        .is_err());
+    assert!(
+        run_query(&f.state, "t1".into(), "SELECT 1".into(), false, |_| {})
+            .await
+            .is_err()
+    );
     assert_eq!(explorer_databases(&f.state, "other".into()).await.len(), 1);
 }

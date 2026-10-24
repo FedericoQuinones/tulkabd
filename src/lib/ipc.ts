@@ -81,10 +81,22 @@ export interface SessionInfo {
   databases: string[];
   currentDatabase: string;
 }
+export type GuardKind = "updateWithoutWhere" | "deleteWithoutWhere" | "drop" | "truncate" | "unparsed";
+export interface GuardFinding {
+  kind: GuardKind;
+  /** The target as written, e.g. `dbo.Pedidos`; `null` when unknown. */
+  object: string | null;
+  /** The statement text, trimmed, at most 400 chars plus an ellipsis. */
+  statement: string;
+  /** 0-based line of the statement start, relative to the script sent. */
+  line: number;
+}
 export interface RunSummary {
   elapsedMs: number;
   finishedAt: string;
-  outcome: "ok" | "error" | "cancelled" | "disconnected";
+  outcome: "ok" | "error" | "cancelled" | "disconnected" | "blocked" | "needsConfirmation";
+  /** The dangerous statements found; empty unless the outcome is `blocked` or `needsConfirmation`. */
+  findings: GuardFinding[];
 }
 export type Selection =
   | { kind: "all" }
@@ -255,11 +267,29 @@ export const openSession = (tabId: string, connectionId: string, database?: stri
 export const useDatabase = (tabId: string, database: string) =>
   invoke<void>("use_database", { tabId, database });
 
-export const runQuery = (tabId: string, sql: string, onEvent: (e: UiEvent) => void) => {
+/**
+ * Runs a script. The backend applies the connection's guard before anything is sent:
+ * a `blocked` or `needsConfirmation` outcome still resolves with a `RunSummary`
+ * (its `findings` list the flagged statements, `elapsedMs` is 0) and nothing ran.
+ * Send the same script again with `confirmed = true` to go ahead after
+ * `needsConfirmation`; `confirmed` never overrides `blocked`.
+ */
+export const runQuery = (tabId: string, sql: string, confirmed: boolean, onEvent: (e: UiEvent) => void) => {
   const channel = new Channel<UiEvent>();
   channel.onmessage = onEvent;
-  return invoke<RunSummary>("run_query", { tabId, sql, onEvent: channel });
+  return invoke<RunSummary>("run_query", { tabId, sql, confirmed, onEvent: channel });
 };
+
+/** Switches a connection's guard off (or back on) until the app closes. */
+export const setGuardOffForSession = (connectionId: string, off: boolean) =>
+  invoke<void>("set_guard_off_for_session", { connectionId, off });
+
+/** Saves a connection's guard level; resolves with the previous level (for undo). */
+export const setConnectionGuard = (connectionId: string, level: GuardLevel) =>
+  invoke<GuardLevel>("set_connection_guard", { connectionId, level });
+
+/** Ids of the connections whose guard is off until the app closes. */
+export const guardOffForSession = () => invoke<string[]>("guard_off_for_session");
 
 export const cancelQuery = (tabId: string) => invoke<void>("cancel_query", { tabId });
 

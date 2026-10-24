@@ -394,9 +394,12 @@ fn streamer() -> (
 
 async fn run(state: &AppState, tab: &str, sql: &str) -> (Result<RunSummary, String>, Vec<UiEvent>) {
     let (sink, events) = recorder();
-    let result = tokio::time::timeout(TIMEOUT, run_query(state, tab.into(), sql.into(), sink))
-        .await
-        .expect("run_query did not finish");
+    let result = tokio::time::timeout(
+        TIMEOUT,
+        run_query(state, tab.into(), sql.into(), false, sink),
+    )
+    .await
+    .expect("run_query did not finish");
     let events = events.lock().unwrap().clone();
     (result, events)
 }
@@ -769,10 +772,9 @@ async fn cancel_stops_a_run_that_streams_rows_meanwhile() {
     let (sink, mut rx) = streamer();
     let state = f.state.clone();
     // Spawned: the run_query future must be Send for the Tauri layer.
-    let running =
-        tokio::spawn(
-            async move { run_query(&state, "t1".into(), "rows 700; wait".into(), sink).await },
-        );
+    let running = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 700; wait".into(), false, sink).await
+    });
     wait_for_total(&mut rx, 700).await;
 
     // Rows are readable while the query is still running...
@@ -801,10 +803,9 @@ async fn close_session_cancels_a_running_query() {
     let (f, _) = connected("t1").await;
     let (sink, mut rx) = streamer();
     let state = f.state.clone();
-    let running =
-        tokio::spawn(
-            async move { run_query(&state, "t1".into(), "rows 1; wait".into(), sink).await },
-        );
+    let running = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 1; wait".into(), false, sink).await
+    });
     wait_for_total(&mut rx, 1).await;
 
     close_session(&f.state, "t1".into()).await.unwrap();
@@ -825,10 +826,9 @@ async fn reopening_a_running_tab_does_not_mix_runs() {
     let (f, saved) = connected("t1").await;
     let (sink, mut rx) = streamer();
     let state = f.state.clone();
-    let running =
-        tokio::spawn(
-            async move { run_query(&state, "t1".into(), "rows 4; wait".into(), sink).await },
-        );
+    let running = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 4; wait".into(), false, sink).await
+    });
     wait_for_total(&mut rx, 4).await;
 
     open_session(&f.state, "t1".into(), saved.id, None, None)
@@ -1106,10 +1106,9 @@ async fn result_view_is_busy_while_rows_arrive() {
     let (f, _) = connected("t1").await;
     let (sink, mut rx) = streamer();
     let state = f.state.clone();
-    let running =
-        tokio::spawn(
-            async move { run_query(&state, "t1".into(), "rows 700; wait".into(), sink).await },
-        );
+    let running = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 700; wait".into(), false, sink).await
+    });
     wait_for_total(&mut rx, 700).await;
     assert_eq!(
         set_result_view(&f.state, "t1".into(), 0, sort_by(0, true)).await,
@@ -1132,10 +1131,9 @@ async fn copy_works_while_the_result_is_streaming() {
     let (f, _) = connected("t1").await;
     let (sink, mut rx) = streamer();
     let state = f.state.clone();
-    let running =
-        tokio::spawn(
-            async move { run_query(&state, "t1".into(), "rows 700; wait".into(), sink).await },
-        );
+    let running = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 700; wait".into(), false, sink).await
+    });
     wait_for_total(&mut rx, 700).await;
     let clipboard = Arc::new(FakeClipboard::default());
     let out = copy_results(
@@ -1185,7 +1183,7 @@ async fn a_panicking_driver_leaves_the_tab_disconnected_not_busy() {
     let (f, saved) = connected("t1").await;
     let state = f.state.clone();
     let joined = tokio::spawn(async move {
-        run_query(&state, "t1".into(), "rows 1; panic".into(), |_| {}).await
+        run_query(&state, "t1".into(), "rows 1; panic".into(), false, |_| {}).await
     })
     .await;
     assert!(joined.unwrap_err().is_panic());
@@ -1197,7 +1195,7 @@ async fn a_panicking_event_sink_leaves_the_tab_disconnected_not_busy() {
     let (f, saved) = connected("t1").await;
     let state = f.state.clone();
     let joined = tokio::spawn(async move {
-        run_query(&state, "t1".into(), "rows 1".into(), |_| {
+        run_query(&state, "t1".into(), "rows 1".into(), false, |_| {
             panic!("sink panic")
         })
         .await
@@ -1212,7 +1210,7 @@ async fn a_dropped_run_leaves_the_tab_disconnected_not_busy() {
     let (f, saved) = connected("t1").await;
     let dropped = tokio::time::timeout(
         Duration::from_millis(100),
-        run_query(&f.state, "t1".into(), "rows 1; wait".into(), |_| {}),
+        run_query(&f.state, "t1".into(), "rows 1; wait".into(), false, |_| {}),
     )
     .await;
     assert!(dropped.is_err(), "the run should still be waiting");

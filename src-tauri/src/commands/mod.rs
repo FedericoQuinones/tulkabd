@@ -7,6 +7,7 @@ use tulka_app::Clipboard;
 pub mod connections;
 pub mod explorer;
 pub mod files;
+pub mod guard;
 pub mod queries;
 pub mod query;
 pub mod session;

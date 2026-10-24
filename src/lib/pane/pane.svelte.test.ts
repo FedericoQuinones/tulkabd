@@ -16,7 +16,7 @@ const pane = new PaneState("t1");
 
 const conn = { id: "c1", name: "Local", passwordSaved: true } as ConnectionConfig;
 const info = { server: { version: "2022", user: "sa", singleDatabase: false }, databases: ["master", "Sales"], currentDatabase: "master" };
-const ok: RunSummary = { elapsedMs: 1, finishedAt: "", outcome: "ok" };
+const ok: RunSummary = { elapsedMs: 1, finishedAt: "", outcome: "ok", findings: [] };
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -29,7 +29,7 @@ function deferred<T>() {
 function startRun() {
   const d = deferred<RunSummary>();
   let emit!: (e: UiEvent) => void;
-  vi.mocked(ipc.runQuery).mockImplementationOnce((_t, _s, onEvent) => {
+  vi.mocked(ipc.runQuery).mockImplementationOnce((_t, _s, _c, onEvent) => {
     emit = onEvent;
     return d.promise;
   });

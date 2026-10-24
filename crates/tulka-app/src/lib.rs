@@ -15,6 +15,7 @@
 pub mod connections;
 pub mod explorer;
 pub mod files;
+pub mod guard;
 pub mod queries;
 pub mod query;
 pub mod results;
@@ -36,6 +37,9 @@ pub use explorer::{
 pub use files::{
     allow_paths, decode_text, encode_text, read_sql_file, sql_files_exist, write_sql_file,
     FileEncoding, LineEnding, OpenedFile, TextFile, MAX_SQL_FILE_BYTES,
+};
+pub use guard::{
+    effective_guard, guard_off_for_session, set_connection_guard, set_guard_off_for_session,
 };
 pub use queries::{
     decode_component, delete_saved_query, encode_component, list_saved_queries, read_saved_query,

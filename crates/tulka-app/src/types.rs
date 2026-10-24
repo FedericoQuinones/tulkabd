@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use tulka_core::{Column, ConnectionConfig, DbObject, ExecEvent, MessageKind, ServerInfo};
+use tulka_core::{
+    Column, ConnectionConfig, DbObject, ExecEvent, GuardFinding, MessageKind, ServerInfo,
+};
 
 /// Command error meaning there is no saved password and none was given.
 pub const PASSWORD_REQUIRED: &str = "password_required";
@@ -247,6 +249,13 @@ pub enum RunOutcome {
     Error,
     Cancelled,
     Disconnected,
+    /// The connection's guard is `block` and the script has dangerous
+    /// statements: nothing was sent to the server.
+    Blocked,
+    /// The connection's guard is `confirm`, the script has dangerous
+    /// statements and the run was not confirmed: nothing was sent to the
+    /// server. Run it again with `confirmed` set to go ahead.
+    NeedsConfirmation,
 }
 
 /// Returned by `run_query` once the script ended.
@@ -257,6 +266,10 @@ pub struct RunSummary {
     /// RFC 3339 UTC timestamp, e.g. `2026-10-21T14:03:00.123Z`.
     pub finished_at: String,
     pub outcome: RunOutcome,
+    /// The dangerous statements found; empty unless the outcome is
+    /// `blocked` or `needsConfirmation`.
+    #[serde(default)]
+    pub findings: Vec<GuardFinding>,
 }
 
 /// Returned by `open_session`.
@@ -394,15 +407,18 @@ mod tests {
             elapsed_ms: 42,
             finished_at: "2026-10-21T14:03:00.123Z".into(),
             outcome: RunOutcome::Cancelled,
+            findings: vec![],
         };
         assert_eq!(
             to_json(&s),
-            json!({"elapsedMs": 42, "finishedAt": "2026-10-21T14:03:00.123Z", "outcome": "cancelled"})
+            json!({"elapsedMs": 42, "finishedAt": "2026-10-21T14:03:00.123Z", "outcome": "cancelled", "findings": []})
         );
         for (o, text) in [
             (RunOutcome::Ok, "ok"),
             (RunOutcome::Error, "error"),
             (RunOutcome::Disconnected, "disconnected"),
+            (RunOutcome::Blocked, "blocked"),
+            (RunOutcome::NeedsConfirmation, "needsConfirmation"),
         ] {
             assert_eq!(to_json(&o), json!(text));
         }

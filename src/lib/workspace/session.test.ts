@@ -44,7 +44,7 @@ import Workspace from "./Workspace.svelte";
 const conn = { id: "c1", name: "Local", passwordSaved: true, environment: "local", guard: "off" } as ConnectionConfig;
 const nopw = { id: "c2", name: "Prod", passwordSaved: false, environment: "production", guard: "off" } as ConnectionConfig;
 const info = { server: { version: "2022", user: "sa", singleDatabase: false }, databases: ["master", "Sales"], currentDatabase: "Sales" };
-const ok: RunSummary = { elapsedMs: 1, finishedAt: "", outcome: "ok" };
+const ok: RunSummary = { elapsedMs: 1, finishedAt: "", outcome: "ok", findings: [] };
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const known = { connectionIds: new Set(["c1", "c2"]) };
 
