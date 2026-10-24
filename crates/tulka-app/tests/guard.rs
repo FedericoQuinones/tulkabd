@@ -276,3 +276,35 @@ async fn unknown_connection_is_not_found() {
         .unwrap_err();
     assert_eq!(err, NOT_FOUND);
 }
+
+#[tokio::test]
+async fn saving_with_a_new_level_ends_the_until_restart_override() {
+    let f = fixture(GuardLevel::Confirm).await;
+    set_guard_off_for_session(&f.state, &f.conn_id, true);
+
+    let mut conn = list_connections(&f.state).await.remove(0);
+    conn.guard = GuardLevel::Block;
+    save_connection(&f.state, conn, None).await.unwrap();
+
+    assert!(!guard_off_for_session(&f.state).contains(&f.conn_id));
+    // The saved level applies again: the override no longer hides it.
+    assert_eq!(
+        run(&f, "DELETE FROM t", false).await.outcome,
+        RunOutcome::Blocked
+    );
+}
+
+#[tokio::test]
+async fn saving_without_changing_the_level_keeps_the_until_restart_override() {
+    let f = fixture(GuardLevel::Confirm).await;
+    set_guard_off_for_session(&f.state, &f.conn_id, true);
+
+    let mut conn = list_connections(&f.state).await.remove(0);
+    conn.name = "Renamed".into();
+    save_connection(&f.state, conn, None).await.unwrap();
+
+    assert_eq!(
+        guard_off_for_session(&f.state),
+        std::slice::from_ref(&f.conn_id)
+    );
+}

@@ -82,12 +82,18 @@ pub async fn save_connection(
         None => conn.folder_id.take().filter(|f| has_folder(&current, f)),
     };
 
+    // Choosing another level ends an "off until the app closes" override, as
+    // `set_connection_guard` does; saving other edits leaves it alone.
+    let guard_changed = existing.is_some_and(|i| current.connections[i].guard != conn.guard);
     let mut next = current.clone();
     match existing {
         Some(i) => next.connections[i] = conn.clone(),
         None => next.connections.push(conn.clone()),
     }
     *current = persist(state, next).await?;
+    if guard_changed {
+        crate::guard::set_guard_off_for_session(state, &conn.id, false);
+    }
     Ok(SaveConnectionResult {
         connection: conn,
         keyring_unavailable,
