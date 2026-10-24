@@ -352,12 +352,24 @@ fn list_dir(database: &str, dir: &Path, out: &mut Vec<SavedQuery>) {
 /// Writes `bytes` to `path` through a temporary file in `dir`, so `path`
 /// always holds either the old or the new text. The temporary name does
 /// not end in `.sql`, so a leftover one is never listed. With `permissions`
-/// the new file gets them before it replaces the old one.
+/// the temporary file gets them before it holds any of `bytes`.
 pub(crate) fn write_atomic(
     dir: &Path,
     path: &Path,
     bytes: &[u8],
     permissions: Option<fs::Permissions>,
+) -> std::io::Result<()> {
+    write_atomic_with(dir, path, bytes, permissions, |_| {})
+}
+
+/// [`write_atomic`], calling `written` with the temporary file once it
+/// holds `bytes`, before the rename (tests look at it there).
+fn write_atomic_with(
+    dir: &Path,
+    path: &Path,
+    bytes: &[u8],
+    permissions: Option<fs::Permissions>,
+    written: impl FnOnce(&Path),
 ) -> std::io::Result<()> {
     let tmp = dir.join(format!(
         "{TEMP_PREFIX}{}{TEMP_SUFFIX}",
@@ -365,11 +377,14 @@ pub(crate) fn write_atomic(
     ));
     let result = (|| {
         let mut file = fs::File::create_new(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
+        // Before the text goes in, so it is never readable with the
+        // default permissions of a new file.
         if let Some(permissions) = permissions {
             file.set_permissions(permissions)?;
         }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        written(&tmp);
         drop(file);
         fs::rename(&tmp, path)
     })();
@@ -551,4 +566,36 @@ pub async fn saved_query_path(
         }
     })
     .await?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The temporary file never holds the text with wider permissions than
+    /// the file it replaces (a private file is never readable by others,
+    /// not even for a moment).
+    #[cfg(unix)]
+    #[test]
+    fn the_temporary_file_has_the_permissions_before_it_holds_the_text() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("q.sql");
+        // Neither what a umask of 022 nor one of 077 gives a new file.
+        let mode = 0o640;
+        let mut seen = None;
+        write_atomic_with(
+            dir.path(),
+            &path,
+            b"SELECT secret",
+            Some(fs::Permissions::from_mode(mode)),
+            |tmp| seen = Some(fs::metadata(tmp).unwrap().permissions().mode() & 0o777),
+        )
+        .unwrap();
+        assert_eq!(seen, Some(mode));
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+    }
 }
