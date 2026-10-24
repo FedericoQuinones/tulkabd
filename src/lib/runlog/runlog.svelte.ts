@@ -1,7 +1,5 @@
-import { tick } from "svelte";
 import * as ipc from "../ipc";
 import type { RunLogEntry } from "../ipc";
-import { tabs } from "../tabs/tabs.svelte";
 
 const PAGE = 100;
 
@@ -17,6 +15,8 @@ export class RunLogStore {
   entries = $state<RunLogEntry[]>([]);
   /** True once the first page has been read. */
   loaded = $state(false);
+  /** True when the first page could not be read; `ensureLoaded` tries again. */
+  failed = $state(false);
   private loading = false;
   private exhausted = false;
 
@@ -38,6 +38,7 @@ export class RunLogStore {
   async ensureLoaded(): Promise<void> {
     if (this.loaded || this.loading) return;
     this.loading = true;
+    this.failed = false;
     try {
       const rows = await ipc.listRunLog(null, PAGE);
       // Runs that arrived while the page was on its way are in the page too.
@@ -47,7 +48,7 @@ export class RunLogStore {
       this.exhausted = rows.length < PAGE;
       this.loaded = true;
     } catch {
-      // Left unloaded: opening the tab again tries again.
+      this.failed = true;
     } finally {
       this.loading = false;
     }
@@ -75,21 +76,10 @@ export class RunLogStore {
   reset(): void {
     this.entries = [];
     this.loaded = false;
+    this.failed = false;
     this.loading = false;
     this.exhausted = false;
   }
 }
 
 export const runLog = new RunLogStore();
-
-/** Shows the Run log in the active pane and puts the keyboard on its table. */
-export function showRunLog(): void {
-  const pane = tabs.activePane;
-  if (!pane) return;
-  pane.bottomTab = "runlog";
-  const id = pane.tabId;
-  void tick().then(() => {
-    const target = [...document.querySelectorAll<HTMLElement>("[data-runlog]")].find((el) => el.dataset.runlog === id);
-    target?.querySelector<HTMLElement>('[tabindex="0"]')?.focus();
-  });
-}

@@ -307,6 +307,7 @@ export class TabsStore {
     } else {
       pane.notice = t("runlog.connectionGone");
     }
+    if (entry.sqlTruncated) pane.notice = pane.notice ? `${pane.notice} ${t("runlog.truncated")}` : t("runlog.truncated");
     this.add({ id, kind: "query", title: `untitled-${++this.counter}`, pane, connectError: null, dirty: false });
     return id;
   }

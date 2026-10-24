@@ -13,6 +13,7 @@ vi.mock("../ipc", () => ({
 
 import * as ipc from "../ipc";
 import { DEFAULT_PREFERENCES, prefs } from "./prefs.svelte";
+import { runLog } from "../runlog/runlog.svelte";
 import Settings from "./Settings.svelte";
 
 let cmp: ReturnType<typeof mount> | undefined;
@@ -256,6 +257,16 @@ test("Clear run log asks first and calls clearRunLog on confirm", async () => {
   await settle();
   expect(ipc.clearRunLog).toHaveBeenCalledTimes(1);
   expect(document.querySelector('[role="dialog"]')).toBeNull();
+});
+
+test("a cleared run log empties the Run log tab's store", async () => {
+  const reset = vi.spyOn(runLog, "reset");
+  await open();
+  button("Clear run log").click();
+  flushSync();
+  [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((b) => b.textContent === "Clear")!.click();
+  await settle();
+  expect(reset).toHaveBeenCalledTimes(1);
 });
 
 test("Escape inside the confirmation closes only the confirmation", async () => {

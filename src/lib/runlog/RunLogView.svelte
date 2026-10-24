@@ -50,6 +50,7 @@
   function onkey(e: KeyboardEvent, entry: RunLogEntry) {
     const row = e.currentTarget as HTMLElement;
     if (e.key === "Enter") {
+      if (e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
       e.preventDefault();
       tabs.openFromRunLog(entry);
       return;
@@ -72,17 +73,24 @@
 
 <div class="runlog" data-runlog={tabId}>
   {#if runLog.entries.length === 0}
-    {#if runLog.loaded}<p class="empty">{t("runlog.empty")}</p>{/if}
+    {#if runLog.loaded}
+      <p class="empty">{t("runlog.empty")}</p>
+    {:else if runLog.failed}
+      <p class="empty">
+        {t("runlog.loadFailed")}
+        <button type="button" class="retry" onclick={() => void runLog.ensureLoaded()}>{t("runlog.retry")}</button>
+      </p>
+    {/if}
   {:else}
     <div class="scroller" {onscroll}>
       <table role="grid" aria-label={t("runlog.tab")}>
         <thead>
           <tr>
-            <th role="columnheader">{t("runlog.when")}</th>
-            <th role="columnheader">{t("runlog.where")}</th>
+            <th role="columnheader" class="when">{t("runlog.when")}</th>
+            <th role="columnheader" class="where">{t("runlog.where")}</th>
             <th role="columnheader">{t("runlog.statement")}</th>
-            <th role="columnheader" class="r">{t("runlog.rows")}</th>
-            <th role="columnheader" class="r">{t("runlog.time")}</th>
+            <th role="columnheader" class="r out">{t("runlog.rows")}</th>
+            <th role="columnheader" class="r ms">{t("runlog.time")}</th>
           </tr>
         </thead>
         <tbody>
@@ -98,7 +106,7 @@
             >
               <td role="gridcell" class="when num">{when(e.atMs)}</td>
               <td role="gridcell" class="where">
-                <span><span class="dot" style:background={e.color}></span>{e.connectionName} · {e.database}</span>
+                <span class="w"><span class="dot" style:background={e.color}></span><span class="wt">{e.connectionName} · {e.database}</span></span>
               </td>
               <td role="gridcell" class="stmt">{oneLine(e.sql)}</td>
               <td role="gridcell" class="out" class:no={out.failed}>{out.text}</td>
@@ -169,16 +177,38 @@
     outline: 1px solid var(--accent);
     outline-offset: -1px;
   }
-  .when {
+  .when,
+  .out,
+  .ms {
     width: 96px;
+  }
+  td.when {
     color: var(--muted);
     font-family: var(--mono);
     font-size: 12px;
   }
-  .where span {
-    display: inline-flex;
+  .where {
+    width: 220px;
+  }
+  .w {
+    display: flex;
     align-items: center;
     gap: 7px;
+    min-width: 0;
+  }
+  .wt {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .retry {
+    margin-left: 8px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
   }
   .dot {
     flex: none;
@@ -191,20 +221,19 @@
     font-size: 12px;
     color: var(--soft);
   }
-  .out,
-  .ms {
-    width: 96px;
+  td.out,
+  td.ms {
     font-family: var(--mono);
     font-size: 12px;
   }
-  .out {
+  td.out {
     color: var(--text);
   }
-  .out.no {
+  td.out.no {
     color: var(--warning);
     font-family: var(--font);
   }
-  .ms {
+  td.ms {
     color: var(--muted);
   }
 </style>

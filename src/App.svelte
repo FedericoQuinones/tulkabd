@@ -22,7 +22,8 @@
   import { zoom } from "./lib/zoom.svelte";
   import { prefs } from "./lib/settings/prefs.svelte";
   import { tabs } from "./lib/tabs/tabs.svelte";
-  import { runLog, showRunLog } from "./lib/runlog/runlog.svelte";
+  import { runLog } from "./lib/runlog/runlog.svelte";
+  import { showRunLog } from "./lib/runlog/reveal";
   import Settings from "./lib/settings/Settings.svelte";
   import Workspace from "./lib/workspace/Workspace.svelte";
   import { parseSession, restore } from "./lib/workspace/session";
@@ -147,7 +148,7 @@
     // Any other icon acts on the workspace, which Settings covers.
     closeSettings(false);
     if (key === "rail.search") palette.show();
-    if (key === "rail.log") showRunLog();
+    if (key === "rail.log") void showRunLog();
     if (key !== "rail.explorer" && key !== "rail.saved") return;
     if (!explorerHidden && leftPanel !== key) leftPanel = key;
     else {

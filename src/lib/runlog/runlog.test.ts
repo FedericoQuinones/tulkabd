@@ -21,7 +21,8 @@ import { PaneState } from "../pane/pane.svelte";
 import ResultsPanel from "../results/ResultsPanel.svelte";
 import Rail from "../shell/Rail.svelte";
 import { tabs } from "../tabs/tabs.svelte";
-import { runLog, showRunLog } from "./runlog.svelte";
+import { runLog } from "./runlog.svelte";
+import { showRunLog } from "./reveal";
 
 globalThis.ResizeObserver ??= class {
   observe() {}
@@ -181,10 +182,9 @@ test("rail clock switches the active pane to the run log", async () => {
   active.bottomTab = "results";
   runLog.prepend(entry(1));
   cmp = mount(ResultsPanel, { target: document.body, props: { pane: active, onjump: () => {} } });
-  showRunLog();
+  void showRunLog();
   expect(active.bottomTab).toBe("runlog");
-  await tick();
-  await tick();
+  await vi.waitFor(() => expect(document.activeElement?.tagName).toBe("TR"));
   expect(document.activeElement?.tagName).toBe("TR");
 });
 
@@ -206,4 +206,67 @@ test("an empty log says so", async () => {
   pane.bottomTab = "runlog";
   show();
   await vi.waitFor(() => expect(document.body.textContent).toContain("Nothing run yet."));
+});
+
+test("the first open from the rail loads the log and then focuses the table", async () => {
+  vi.mocked(ipc.listRunLog).mockResolvedValue(page(3, 3));
+  tabs.open({ kind: "query" });
+  const active = tabs.activePane!;
+  cmp = mount(ResultsPanel, { target: document.body, props: { pane: active, onjump: () => {} } });
+  void showRunLog();
+  await vi.waitFor(() => expect(document.activeElement?.tagName).toBe("TR"));
+});
+
+test("a truncated run opens with a notice", () => {
+  runLog.prepend(entry(1, { sqlTruncated: true }));
+  pane.bottomTab = "runlog";
+  show();
+  document.querySelector<HTMLElement>('tr[data-id="1"]')!.click();
+  expect(tabs.active!.pane!.notice).toBe("This run was longer than 100 KB; only the beginning was kept.");
+});
+
+test("a new run goes back from the run log to the results", () => {
+  pane.bottomTab = "runlog";
+  show();
+  pane.runCount++;
+  flushSync();
+  expect(pane.bottomTab).toBe("results");
+});
+
+test("Enter with a modifier is left to the shortcuts", () => {
+  runLog.prepend(entry(1));
+  pane.bottomTab = "runlog";
+  show();
+  const row = document.querySelector<HTMLElement>('tr[data-id="1"]')!;
+  row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
+  expect(tabs.list).toHaveLength(0);
+});
+
+test("a failed first load shows an error and Retry reads again", async () => {
+  vi.mocked(ipc.listRunLog).mockRejectedValueOnce("boom").mockResolvedValueOnce(page(2, 2));
+  pane.bottomTab = "runlog";
+  show();
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Could not read the run log."));
+  [...document.querySelectorAll("button")].find((b) => b.textContent === "Retry")!.click();
+  await vi.waitFor(() => expect(runLog.entries).toHaveLength(2));
+  expect(document.body.textContent).not.toContain("Could not read the run log.");
+});
+
+test("error and disconnected show their outcome", () => {
+  runLog.prepend(entry(1, { outcome: "error", rows: null }));
+  runLog.prepend(entry(2, { outcome: "disconnected", rows: null }));
+  pane.bottomTab = "runlog";
+  show();
+  const out = [...document.querySelectorAll("tr[data-id] td.out")].map((c) => c.textContent);
+  expect(out).toEqual(["Disconnected", "Error"]);
+});
+
+test("ArrowDown on the last row loads more", async () => {
+  vi.mocked(ipc.listRunLog).mockResolvedValueOnce(page(200, 100)).mockResolvedValueOnce([]);
+  pane.bottomTab = "runlog";
+  show();
+  await vi.waitFor(() => expect(runLog.entries).toHaveLength(100));
+  const rows = document.querySelectorAll<HTMLElement>("tr[data-id]");
+  rows[99].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  await vi.waitFor(() => expect(ipc.listRunLog).toHaveBeenLastCalledWith(101, 100));
 });

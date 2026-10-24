@@ -6,6 +6,7 @@
   import { ENVIRONMENTS } from "../connections/env";
   import { zoom } from "../zoom.svelte";
   import { prefs } from "./prefs.svelte";
+  import { runLog } from "../runlog/runlog.svelte";
 
   interface Props {
     /** Asks to leave the screen (Escape). */
@@ -137,6 +138,7 @@
     closeConfirm();
     try {
       await ipc.clearRunLog();
+      runLog.reset();
       note("runLog", t("settings.runLogCleared"));
     } catch (e) {
       error = t("settings.clearFailed", { error: String(e) });
