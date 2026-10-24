@@ -47,6 +47,10 @@
   // Numeric fields: the text being typed, until its save ends. Without a draft a field shows the saved value.
   let drafts = $state<Partial<Record<NumKey, string>>>({});
   const timers: Partial<Record<NumKey, ReturnType<typeof setTimeout>>> = {};
+  // The text already sent (or being sent) for each field, so a blur during a save does not send it again.
+  const sent: Partial<Record<NumKey, string>> = {};
+  // The field being typed in: the backend's value waits for the blur instead of replacing the text.
+  let focused: NumKey | null = null;
   const sections: Record<NumKey, Section> = {
     fontSize: "general",
     zoom: "general",
@@ -67,16 +71,31 @@
     delete timers[key];
     const text = drafts[key];
     if (text === undefined) return;
+    const done = () => {
+      if (focused !== key) delete drafts[key];
+    };
     const n = Number(text);
+    if (sent[key] === text) {
+      // Already saved, or on its way: the draft only waits for the end of that save.
+      if (!saving.has(key)) done();
+      return;
+    }
     if (text.trim() === "" || !Number.isFinite(n)) {
-      delete drafts[key];
+      done();
       return;
     }
     // The zoom moves in steps of 10; the backend brings everything else into its range.
     const value = key === "zoom" ? Math.round(n / 10) * 10 : Math.round(n);
-    await save({ [key]: value }, sections[key]);
-    if (drafts[key] === text) delete drafts[key];
+    sent[key] = text;
+    saving.add(key);
+    try {
+      await save({ [key]: value }, sections[key]);
+    } finally {
+      saving.delete(key);
+    }
+    if (drafts[key] === text) done();
   }
+  const saving = new Set<NumKey>();
 
   /** Saves what is still being typed, so closing the screen never loses a change. */
   function flush() {
@@ -209,7 +228,11 @@
           {step}
           value={shown(key)}
           oninput={(e) => typed(key, e.currentTarget.value)}
-          onblur={() => void commit(key)}
+          onfocus={() => (focused = key)}
+          onblur={() => {
+            if (focused === key) focused = null;
+            void commit(key);
+          }}
         />
       </div>
     {/snippet}

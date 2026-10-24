@@ -110,6 +110,89 @@ test("an out-of-range value shows the clamped value from the backend", async () 
   expect(input.value).toBe("24");
 });
 
+test("a rejected save puts the field back to the confirmed value", async () => {
+  vi.useFakeTimers();
+  vi.mocked(ipc.setPreferences).mockRejectedValue("read-only");
+  await open();
+  const input = byLabel("Rows kept in memory") as HTMLInputElement;
+  type(input, "5000");
+  vi.advanceTimersByTime(300);
+  await settle();
+  expect(prefs.maxRows).toBe(100_000);
+  expect(input.value).toBe("100000");
+  expect(document.querySelector('[role="alert"]')!.textContent).toContain("read-only");
+});
+
+test("while a field has the focus the backend value waits for the blur", async () => {
+  vi.useFakeTimers();
+  vi.mocked(ipc.setPreferences).mockImplementation(async (p) => ({ ...p, fontSize: Math.max(10, p.fontSize) }));
+  await open();
+  const input = byLabel("Font size") as HTMLInputElement;
+  input.focus();
+  type(input, "1");
+  vi.advanceTimersByTime(300);
+  await settle();
+  // "1" was brought up to 10 by the backend, but the user is still typing.
+  expect(input.value).toBe("1");
+  type(input, "16");
+  vi.advanceTimersByTime(300);
+  await settle();
+  expect(input.value).toBe("16");
+  expect(vi.mocked(ipc.setPreferences).mock.calls.map((c) => c[0].fontSize)).toEqual([1, 16]);
+  input.blur();
+  await settle();
+  expect(input.value).toBe("16");
+  // Blurring right after a save did not save again.
+  expect(ipc.setPreferences).toHaveBeenCalledTimes(2);
+});
+
+test("blurring twice during a save saves once", async () => {
+  vi.useFakeTimers();
+  let answer!: (p: typeof DEFAULT_PREFERENCES) => void;
+  vi.mocked(ipc.setPreferences).mockReturnValue(new Promise((r) => (answer = r)));
+  await open();
+  const input = byLabel("Font size") as HTMLInputElement;
+  input.focus();
+  type(input, "18");
+  input.blur();
+  input.dispatchEvent(new Event("blur"));
+  await settle();
+  expect(ipc.setPreferences).toHaveBeenCalledTimes(1);
+  answer({ ...DEFAULT_PREFERENCES, fontSize: 18 });
+  await settle();
+  expect(input.value).toBe("18");
+});
+
+test("the Clear run log dialog starts on Cancel, keeps Tab inside and gives the focus back", async () => {
+  await open();
+  const clear = button("Clear run log");
+  clear.focus();
+  clear.click();
+  flushSync();
+  await settle();
+  const dialog = document.querySelector('[role="dialog"]')!;
+  const [cancel, confirm] = [...dialog.querySelectorAll("button")];
+  expect(document.activeElement).toBe(cancel);
+  const key = (shiftKey = false) => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true }));
+  confirm.focus();
+  key();
+  expect(document.activeElement).toBe(cancel);
+  key(true);
+  expect(document.activeElement).toBe(confirm);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await settle();
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(document.activeElement).toBe(clear);
+});
+
+test("a failed Reveal shows an error", async () => {
+  vi.mocked(ipc.revealDataLocation).mockRejectedValue("no file manager");
+  await open();
+  button("Reveal in file manager").click();
+  await settle();
+  expect(document.querySelector('[role="alert"]')!.textContent).toContain("no file manager");
+});
+
 test("toggling the last session saves at once", async () => {
   await open();
   const box = byLabel("Open with the last session") as HTMLInputElement;
