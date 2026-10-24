@@ -118,7 +118,7 @@
   "tabs.structureTitle": "Structure · {name}",
   "tx.title": "Open transaction",
   "tx.one": "{connection} · {database} has {count} open transaction(s).",
-  "tx.running": "{connection} · {database} is still running. Stopping it rolls back what it did.",
+  "tx.running": "{connection} · {database} is still running. Stopping it rolls back its open transaction; statements already committed stay.",
   "tx.commit": "Commit",
   "tx.commitAll": "Commit all",
   "tx.rollback": "Roll back",

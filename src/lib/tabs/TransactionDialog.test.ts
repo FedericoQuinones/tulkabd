@@ -67,7 +67,7 @@ test("a running tab cannot be committed, only rolled back", () => {
   open(prompt({ items: [{ ...item, state: "unknown", count: 0 }] }));
   expect(button("Commit")).toBeUndefined();
   expect(button("Roll back")).toBeDefined();
-  expect(document.body.textContent).toContain("Stopping it rolls back what it did.");
+  expect(document.body.textContent).toContain("Stopping it rolls back its open transaction; statements already committed stay.");
 });
 
 test("an error is shown", () => {
