@@ -218,6 +218,26 @@ pub async fn read_sql_file(state: &AppState, path: String) -> Result<OpenedFile,
     .await?
 }
 
+/// For each path, whether it is allowed and a file is there now (through a
+/// symlink too). A path that is not allowed is reported missing, so nothing
+/// is learnt about other paths. The UI checks restored file tabs with it.
+pub async fn sql_files_exist(state: &AppState, paths: Vec<String>) -> Vec<bool> {
+    let allowed: Vec<bool> = paths
+        .iter()
+        .map(|p| state.files.contains(Path::new(p)))
+        .collect();
+    let n = paths.len();
+    blocking(move || {
+        paths
+            .iter()
+            .zip(allowed)
+            .map(|(p, ok)| ok && Path::new(p).is_file())
+            .collect()
+    })
+    .await
+    .unwrap_or_else(|_| vec![false; n])
+}
+
 /// Writes `text` to an allowed `.sql` file in `encoding` and `line_ending`,
 /// atomically: [`NOT_ALLOWED`], or why it could not be written.
 pub async fn write_sql_file(

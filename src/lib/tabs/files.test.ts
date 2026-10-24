@@ -165,6 +165,18 @@ test("a failed write keeps the tab unsaved and says why above the editor", async
   expect(tab.pane!.notice).toBeNull();
 });
 
+test("Ctrl+S on a file the backend does not allow yet allows it again and writes it", async () => {
+  await tabs.openFiles(["/q.sql"]);
+  const tab = tabs.active!;
+  tab.dirty = true;
+  vi.mocked(ipc.writeSqlFile).mockRejectedValueOnce("not_allowed");
+  await tabs.saveActive();
+  expect(ipc.allowDroppedPaths).toHaveBeenCalledWith(["/q.sql"]);
+  expect(ipc.writeSqlFile).toHaveBeenCalledTimes(2);
+  expect(tab.dirty).toBe(false);
+  expect(tab.pane!.notice).toBeNull();
+});
+
 test("dropped files: only .sql paths are allowed, then opened", async () => {
   const order: string[] = [];
   vi.mocked(ipc.allowDroppedPaths).mockImplementation(async () => void order.push("allow"));

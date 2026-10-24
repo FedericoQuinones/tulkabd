@@ -98,6 +98,7 @@ pub fn run() {
             queries::reveal_saved_query,
             files::pick_sql_files,
             files::allow_dropped_paths,
+            files::sql_files_exist,
             files::read_sql_file,
             files::write_sql_file,
         ])

@@ -114,6 +114,7 @@
   "tabs.retry": "Retry",
   "tabs.connectionDeleted": "This connection was deleted.",
   "tabs.restoredWithoutConnection": "The connection this tab used no longer exists. Pick one in the Explorer to run it.",
+  "tabs.restoredWithoutFile": "The file this tab was opened from, {path}, no longer exists. Its text is kept here.",
   "tabs.unsaved": "Unsaved changes",
   "tabs.addMenu": "New query or open a file",
   "tabs.openFile": "Open file…",

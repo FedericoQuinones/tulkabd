@@ -18,7 +18,7 @@ pub async fn pick_sql_files(
     let dialog = window
         .dialog()
         .file()
-        .add_filter(filter_name, &["sql", "SQL"])
+        .add_filter(filter_name, &["sql", "SQL", "Sql"])
         .set_parent(&window);
     // Blocks until the dialog closes: not on an async worker.
     let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_files())
@@ -37,6 +37,15 @@ pub async fn pick_sql_files(
 #[tauri::command]
 pub fn allow_dropped_paths(state: State<'_, AppState>, paths: Vec<String>) {
     tulka_app::allow_paths(&state, paths);
+}
+
+/// For each path, whether it is allowed and its file still exists.
+#[tauri::command]
+pub async fn sql_files_exist(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<Vec<bool>, String> {
+    Ok(tulka_app::sql_files_exist(&state, paths).await)
 }
 
 #[tauri::command]

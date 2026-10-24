@@ -17,6 +17,7 @@ vi.mock("../ipc", () => ({
   completionMetadata: vi.fn(),
   onAppEvent: vi.fn(),
   allowDroppedPaths: vi.fn(),
+  sqlFilesExist: vi.fn(),
 }));
 
 let closeRequested: (() => Promise<void>) | null = null;
@@ -59,6 +60,7 @@ beforeEach(async () => {
   vi.mocked(ipc.completionMetadata).mockResolvedValue({ schemas: [], objects: [], columns: {} } as never);
   vi.mocked(ipc.onAppEvent).mockResolvedValue(() => {});
   vi.mocked(ipc.allowDroppedPaths).mockResolvedValue();
+  vi.mocked(ipc.sqlFilesExist).mockImplementation(async (paths) => paths.map(() => true));
   connections.list = [conn, nopw];
   closeRequested = null;
   await tabs.reset();
@@ -141,6 +143,80 @@ test("restore lets the backend read and write the restored tabs' files", async (
   restore(tabs, parseSession(json)!, known);
   expect(ipc.allowDroppedPaths).toHaveBeenCalledTimes(1);
   expect(ipc.allowDroppedPaths).toHaveBeenCalledWith(["/home/u/a.sql", "C:\\sql\\b.sql"]);
+});
+
+/** A saved session with file tabs on `paths`, each with unsaved text and not dirty. */
+async function sessionWithFiles(paths: string[]): Promise<string> {
+  for (const path of paths) {
+    const id = tabs.open({ kind: "query", sql: `SELECT '${path}'` });
+    tabs.list.find((x) => x.id === id)!.file = { path, encoding: "utf16Le", lineEnding: "crlf" };
+  }
+  const json = JSON.stringify(snapshot(tabs));
+  await tabs.reset();
+  return json;
+}
+
+test("a restored file tab whose file is gone keeps its text, loses the file and says so", async () => {
+  const json = await sessionWithFiles(["/sql/here.sql", "/sql/gone.sql"]);
+  const order: string[] = [];
+  vi.mocked(ipc.allowDroppedPaths).mockImplementation(async () => void order.push("allow"));
+  vi.mocked(ipc.sqlFilesExist).mockImplementation(async (paths) => {
+    order.push("exist");
+    return paths.map((p) => p !== "/sql/gone.sql");
+  });
+  restore(tabs, parseSession(json)!, known);
+  await flush();
+  expect(order).toEqual(["allow", "exist"]);
+  expect(ipc.sqlFilesExist).toHaveBeenCalledWith(["/sql/here.sql", "/sql/gone.sql"]);
+  const [here, gone] = tabs.list;
+  expect(here.file?.path).toBe("/sql/here.sql");
+  expect(here.pane!.notice).toBeNull();
+  expect(gone.file).toBeUndefined();
+  expect(gone.pane!.text()).toBe("SELECT '/sql/gone.sql'");
+  expect(gone.pane!.notice).toBe(t("tabs.restoredWithoutFile", { path: "/sql/gone.sql" }));
+  // Its text is only in the session now.
+  expect(gone.dirty).toBe(true);
+  expect(snapshot(tabs).tabs[1]).not.toHaveProperty("file");
+});
+
+test("a restored file tab that lost both its connection and its file keeps both notices", async () => {
+  const id = tabs.open({ kind: "query", connectionId: "c1", database: "Sales", sql: "SELECT 1" });
+  await flush();
+  tabs.list.find((x) => x.id === id)!.file = { path: "/gone.sql", encoding: "utf8", lineEnding: "lf" };
+  const json = JSON.stringify(snapshot(tabs));
+  await tabs.reset();
+  vi.mocked(ipc.sqlFilesExist).mockResolvedValue([false]);
+  restore(tabs, parseSession(json)!, { connectionIds: new Set() });
+  await flush();
+  const notice = tabs.list[0].pane!.notice!;
+  expect(notice).toContain(t("tabs.restoredWithoutConnection"));
+  expect(notice).toContain(t("tabs.restoredWithoutFile", { path: "/gone.sql" }));
+});
+
+test("when the restored paths cannot be allowed, file tabs keep their file and nothing is checked", async () => {
+  const json = await sessionWithFiles(["/sql/a.sql"]);
+  vi.mocked(ipc.allowDroppedPaths).mockRejectedValue("internal error");
+  restore(tabs, parseSession(json)!, known);
+  await flush();
+  expect(ipc.sqlFilesExist).not.toHaveBeenCalled();
+  expect(tabs.list[0].file?.path).toBe("/sql/a.sql");
+  expect(tabs.list[0].pane!.notice).toBeNull();
+});
+
+test("the file check of a restore leaves alone a tab closed or replaced meanwhile", async () => {
+  const json = await sessionWithFiles(["/sql/gone.sql"]);
+  let answer!: (v: boolean[]) => void;
+  vi.mocked(ipc.sqlFilesExist).mockReturnValue(new Promise((r) => (answer = r)));
+  restore(tabs, parseSession(json)!, known);
+  await flush();
+  await tabs.reset();
+  const id = tabs.open({ kind: "query" });
+  const fresh = tabs.list.find((x) => x.id === id)!;
+  fresh.file = { path: "/sql/gone.sql", encoding: "utf8", lineEnding: "lf" };
+  answer([false]);
+  await flush();
+  expect(fresh.file?.path).toBe("/sql/gone.sql");
+  expect(fresh.pane!.notice).toBeNull();
 });
 
 test("restore without file tabs allows nothing", async () => {

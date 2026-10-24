@@ -33,8 +33,8 @@ pub use explorer::{
     table_structure,
 };
 pub use files::{
-    allow_paths, decode_text, encode_text, read_sql_file, write_sql_file, FileEncoding, LineEnding,
-    OpenedFile, TextFile,
+    allow_paths, decode_text, encode_text, read_sql_file, sql_files_exist, write_sql_file,
+    FileEncoding, LineEnding, OpenedFile, TextFile,
 };
 pub use queries::{
     decode_component, delete_saved_query, encode_component, list_saved_queries, read_saved_query,

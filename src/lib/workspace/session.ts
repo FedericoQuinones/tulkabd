@@ -189,18 +189,46 @@ function restoredTab(s: SessionTab, known: { connectionIds: Set<string> }): Tab 
 }
 
 /**
+ * Lets the backend read and write the restored tabs' files, then checks they are still there. A tab
+ * whose file is gone stops being a file tab (Ctrl+S would recreate a file the user moved or deleted):
+ * it keeps its text, now unsaved, with a notice. Tabs are found by their pane, so a tab closed or
+ * replaced meanwhile is left alone. When the paths cannot be allowed nothing changes: Ctrl+S
+ * allows a file tab's path again before writing it.
+ */
+async function checkFiles(store: TabsStore, files: { pane: PaneState; path: string }[]): Promise<void> {
+  const paths = files.map((f) => f.path);
+  let exists: boolean[];
+  try {
+    await ipc.allowDroppedPaths(paths);
+    exists = await ipc.sqlFilesExist(paths);
+  } catch {
+    return;
+  }
+  if (!Array.isArray(exists)) return;
+  files.forEach(({ pane, path }, i) => {
+    if (exists[i] !== false) return;
+    const tab = store.list.find((x) => x.pane === pane);
+    if (tab?.file?.path !== path) return;
+    tab.file = undefined;
+    tab.dirty = true;
+    const notice = t("tabs.restoredWithoutFile", { path });
+    pane.notice = pane.notice ? `${pane.notice} ${notice}` : notice;
+  });
+}
+
+/**
  * Replaces the store's workspace with a saved session. Connects nothing: a bound query tab opens
  * its session on its first Run. A tab whose connection is not in `known` keeps its text, unbound,
  * with a notice. Definition tabs try to load their text (it needs the Explorer connected). The
- * backend may read and write the files of restored file tabs again (plan D7); a file that moved
- * keeps its tab and text, and Ctrl+S writes it again at its old path.
+ * backend may read and write the files of restored file tabs again (plan D7); a tab whose file is
+ * gone keeps its text but not the file, with a notice (see `checkFiles`).
  */
 export function restore(store: TabsStore, s: SessionV1, known: { connectionIds: Set<string> }): void {
-  const files = s.tabs.flatMap((x) => (x.kind === "query" && x.file ? [x.file.path] : []));
-  if (files.length) void ipc.allowDroppedPaths(files).catch(() => {});
   const list = s.tabs.map((x) => restoredTab(x, known));
   const tabGroups = groups(s.layout).map((id) => ({ id, tabIds: [...s.groups[id].tabIds], activeId: s.groups[id].activeId }));
   store.replaceWorkspace({ list, tabGroups, layout: s.layout, activeGroupId: s.activeGroupId });
+  const files = list.flatMap((tab) => (tab.file && tab.pane ? [{ pane: tab.pane, path: tab.file.path }] : []));
+  if (files.length) void checkFiles(store, files);
   for (const x of s.tabs) {
     if (x.kind === "definition" && known.connectionIds.has(x.connectionId)) void store.retry(x.id);
   }

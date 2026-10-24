@@ -427,3 +427,29 @@ async fn a_write_keeps_the_file_permissions_and_symlinks() {
         0o640
     );
 }
+
+#[tokio::test]
+async fn sql_files_exist_reports_allowed_files_that_are_still_there() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    let here = dir.path().join("here.sql");
+    std::fs::write(&here, "SELECT 1").unwrap();
+    let gone = dir.path().join("gone.sql");
+    let folder = dir.path().join("folder.sql");
+    std::fs::create_dir(&folder).unwrap();
+    let other = dir.path().join("other.sql");
+    std::fs::write(&other, "SELECT 1").unwrap();
+    let paths: Vec<String> = [&here, &gone, &folder]
+        .iter()
+        .map(|p| path_string(p))
+        .collect();
+    allow_paths(&st, paths.clone());
+
+    let mut asked = paths;
+    // Never allowed: reported missing, whatever is on disk.
+    asked.push(path_string(&other));
+    assert_eq!(
+        sql_files_exist(&st, asked).await,
+        [true, false, false, false]
+    );
+}

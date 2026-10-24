@@ -363,6 +363,8 @@ export interface OpenedFile {
 export const pickSqlFiles = (filterName: string) => invoke<string[]>("pick_sql_files", { filterName });
 /** Lets the backend read and write `.sql` paths dropped on the window or restored with the session. */
 export const allowDroppedPaths = (paths: string[]) => invoke<void>("allow_dropped_paths", { paths });
+/** For each path, whether the backend allows it and its file still exists. */
+export const sqlFilesExist = (paths: string[]) => invoke<boolean[]>("sql_files_exist", { paths });
 /** Rejects with `"not_allowed"`, `"not_found"`, `"not_text"` or why it could not be read. */
 export const readSqlFile = (path: string) => invoke<OpenedFile>("read_sql_file", { path });
 /** Writes atomically, recreating a deleted file. Rejects with `"not_allowed"` or why it could not be written. */
