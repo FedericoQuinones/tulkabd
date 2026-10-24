@@ -308,6 +308,7 @@
   "queries.errors.exists": "A query with this name already exists.",
   "queries.errors.emptyName": "Enter a name.",
   "queries.errors.notFound": "That query no longer exists.",
+  "queries.errors.notText": "Its file is not text (UTF-8, or UTF-16 with a BOM).",
   "queries.errors.action": "Could not do that: {error}",
   "queries.rename.label": "Rename query",
   "queries.delete.title": "Delete saved query",

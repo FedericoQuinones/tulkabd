@@ -164,6 +164,31 @@ fn database_names_follow_the_file_system_case() {
 }
 
 #[test]
+fn read_decodes_like_a_file_from_disk_and_refuses_what_is_not_text() {
+    let (_dir, s) = store();
+    let put = |name: &str, bytes: &[u8]| {
+        let path = s.path_of("Ventas", name).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    };
+    // Copied in from SSMS: UTF-16 LE with a BOM and CRLF.
+    let utf16: Vec<u8> = [0xFF, 0xFE]
+        .into_iter()
+        .chain(
+            "SELECT 1\r\nGO\r\n"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes),
+        )
+        .collect();
+    put("ssms", &utf16);
+    assert_eq!(s.read("Ventas", "ssms").unwrap(), "SELECT 1\nGO\n");
+    put("bom", b"\xEF\xBB\xBFSELECT 2");
+    assert_eq!(s.read("Ventas", "bom").unwrap(), "SELECT 2");
+    put("binary", &[0x89, b'P', b'N', b'G', 0x00, 0xFF]);
+    assert_eq!(s.read("Ventas", "binary").unwrap_err(), NOT_TEXT);
+}
+
+#[test]
 fn save_without_overwrite_on_existing_fails_with_exists() {
     let (_dir, s) = store();
     s.save("Ventas", "q", "SELECT 1", false).unwrap();

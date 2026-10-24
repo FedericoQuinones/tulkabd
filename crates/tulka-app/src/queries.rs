@@ -39,6 +39,7 @@ use std::time::UNIX_EPOCH;
 use tulka_store::{SavedQueryEntry, SavedQueryIndex};
 
 use crate::connections::blocking;
+use crate::files::decode_text;
 use crate::state::AppState;
 use crate::types::{SavedQuery, SavedQueryHit, EMPTY_NAME, EXISTS, NOT_FOUND};
 
@@ -215,16 +216,14 @@ impl QueriesStore {
         out
     }
 
-    /// The text of a saved query (`"not_found"` if there is none).
+    /// The text of a saved query, with `\n` line breaks: `"not_found"` if
+    /// there is none, `"not_text"` when it is not text. It is decoded like a
+    /// `.sql` file opened from disk ([`decode_text`]), so one copied in from
+    /// SSMS (UTF-16 with a BOM, CRLF) reads too.
     pub fn read(&self, database: &str, name: &str) -> Result<String, String> {
         let path = self.path_of(database, name)?;
         let bytes = fs::read(&path).map_err(|e| io_error("read", e))?;
-        let text = String::from_utf8(bytes)
-            .map_err(|_| "could not read the saved query: it is not UTF-8 text".to_string())?;
-        Ok(match text.strip_prefix('\u{feff}') {
-            Some(rest) => rest.to_string(),
-            None => text,
-        })
+        Ok(decode_text(&bytes)?.text)
     }
 
     /// Writes `text` as query `name` of `database`. Fails with `"exists"`
@@ -504,7 +503,8 @@ pub async fn list_saved_queries(state: &AppState, database: Option<String>) -> V
         .unwrap_or_default()
 }
 
-/// The text of a saved query; `"not_found"` when there is none.
+/// The text of a saved query; `"not_found"` when there is none,
+/// `"not_text"` when its file is not text.
 pub async fn read_saved_query(
     state: &AppState,
     database: String,

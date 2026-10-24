@@ -27,7 +27,8 @@ import { explorer } from "../explorer/tree.svelte";
 import { palette } from "../palette/palette.svelte";
 import { tabs } from "../tabs/tabs.svelte";
 import NameDialog from "./NameDialog.svelte";
-import { pickConnection, queries } from "./queries.svelte";
+import { pickConnection, queries, queryError } from "./queries.svelte";
+import { t } from "../i18n/t";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -373,4 +374,9 @@ test("NameDialog gives the focus back when it closes", () => {
   expect(document.activeElement?.tagName).toBe("INPUT");
   unmount(dialog);
   expect(document.activeElement).toBe(before);
+});
+
+test("a saved query that is not text says so", () => {
+  expect(queryError("not_text")).toBe(t("queries.errors.notText"));
+  expect(t("queries.errors.notText")).not.toBe("queries.errors.notText");
 });

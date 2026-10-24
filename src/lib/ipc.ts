@@ -352,7 +352,7 @@ export const completionMetadata = (connectionId: string, database: string) =>
 /** Saved queries of `database`, or of every database, sorted by database and name. */
 export const listSavedQueries = (database?: string) =>
   invoke<SavedQuery[]>("list_saved_queries", { database: database ?? null });
-/** Rejects with `"not_found"` when the query does not exist. */
+/** With `\n` line breaks. Rejects with `"not_found"` when the query does not exist, `"not_text"` when its file is not text. */
 export const readSavedQuery = (database: string, name: string) =>
   invoke<string>("read_saved_query", { database, name });
 /** Rejects with `"exists"` when the name is taken and `overwrite` is false, `"empty_name"` on a blank name. */

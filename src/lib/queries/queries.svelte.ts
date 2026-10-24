@@ -20,6 +20,7 @@ export function queryError(e: unknown): string {
   if (s === "exists") return t("queries.errors.exists");
   if (s === "empty_name") return t("queries.errors.emptyName");
   if (s === "not_found") return t("queries.errors.notFound");
+  if (s === "not_text") return t("queries.errors.notText");
   return t("queries.errors.action", { error: s });
 }
 
