@@ -250,3 +250,21 @@ test("a failed view shows the error and the field goes back", async () => {
   expect(document.body.textContent).toContain("Could not sort or filter: busy");
   expect(filterField().value).toBe("");
 });
+
+test("Filter by this value from the keyboard gives the focus back to the grid", async () => {
+  open();
+  await settle();
+  grid().focus();
+  grid().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+  flushSync();
+  // The context-menu key fires `contextmenu` on the focused grid.
+  grid().dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  flushSync();
+  const item = document.querySelector<HTMLButtonElement>('[role="menuitem"]')!;
+  expect(document.activeElement).toBe(item);
+  item.click();
+  flushSync();
+  await settle();
+  expect(ipc.setResultView).toHaveBeenCalledTimes(1);
+  expect(document.activeElement).toBe(grid());
+});

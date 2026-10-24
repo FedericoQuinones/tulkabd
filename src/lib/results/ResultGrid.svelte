@@ -152,6 +152,8 @@
 
   /** "Filter by this value": the text the cell shows (the backend accepts its shortened form); NULL is Is NULL. */
   function filterByValue(at: Cell, value: Value) {
+    // The menu closes without refocusing anything: keyboard users go on in the grid.
+    gridEl?.focus({ preventScroll: true });
     filterColumn(
       at.col,
       value.kind === "null" ? { kind: "isNull", column: at.col } : { kind: "equals", column: at.col, text: cellText(value).text },
