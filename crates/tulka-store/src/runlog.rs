@@ -139,8 +139,31 @@ fn create_private(path: &Path) -> Result<(), OpenError> {
         .map_err(|_| OpenError::Unavailable)
 }
 
+/// Makes an existing file (and its sidecars, if any) private to the owner,
+/// whatever mode an earlier version or another tool left on it.
+fn restrict_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut files = vec![path.to_path_buf()];
+        for suffix in ["-wal", "-shm"] {
+            let mut s = path.as_os_str().to_owned();
+            s.push(suffix);
+            files.push(PathBuf::from(s));
+        }
+        for file in files {
+            if file.exists() {
+                let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 fn try_open(path: &Path) -> Result<Connection, OpenError> {
     create_private(path)?;
+    restrict_permissions(path);
     let conn = Connection::open(path)?;
     // A file locked by another instance costs startup at most this long.
     conn.busy_timeout(BUSY_TIMEOUT)?;
@@ -163,6 +186,9 @@ fn try_open(path: &Path) -> Result<Connection, OpenError> {
     }
     // `journal_mode` returns a row, so it cannot go through `pragma_update`.
     let _ = conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()));
+    // Deleted statement text is overwritten, not left in free pages.
+    conn.pragma_update(None, "secure_delete", "ON")?;
+    restrict_permissions(path);
     Ok(conn)
 }
 
@@ -178,6 +204,12 @@ fn remove_files(path: &Path) {
         s.push(suffix);
         let _ = std::fs::remove_file(PathBuf::from(s));
     }
+}
+
+/// Folds the write-ahead log into the main file and empties it, so deleted
+/// text does not linger there. A no-op on an in-memory database.
+fn checkpoint(conn: &Connection) {
+    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
 }
 
 /// Cuts `sql` to at most `MAX_LOGGED_SQL_BYTES`, on a char boundary.
@@ -228,6 +260,7 @@ impl RunLogStore {
     pub fn in_memory() -> RunLogStore {
         let conn = Connection::open_in_memory().expect("in-memory SQLite is always available");
         init(&conn).expect("schema is valid");
+        let _ = conn.pragma_update(None, "secure_delete", "ON");
         RunLogStore {
             conn: Mutex::new(conn),
         }
@@ -308,16 +341,22 @@ impl RunLogStore {
 
     /// Deletes entries recorded before `older_than_ms`; returns how many.
     pub fn prune(&self, older_than_ms: i64) -> usize {
-        self.lock()
+        let conn = self.lock();
+        let deleted = conn
             .execute("DELETE FROM run WHERE at_ms < ?1", params![older_than_ms])
-            .unwrap_or(0)
+            .unwrap_or(0);
+        if deleted > 0 {
+            checkpoint(&conn);
+        }
+        deleted
     }
 
     pub fn clear(&self) -> Result<(), String> {
-        self.lock()
-            .execute("DELETE FROM run", [])
-            .map(|_| ())
-            .map_err(|e| format!("could not clear the run log: {e}"))
+        let conn = self.lock();
+        conn.execute("DELETE FROM run", [])
+            .map_err(|e| format!("could not clear the run log: {e}"))?;
+        checkpoint(&conn);
+        Ok(())
     }
 }
 
@@ -435,6 +474,90 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("r.db");
+        let store = RunLogStore::open(&path);
+        store.insert(&run("x", 1)).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn clear_and_prune_erase_the_text_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        let store = RunLogStore::open(&path);
+        store.insert(&run("select 'MARKER_CLEAR_7731'", 1)).unwrap();
+        store.insert(&run("select 'MARKER_PRUNE_5519'", 2)).unwrap();
+        store.insert(&run("select 'keep'", 1000)).unwrap();
+        assert_eq!(store.prune(500), 2);
+        store.clear().unwrap();
+        drop(store);
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        for file in [path.clone(), PathBuf::from(wal)] {
+            if let Ok(bytes) = std::fs::read(&file) {
+                for marker in ["MARKER_CLEAR_7731", "MARKER_PRUNE_5519", "keep"] {
+                    assert!(
+                        !bytes.windows(marker.len()).any(|w| w == marker.as_bytes()),
+                        "{marker} left in {file:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_file_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        {
+            let store = RunLogStore::open(&path);
+            store.insert(&run("x", 1)).unwrap();
+        }
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let store = RunLogStore::open(&path);
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(store.list(None, 10).len(), 1);
+        for suffix in ["-wal", "-shm"] {
+            let mut s = path.as_os_str().to_owned();
+            s.push(suffix);
+            let side = PathBuf::from(s);
+            if side.exists() {
+                assert_eq!(mode(&side), 0o600, "{suffix}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_sidecars_are_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        let store = RunLogStore::open(&path);
+        store.insert(&run("x", 1)).unwrap();
+        // The store is still open, so the sidecars exist.
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
+        assert!(wal.exists());
+        std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let second = RunLogStore::open(&path);
+        let mode = std::fs::metadata(&wal).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        drop(second);
+        drop(store);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        std::fs::write(&path, vec![0x42u8; 4096]).unwrap();
         let store = RunLogStore::open(&path);
         store.insert(&run("x", 1)).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
