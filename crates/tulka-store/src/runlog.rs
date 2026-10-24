@@ -16,7 +16,7 @@ pub const MAX_LOGGED_SQL_BYTES: usize = 100 * 1024;
 
 const SCHEMA: &str = "
 CREATE TABLE run (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     at_ms INTEGER NOT NULL,
     connection_id TEXT NOT NULL,
     connection_name TEXT NOT NULL,
@@ -307,7 +307,9 @@ impl RunLogStore {
         })
     }
 
-    /// Newest first; `before` is an id to page backwards.
+    /// Newest first; `before` is an id to page backwards. A read error yields
+    /// an empty or shorter list by design: the log is a convenience and must
+    /// never get in the way of running a query.
     pub fn list(&self, before: Option<i64>, limit: u32) -> Vec<RunLogEntry> {
         let conn = self.lock();
         let Ok(mut stmt) = conn.prepare(
@@ -340,6 +342,8 @@ impl RunLogStore {
     }
 
     /// Deletes entries recorded before `older_than_ms`; returns how many.
+    /// Errors are swallowed by design (reported as 0 deleted): pruning is
+    /// housekeeping and will simply be tried again later.
     pub fn prune(&self, older_than_ms: i64) -> usize {
         let conn = self.lock();
         let deleted = conn
@@ -562,6 +566,89 @@ mod tests {
         store.insert(&run("x", 1)).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn sql_of_exactly_the_limit_is_not_truncated() {
+        let store = RunLogStore::in_memory();
+        let entry = store
+            .insert(&run(&"a".repeat(MAX_LOGGED_SQL_BYTES), 1))
+            .unwrap();
+        assert_eq!(entry.sql.len(), MAX_LOGGED_SQL_BYTES);
+        assert!(!entry.sql_truncated);
+    }
+
+    #[test]
+    fn ids_are_not_reused_after_clear_or_prune() {
+        let store = RunLogStore::in_memory();
+        let a = store.insert(&run("a", 1)).unwrap();
+        store.clear().unwrap();
+        let b = store.insert(&run("b", 2)).unwrap();
+        assert!(b.id > a.id);
+        store.prune(10);
+        let c = store.insert(&run("c", 3)).unwrap();
+        assert!(c.id > b.id);
+    }
+
+    #[test]
+    fn other_user_version_starts_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        {
+            let store = RunLogStore::open(&path);
+            store.insert(&run("old", 1)).unwrap();
+            store
+                .lock()
+                .pragma_update(None, "user_version", RUNLOG_VERSION + 1)
+                .unwrap();
+        }
+        let store = RunLogStore::open(&path);
+        assert!(store.list(None, 10).is_empty());
+        store.insert(&run("new", 2)).unwrap();
+        assert_eq!(store.list(None, 10)[0].sql, "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        RunLogStore::open(&path).insert(&run("text", 1)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            // Running as root: permissions do not stop reads, nothing to test.
+            return;
+        }
+        let store = RunLogStore::open(&path);
+        assert!(store.list(None, 10).is_empty());
+        store.insert(&run("memory", 2)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let kept = RunLogStore::open(&path).list(None, 10);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].sql, "text");
+    }
+
+    #[test]
+    fn locked_file_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        RunLogStore::open(&path).insert(&run("text", 1)).unwrap();
+        {
+            // Another instance holding an exclusive lock on the file.
+            let other = Connection::open(&path).unwrap();
+            other
+                .pragma_update(None, "locking_mode", "EXCLUSIVE")
+                .unwrap();
+            other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+            let start = std::time::Instant::now();
+            let store = RunLogStore::open(&path);
+            // A locked file must not hold up startup for long.
+            assert!(start.elapsed() < std::time::Duration::from_secs(1));
+            assert!(store.list(None, 10).is_empty());
+            other.execute_batch("ROLLBACK").unwrap();
+        }
+        assert_eq!(RunLogStore::open(&path).list(None, 10)[0].sql, "text");
     }
 
     #[test]
