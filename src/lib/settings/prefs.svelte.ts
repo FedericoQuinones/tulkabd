@@ -24,6 +24,10 @@ class PrefsStore {
   #version = 0;
   // The read in flight, if any: an update waits for it so it never saves defaults over saved values.
   #loading: Promise<unknown> | null = null;
+  // The last read failed or answered nothing, so `value` may be the defaults, not what is saved.
+  #loadFailed = false;
+  // Writes run one after the other, so they reach the backend in the order they were requested.
+  #queue: Promise<unknown> = Promise.resolve();
 
   get zoom() {
     return this.value.zoom;
@@ -43,10 +47,12 @@ class PrefsStore {
     const version = this.#version;
     const read = getPreferences().then(
       (loaded) => {
+        this.#loadFailed = !loaded;
         if (loaded && version === this.#version) this.value = loaded;
       },
       () => {
         // Keep the defaults; the app works without saved preferences.
+        this.#loadFailed = true;
       },
     );
     this.#loading = read;
@@ -56,12 +62,23 @@ class PrefsStore {
   }
 
   /**
-   * Applies `patch` right away and saves the whole object. The backend's answer (brought into
+   * Applies `patch` and saves the whole object. The backend's answer (brought into
    * range) replaces the local value. A read-only config refuses to save: the change then holds
    * for this session only and the error is rethrown.
    */
-  async update(patch: Partial<Preferences>): Promise<Preferences> {
+  update(patch: Partial<Preferences>): Promise<Preferences> {
+    const run = this.#queue.then(() => this.#write(patch));
+    this.#queue = run.catch(() => {});
+    return run;
+  }
+
+  async #write(patch: Partial<Preferences>): Promise<Preferences> {
     await this.#loading;
+    if (this.#loadFailed) {
+      // Never save over values that were not read: try once more, and give up if that fails too.
+      await this.load();
+      if (this.#loadFailed) throw new Error("preferences could not be read");
+    }
     this.#version++;
     const next = { ...this.value, ...patch };
     this.value = next;

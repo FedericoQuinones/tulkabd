@@ -31,3 +31,31 @@ it("a failed load keeps the defaults", async () => {
   const loaded = await prefs.load();
   expect(loaded.restoreSession).toBe(true);
 });
+
+it("a failed load is retried before an update, and a second failure writes nothing", async () => {
+  vi.mocked(ipc.getPreferences).mockRejectedValue("boom");
+  await prefs.load();
+  vi.mocked(ipc.getPreferences).mockRejectedValue("still down");
+  await expect(prefs.update({ zoom: 120 })).rejects.toBeDefined();
+  expect(ipc.setPreferences).not.toHaveBeenCalled();
+
+  vi.mocked(ipc.getPreferences).mockResolvedValue({ ...DEFAULT_PREFERENCES, fontSize: 20 });
+  vi.mocked(ipc.setPreferences).mockImplementation(async (p) => p);
+  await prefs.update({ zoom: 120 });
+  expect(vi.mocked(ipc.setPreferences).mock.calls[0][0]).toMatchObject({ zoom: 120, fontSize: 20 });
+});
+
+it("updates reach the backend in call order and the last one stays", async () => {
+  vi.mocked(ipc.getPreferences).mockResolvedValue({ ...DEFAULT_PREFERENCES });
+  await prefs.load();
+  const sent: number[] = [];
+  vi.mocked(ipc.setPreferences).mockImplementation(async (p) => {
+    // The first call is slower; without a queue the second would overtake it.
+    await new Promise((r) => setTimeout(r, p.zoom === 110 ? 30 : 0));
+    sent.push(p.zoom);
+    return p;
+  });
+  await Promise.all([prefs.update({ zoom: 110 }), prefs.update({ zoom: 120 })]);
+  expect(sent).toEqual([110, 120]);
+  expect(prefs.zoom).toBe(120);
+});
