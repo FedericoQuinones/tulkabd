@@ -2,11 +2,12 @@
 
 mod batches;
 mod convert;
+pub mod guard;
 mod meta;
 mod session;
 
 use async_trait::async_trait;
-use tulka_core::{ConnectParams, Driver, DriverError, Session};
+use tulka_core::{ConnectParams, Driver, DriverError, GuardFinding, Session};
 
 pub use batches::{split_batches, Batch};
 
@@ -21,5 +22,9 @@ impl Driver for MssqlDriver {
 
     async fn connect(&self, p: &ConnectParams) -> Result<Box<dyn Session>, DriverError> {
         Ok(Box::new(session::connect(p).await?))
+    }
+
+    fn guard_findings(&self, sql: &str) -> Vec<GuardFinding> {
+        guard::findings(sql)
     }
 }

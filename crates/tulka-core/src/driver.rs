@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Sender;
 
+use crate::guard::GuardFinding;
 use crate::meta::{DatabaseSnapshot, TableStructure};
 use crate::{DriverError, Value};
 
@@ -173,4 +174,10 @@ pub trait CancelHandle: Send + Sync {
 pub trait Driver: Send + Sync {
     fn id(&self) -> &'static str;
     async fn connect(&self, p: &ConnectParams) -> Result<Box<dyn Session>, DriverError>;
+
+    /// Finds the statements of `sql` that are dangerous to run unattended.
+    /// A driver without an analyzer finds nothing.
+    fn guard_findings(&self, _sql: &str) -> Vec<GuardFinding> {
+        Vec::new()
+    }
 }

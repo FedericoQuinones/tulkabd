@@ -7,6 +7,7 @@ pub mod connstr;
 pub mod driver;
 pub mod error;
 pub mod export;
+pub mod guard;
 pub mod locale;
 pub mod meta;
 pub mod secrets;
@@ -25,6 +26,7 @@ pub use driver::{
 };
 pub use error::DriverError;
 pub use export::{estimate_tokens, to_ai, to_excel_tsv};
+pub use guard::{GuardFinding, GuardKind};
 pub use locale::{decimal_separator_for, system_decimal_separator};
 pub use meta::{
     qualified, quote_ident, ColumnInfo, DatabaseSnapshot, DbObject, ForeignKey, IndexInfo,
