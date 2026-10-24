@@ -3,6 +3,7 @@
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
   import type { ViewSpec } from "../ipc";
+  import { prefs } from "../settings/prefs.svelte";
   import type { PaneState } from "../pane/pane.svelte";
   import CopyToast from "./CopyToast.svelte";
   import MessagesView from "./MessagesView.svelte";
@@ -16,7 +17,6 @@
   }
   let { pane, onjump }: Props = $props();
 
-  const MAX_ROWS = 100_000;
   const TOAST_MS = 2500;
   const ERROR_TOAST_MS = 5000;
   const FILTER_DEBOUNCE_MS = 150;
@@ -176,7 +176,7 @@
       />
     {/if}
     {#if result?.truncated}
-      <span class="warn">{t("results.truncated", { max: count(MAX_ROWS) })}</span>
+      <span class="warn">{t("results.truncated", { max: count(prefs.maxRows) })}</span>
     {/if}
     {#if pane.summary}
       <span class="meta num">{t("results.elapsed", { ms: count(pane.summary.elapsedMs) })}{finishedAt ? ` · ${finishedAt}` : ""}</span>

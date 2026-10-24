@@ -1,6 +1,9 @@
-import type { Environment, GuardLevel } from "../ipc";
+import type { Environment, EnvironmentStyle, GuardLevel } from "../ipc";
 
-/** Defaults per environment; mirrors `Environment::default_color/default_guard` in tulka-core. */
+/** What a new connection of each environment starts with: the saved preferences' `environments`. */
+export type EnvironmentDefaults = Record<Environment, EnvironmentStyle>;
+
+/** Labels and tokens per environment, with the factory color and guard (as `Environment::default_color/default_guard` in tulka-core). */
 export const ENVIRONMENTS: {
   id: Environment;
   label: string;
@@ -23,8 +26,8 @@ export interface EnvState {
 }
 
 /** Changes the environment; color and guard follow its defaults unless edited by hand. */
-export function applyEnvironment(state: EnvState, environment: Environment): EnvState {
-  const def = ENVIRONMENTS.find((e) => e.id === environment)!;
+export function applyEnvironment(state: EnvState, environment: Environment, defaults?: EnvironmentDefaults): EnvState {
+  const def = defaults?.[environment] ?? ENVIRONMENTS.find((e) => e.id === environment)!;
   return {
     ...state,
     environment,
@@ -33,10 +36,13 @@ export function applyEnvironment(state: EnvState, environment: Environment): Env
   };
 }
 
-/** Initial state for the dialog: touched flags are set only when the stored values differ from the environment defaults. */
-export function initialEnvState(stored?: { environment: Environment; color: string; guard: GuardLevel }): EnvState {
+/** Initial state for the dialog: touched flags are set only when the stored values differ from the environment defaults (the preferences', when given). */
+export function initialEnvState(
+  stored?: { environment: Environment; color: string; guard: GuardLevel },
+  defaults?: EnvironmentDefaults,
+): EnvState {
   const environment = stored?.environment ?? "local";
-  const def = ENVIRONMENTS.find((e) => e.id === environment)!;
+  const def = defaults?.[environment] ?? ENVIRONMENTS.find((e) => e.id === environment)!;
   const color = stored?.color ?? def.color;
   const guard = stored?.guard ?? def.guard;
   return { environment, color, guard, colorTouched: color !== def.color, guardTouched: guard !== def.guard };

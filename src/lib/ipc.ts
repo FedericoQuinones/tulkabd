@@ -375,12 +375,35 @@ export const moveFolder = (id: string, parentId: string | null) =>
 export const listExpanded = () => invoke<string[]>("list_expanded");
 /** Replaces the set of expanded folder and connection ids. */
 export const setExpanded = (ids: string[]) => invoke<void>("set_expanded", { ids });
-/** Interface preferences kept in `config.json`. */
+/** How "Copy" writes numbers: with the system's decimal separator or always with a dot. */
+export type NumberFormat = "system" | "invariant";
+/** What a new connection of an environment starts with. */
+export interface EnvironmentStyle {
+  /** `#rrggbb`. */
+  color: string;
+  guard: GuardLevel;
+}
+/** Preferences kept in `config.json`; the backend brings every value into its range. */
 export interface Preferences {
   /** Zoom of the editor and the result grid, in percent (70 to 200). */
   zoom: number;
+  /** Editor and grid font size at 100 % zoom, in pixels (10 to 24). */
+  fontSize: number;
+  /** Whether the tabs of the last session are reopened at startup. */
+  restoreSession: boolean;
+  /** Rows kept per result set (1,000 to 1,000,000). */
+  maxRows: number;
+  /** Seconds after which a running query is cancelled; 0 is no limit (max 86,400). */
+  queryTimeoutS: number;
+  copyNumbers: NumberFormat;
+  /** Days the run log keeps its entries (1 to 365). */
+  runLogDays: number;
+  /** Color and guard level new connections start with. */
+  environments: Record<Environment, EnvironmentStyle>;
 }
 export const getPreferences = () => invoke<Preferences>("get_preferences");
+/** Stores all preferences; resolves to what was kept, brought into range. */
+export const setPreferences = (prefs: Preferences) => invoke<Preferences>("set_preferences", { prefs });
 /** Stores the zoom (percent); resolves to the value kept, brought into 70 to 200. */
 export const setZoom = (zoom: number) => invoke<number>("set_zoom", { zoom });
 /**
