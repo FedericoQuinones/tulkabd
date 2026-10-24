@@ -168,23 +168,20 @@ impl ResultBuffer {
             })
             .collect();
         if let Some(SortSpec { column, descending }) = spec.sort {
-            // Sorting cells side by side, with decimals parsed once, is much
-            // faster than looking up and parsing on every comparison. Two
-            // parsed decimals compare as `compare_values` does.
-            let mut keyed: Vec<(&Value, Option<Dec>, u32)> = view
+            // Sorting cells side by side, with decimals and offsets parsed
+            // once, is much faster than looking up and parsing on every
+            // comparison. Two parsed keys compare as `compare_values` does.
+            let mut keyed: Vec<(&Value, Option<Parsed>, u32)> = view
                 .iter()
                 .map(|&i| {
                     let cell = cell_at(&rows[i as usize], column);
-                    let parsed = match cell {
-                        Value::Decimal(d) => Dec::parse(d),
-                        _ => None,
-                    };
-                    (cell, parsed, i)
+                    (cell, Parsed::of(cell), i)
                 })
                 .collect();
             keyed.sort_by(|a, b| {
                 let order = match (&a.1, &b.1) {
-                    (Some(x), Some(y)) => x.cmp(y),
+                    (Some(Parsed::Dec(x)), Some(Parsed::Dec(y))) => x.cmp(y),
+                    (Some(Parsed::Instant(x)), Some(Parsed::Instant(y))) => x.cmp(y),
                     _ => compare_values(a.0, b.0),
                 };
                 if descending {
@@ -283,8 +280,9 @@ fn cell_at(row: &[Value], column: usize) -> &Value {
 /// Sort order of cells (D4): `NULL` before everything; booleans, integers,
 /// floats and decimals by numeric value (decimals exactly, from their text);
 /// binary by bytes; text and the rest (dates, times, ids) by their text,
-/// ignoring case. Values of different kinds order by kind, in that order.
-/// A total order, so sorting with it is well defined.
+/// ignoring case; `datetimeoffset` by its instant in UTC (then by its text;
+/// text that does not parse goes last). Values of different kinds order by
+/// kind, in that order. A total order, so sorting with it is well defined.
 pub fn compare_values(a: &Value, b: &Value) -> Ordering {
     let (ka, kb) = (sort_kind(a), sort_kind(b));
     if ka != kb {
@@ -296,6 +294,14 @@ pub fn compare_values(a: &Value, b: &Value) -> Ordering {
             x.partial_cmp(y).unwrap_or(Ordering::Equal)
         }
         (Value::Bytes(x), Value::Bytes(y)) => x.cmp(y),
+        (Value::DateTimeOffset(x), Value::DateTimeOffset(y)) => {
+            match (Instant::parse(x), Instant::parse(y)) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => x.cmp(y),
+            }
+        }
         _ if ka == SortKind::Number => compare_numbers(a, b),
         _ => compare_ignoring_case(text_of(a), text_of(b)),
     }
@@ -307,6 +313,96 @@ enum SortKind {
     Number,
     Binary,
     Text,
+    /// Its own kind: ordered by instant, which plain text could not mix with.
+    Offset,
+}
+
+/// A sort key parsed once per row by [`ResultBuffer::set_view`].
+enum Parsed<'a> {
+    Dec(Dec<'a>),
+    Instant(Instant<'a>),
+}
+
+impl<'a> Parsed<'a> {
+    fn of(v: &'a Value) -> Option<Self> {
+        match v {
+            Value::Decimal(d) => Dec::parse(d).map(Self::Dec),
+            Value::DateTimeOffset(t) => Instant::parse(t).map(Self::Instant),
+            _ => None,
+        }
+    }
+}
+
+/// A `datetimeoffset` as UTC seconds and nanoseconds, then its text (so two
+/// spellings of one instant still have a fixed order).
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct Instant<'a> {
+    seconds: i64,
+    nanos: u32,
+    text: &'a str,
+}
+
+impl<'a> Instant<'a> {
+    /// Parses `YYYY-MM-DD hh:mm:ss[.fffffff] ±hh:mm`, as the driver writes
+    /// it (see `tulka-mssql`'s `convert.rs`).
+    fn parse(text: &'a str) -> Option<Self> {
+        let (local, offset) = text.rsplit_once(' ')?;
+        let (date, time) = local.split_once(' ')?;
+        let mut date = date.splitn(3, '-');
+        let year: i64 = number(date.next()?)?;
+        let month: i64 = number(date.next()?)?;
+        let day: i64 = number(date.next()?)?;
+        let (clock, fraction) = time.split_once('.').unwrap_or((time, ""));
+        let mut clock = clock.splitn(3, ':');
+        let hour: i64 = number(clock.next()?)?;
+        let minute: i64 = number(clock.next()?)?;
+        let second: i64 = number(clock.next()?)?;
+        if fraction.len() > 9 || (!fraction.is_empty() && number::<u32>(fraction).is_none()) {
+            return None;
+        }
+        let nanos = fraction
+            .bytes()
+            .chain(std::iter::repeat(b'0'))
+            .take(9)
+            .fold(0u32, |n, d| n * 10 + u32::from(d - b'0'));
+        let (sign, offset) = match offset.as_bytes().first()? {
+            b'+' => (1, &offset[1..]),
+            b'-' => (-1, &offset[1..]),
+            _ => return None,
+        };
+        let (oh, om) = offset.split_once(':')?;
+        let offset_minutes = sign * (number::<i64>(oh)? * 60 + number::<i64>(om)?);
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return None;
+        }
+        let local_seconds =
+            days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second;
+        Some(Instant {
+            seconds: local_seconds - offset_minutes * 60,
+            nanos,
+            text,
+        })
+    }
+}
+
+/// Parses a run of ASCII digits (no sign).
+fn number<T: std::str::FromStr>(s: &str) -> Option<T> {
+    if s.is_empty() || !s.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// Days from 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's
+/// `days_from_civil`).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 fn sort_kind(v: &Value) -> SortKind {
@@ -314,12 +410,10 @@ fn sort_kind(v: &Value) -> SortKind {
         Value::Null => SortKind::Null,
         Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Decimal(_) => SortKind::Number,
         Value::Bytes(_) => SortKind::Binary,
-        Value::Text(_)
-        | Value::Date(_)
-        | Value::Time(_)
-        | Value::DateTime(_)
-        | Value::DateTimeOffset(_)
-        | Value::Uuid(_) => SortKind::Text,
+        Value::Text(_) | Value::Date(_) | Value::Time(_) | Value::DateTime(_) | Value::Uuid(_) => {
+            SortKind::Text
+        }
+        Value::DateTimeOffset(_) => SortKind::Offset,
     }
 }
 
@@ -854,6 +948,86 @@ mod tests {
             Less
         );
         assert_eq!(compare_values(&Value::Null, &Value::Int(i64::MIN)), Less);
+    }
+
+    fn dto(s: &str) -> Value {
+        Value::DateTimeOffset(s.into())
+    }
+
+    #[test]
+    fn date_time_offsets_sort_by_their_instant() {
+        use std::cmp::Ordering::*;
+        // 14:03 at -03:00 is 17:03 UTC, after 16:00 UTC written at +00:00.
+        assert_eq!(
+            compare_values(
+                &dto("2026-10-20 14:03:00 -03:00"),
+                &dto("2026-10-20 16:00:00 +00:00")
+            ),
+            Greater
+        );
+        // The same instant (00:01 UTC), across midnight and at a half-hour
+        // offset: their text breaks the tie.
+        assert_eq!(
+            compare_values(
+                &dto("2026-10-19 23:01:00.0 -01:00"),
+                &dto("2026-10-20 05:31:00.0 +05:30")
+            ),
+            Less
+        );
+        assert_eq!(
+            compare_values(
+                &dto("2026-10-20 05:31:00.0 +05:30"),
+                &dto("2026-10-19 23:01:00.0 -01:00")
+            ),
+            Greater
+        );
+        assert_eq!(
+            compare_values(
+                &dto("2026-10-20 05:31:00.0 +05:30"),
+                &dto("2026-10-20 05:31:00.0 +05:30")
+            ),
+            Equal
+        );
+        // An earlier instant (10-19 22:00 UTC vs 10-20 01:00 UTC) whose text
+        // sorts later.
+        assert_eq!(
+            compare_values(
+                &dto("2026-10-20 12:00:00 +14:00"),
+                &dto("2026-10-20 00:00:00 -01:00")
+            ),
+            Less
+        );
+        assert_eq!(
+            compare_values(
+                &dto("2026-10-20 00:00:00.0000001 +00:00"),
+                &dto("2026-10-20 00:00:00 +00:00")
+            ),
+            Greater
+        );
+        // Unparsable text sorts after every parsed value, by its text.
+        assert_eq!(
+            compare_values(&dto("garbage"), &dto("9999-12-31 23:59:59 -14:00")),
+            Greater
+        );
+        assert_eq!(compare_values(&dto("a"), &dto("b")), Less);
+
+        let mut b = buffer_of(vec![
+            vec![dto("2026-10-20 14:03:00 -03:00"), Value::Int(0)], // 17:03 UTC
+            vec![dto("2026-10-20 18:00:00 +05:30"), Value::Int(1)], // 12:30 UTC
+            vec![Value::Null, Value::Int(2)],
+            vec![dto("2026-10-20 16:00:00 +00:00"), Value::Int(3)], // 16:00 UTC
+            vec![dto("2026-10-20 09:00:00 -09:00"), Value::Int(4)], // 18:00 UTC
+        ]);
+        b.set_view(&sorted(0, false));
+        let order: Vec<Value> = b.window(0, 10).iter().map(|r| r[1].clone()).collect();
+        assert_eq!(
+            order,
+            [2, 1, 3, 0, 4].map(Value::Int).to_vec(),
+            "NULL, then by UTC instant"
+        );
+        b.set_view(&sorted(0, true));
+        let order: Vec<Value> = b.window(0, 10).iter().map(|r| r[1].clone()).collect();
+        assert_eq!(order, [4, 0, 3, 1, 2].map(Value::Int).to_vec());
     }
 
     #[test]
