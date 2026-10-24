@@ -147,3 +147,44 @@ test("GuardMenu changes the level permanently with setConnectionGuard", async ()
   expect(connections.list[0].guard).toBe("block");
   expect(document.querySelector('[role="menu"]')).toBeNull();
 });
+
+test("Escape cancels even when the focus sits on non-interactive dialog content", () => {
+  const oncancel = vi.fn();
+  openDialog({ oncancel });
+  // A click on a statement leaves the focus on the panel, or on the body in some engines.
+  document.querySelector<HTMLElement>('[role="dialog"]')!.focus();
+  document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  expect(oncancel).toHaveBeenCalledOnce();
+  (document.activeElement as HTMLElement).blur();
+  document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  expect(oncancel).toHaveBeenCalledTimes(2);
+});
+
+test("Tab from the panel background moves the focus to a control inside the dialog", () => {
+  openDialog();
+  const panel = document.querySelector<HTMLElement>('[role="dialog"]')!;
+  expect(panel.getAttribute("tabindex")).toBe("-1");
+  panel.focus();
+  const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+  panel.dispatchEvent(tab);
+  expect(tab.defaultPrevented).toBe(true);
+  expect(document.activeElement).toBe(button("Cancel"));
+});
+
+test("BlockedBar says the guard is off after the toggle", async () => {
+  vi.mocked(ipc.setGuardOffForSession).mockResolvedValue();
+  cmp = mount(BlockedBar, { target: document.body, props: { connection: conn, findings } });
+  flushSync();
+  button("Turn off until I close the app").click();
+  await settle();
+  flushSync();
+  expect(document.body.textContent).toContain("Off until restart");
+  expect(document.body.textContent).not.toContain("Turn off until I close the app");
+});
+
+test("loadGuardOff keeps the previous list when the read fails", async () => {
+  connections.guardOff = ["c1"];
+  vi.mocked(ipc.guardOffForSession).mockRejectedValue("boom");
+  await connections.loadGuardOff();
+  expect(connections.guardOff).toEqual(["c1"]);
+});

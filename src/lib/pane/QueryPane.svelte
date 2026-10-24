@@ -38,8 +38,8 @@
 
   // Whatever closes the dialog, the keyboard goes back to the editor.
   async function confirmGuard(dontAskAgain: boolean) {
-    await pane.confirmGuard(dontAskAgain);
-    editor?.focus();
+    // Focus moves as the run starts, not when a long query ends.
+    await pane.confirmGuard(dontAskAgain, () => editor?.focus());
   }
   function cancelGuard() {
     pane.cancelGuard();

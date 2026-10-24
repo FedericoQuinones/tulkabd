@@ -223,3 +223,53 @@ test("finding lines include the selection offset", async () => {
   await pane.run("DELETE FROM dbo.T", 10);
   expect(pane.blocked![0].line).toBe(12);
 });
+
+test("a double click on Run anyway with Don't ask again saves the level once and undo restores the original", async () => {
+  connections.list = [{ ...conn, guard: "confirm" } as ConnectionConfig];
+  vi.mocked(ipc.setConnectionGuard).mockResolvedValueOnce("confirm");
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(needs).mockResolvedValue(ok);
+  await pane.run("DELETE FROM dbo.T", 0);
+  await Promise.all([pane.confirmGuard(true), pane.confirmGuard(true)]);
+  expect(ipc.setConnectionGuard).toHaveBeenCalledTimes(1);
+  expect(ipc.runQuery).toHaveBeenCalledTimes(2);
+  vi.mocked(ipc.setConnectionGuard).mockResolvedValueOnce("off");
+  await pane.undoGuardOff();
+  expect(ipc.setConnectionGuard).toHaveBeenLastCalledWith("c1", "confirm");
+});
+
+test("the undo toast is dropped when the level changed some other way", async () => {
+  connections.list = [{ ...conn, guard: "confirm" } as ConnectionConfig];
+  vi.mocked(ipc.setConnectionGuard).mockResolvedValueOnce("confirm");
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(needs).mockResolvedValue(ok);
+  await pane.run("DELETE FROM dbo.T", 0);
+  await pane.confirmGuard(true);
+  connections.list = [{ ...conn, guard: "block" } as ConnectionConfig];
+  await pane.undoGuardOff();
+  expect(ipc.setConnectionGuard).toHaveBeenCalledTimes(1);
+  expect(pane.guardToast).toBeNull();
+});
+
+test("the editor is focused as soon as the dialog closes, before the query ends", async () => {
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(needs);
+  await pane.run("DELETE FROM dbo.T", 0);
+  const d = deferred<RunSummary>();
+  vi.mocked(ipc.runQuery).mockReturnValueOnce(d.promise);
+  const seen: boolean[] = [];
+  const done = pane.confirmGuard(false, () => seen.push(true));
+  expect(seen).toEqual([true]);
+  d.resolve(ok);
+  await done;
+});
+
+test("unbind and close drop the guard prompt, the blocked list and the toast", async () => {
+  for (const drop of [() => pane.unbind(), () => pane.close()]) {
+    pane.guardPrompt = { sql: "x", lineOffset: 0, findings: [] };
+    pane.blocked = [];
+    pane.guardToast = { text: "x", connectionId: "c1", previous: "confirm" };
+    await drop();
+    expect(pane.guardPrompt).toBeNull();
+    expect(pane.blocked).toBeNull();
+    expect(pane.guardToast).toBeNull();
+    await pane.open(conn);
+  }
+});

@@ -35,8 +35,7 @@ class ConnectionStore {
     try {
       this.guardOff = await ipc.guardOffForSession();
     } catch {
-      // Without the list the toolbar just shows the saved level.
-      this.guardOff = [];
+      // Keep what was known: dropping it would show a guard as on when it is off.
     }
   }
 

@@ -121,6 +121,7 @@ export class PaneState {
    */
   async close(): Promise<void> {
     this.runId++;
+    this.clearGuard();
     if (!this.hasSession && this.status !== "connecting") return;
     this.hasSession = false;
     await ipc.closeSession(this.tabId).catch(() => {});
@@ -129,10 +130,17 @@ export class PaneState {
   /** Drops the session and the connection binding but keeps the editor text. */
   unbind(): void {
     void this.close();
+    this.clearGuard();
     this.session = null;
     this.connectionId = null;
     this.database = null;
     this.status = "idle";
+  }
+
+  private clearGuard() {
+    this.guardPrompt = null;
+    this.blocked = null;
+    this.guardToast = null;
   }
 
   private hasSession = false;
@@ -207,9 +215,11 @@ export class PaneState {
    * analyzed, not whatever the editor holds now. With `dontAskAgain` the connection's guard is
    * saved as Off first; if that fails nothing runs.
    */
-  async confirmGuard(dontAskAgain: boolean): Promise<void> {
+  async confirmGuard(dontAskAgain: boolean, beforeRun?: () => void): Promise<void> {
     const prompt = this.guardPrompt;
     if (!prompt || this.status !== "idle") return;
+    // Taken before any await, so a second click on the button finds nothing to confirm.
+    this.guardPrompt = null;
     if (dontAskAgain && this.connectionId) {
       const id = this.connectionId;
       const name = connections.list.find((c) => c.id === id)?.name ?? "";
@@ -217,12 +227,11 @@ export class PaneState {
         const previous = await connections.setGuard(id, "off");
         this.guardToast = { text: t("guard.turnedOff", { connection: name }), connectionId: id, previous };
       } catch (e) {
-        this.guardPrompt = null;
         this.messages = [{ kind: "error", text: t("guard.changeFailed", { error: String(e) }), line: null }];
         return;
       }
     }
-    this.guardPrompt = null;
+    beforeRun?.();
     await this.send(prompt.sql, prompt.lineOffset, true);
   }
 
@@ -239,6 +248,8 @@ export class PaneState {
     const toast = this.guardToast;
     if (!toast) return;
     this.guardToast = null;
+    // Another change since (the menu, the connection dialog) wins over this undo.
+    if (connections.list.find((c) => c.id === toast.connectionId)?.guard !== "off") return;
     try {
       await connections.setGuard(toast.connectionId, toast.previous);
     } catch (e) {

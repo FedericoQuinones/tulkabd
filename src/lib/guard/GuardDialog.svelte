@@ -39,24 +39,28 @@
     const items = [...panel.querySelectorAll<HTMLElement>("button, input")].filter((el) => !(el as HTMLButtonElement).disabled);
     const first = items[0];
     const last = items[items.length - 1];
-    const active = document.activeElement;
-    if (e.shiftKey && (active === first || !panel.contains(active))) {
+    const active = document.activeElement as HTMLElement | null;
+    // Focus on the panel itself or on the page (after a click on plain text) counts as outside.
+    const inside = active !== null && items.includes(active);
+    if (e.shiftKey && (active === first || !inside)) {
       e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && (active === last || !panel.contains(active))) {
+      (inside ? last : cancelButton).focus();
+    } else if (!e.shiftKey && (active === last || !inside)) {
       e.preventDefault();
-      first.focus();
+      (inside ? first : cancelButton).focus();
     }
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="backdrop" onkeydown={trap}>
+<!-- Keys are heard on the window: a click on plain text can leave the focus outside the buttons. -->
+<svelte:window onkeydown={trap} />
+<div class="backdrop">
   <div
     class="panel"
     role="dialog"
     aria-modal="true"
     aria-labelledby="guard-title"
+    tabindex="-1"
     bind:this={panel}
     style:border-color={envColor}
   >

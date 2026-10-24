@@ -31,7 +31,11 @@
     {/each}
   </ul>
   {#if error}<span class="err">{error}</span>{/if}
-  <button type="button" onclick={turnOff}>{t("guard.offUntilClose")}</button>
+  {#if connections.guardOff.includes(connection.id)}
+    <span class="off" role="status">{t("guard.offSession")}</span>
+  {:else}
+    <button type="button" onclick={turnOff}>{t("guard.offUntilClose")}</button>
+  {/if}
 </div>
 
 <style>
@@ -49,6 +53,10 @@
     padding: 0;
     list-style: none;
     color: var(--soft);
+    font-size: 12px;
+  }
+  .off {
+    color: var(--warning);
     font-size: 12px;
   }
   .err {
