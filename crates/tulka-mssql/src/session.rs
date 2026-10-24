@@ -498,8 +498,14 @@ impl Session for MssqlSession {
 
     async fn transaction_count(&mut self) -> Result<u32, DriverError> {
         let rows = self.query_rows("SELECT @@TRANCOUNT").await?;
-        let count = rows.first().and_then(|r| r.get::<i32, _>(0));
-        Ok(count.map_or(0, |n| u32::try_from(n).unwrap_or(0)))
+        // No answer is not "no transaction": report it rather than let a close go ahead.
+        let count = rows
+            .first()
+            .and_then(|r| r.get::<i32, _>(0))
+            .ok_or_else(|| {
+                DriverError::Other("no value returned by `SELECT @@TRANCOUNT`".into())
+            })?;
+        Ok(u32::try_from(count).unwrap_or(0))
     }
 
     async fn end_transactions(&mut self, commit: bool) -> Result<(), DriverError> {
