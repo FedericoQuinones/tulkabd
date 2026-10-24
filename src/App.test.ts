@@ -25,7 +25,8 @@ import { invoke } from "@tauri-apps/api/core";
 import App from "./App.svelte";
 import type { ConnectionConfig } from "./lib/ipc";
 import { connections } from "./lib/connections/store.svelte";
-import { tabs } from "./lib/tabs/tabs.svelte";
+import { AUTOSAVE_MS, tabs } from "./lib/tabs/tabs.svelte";
+import { palette } from "./lib/palette/palette.svelte";
 import { DEFAULT_PREFERENCES, prefs } from "./lib/settings/prefs.svelte";
 
 let cmp: ReturnType<typeof mount> | undefined;
@@ -91,6 +92,31 @@ test("the gear opens Settings in place of the workspace, and Escape returns with
   gear().click();
   flushSync();
   gear().click();
+  flushSync();
+  expect(document.querySelector("h1")).toBeNull();
+});
+
+test("with Settings open, the search icon closes it and opens the palette", async () => {
+  await new Promise((r) => setTimeout(r, 0));
+  gear().click();
+  flushSync();
+  document.querySelector<HTMLButtonElement>('nav button[aria-label="Search objects"]')!.click();
+  flushSync();
+  await new Promise((r) => setTimeout(r, 0));
+  expect(document.querySelector("h1")).toBeNull();
+  expect(document.querySelector<HTMLElement>(".ws")!.hidden).toBe(false);
+  expect(palette.isOpen).toBe(true);
+  palette.hide();
+});
+
+test("with Settings open, opening a tab from anywhere closes it", async () => {
+  await new Promise((r) => setTimeout(r, 0));
+  gear().click();
+  flushSync();
+  expect(document.querySelector("h1")).not.toBeNull();
+  tabs.open({ kind: "structure", connectionId: "c1", database: "Sales", schema: "dbo", name: "Orders" });
+  flushSync();
+  await new Promise((r) => setTimeout(r, 0));
   flushSync();
   expect(document.querySelector("h1")).toBeNull();
 });
@@ -241,6 +267,37 @@ test("with restore off the saved session is neither restored nor replaced until 
     expect(await start(true)).toEqual({ titles: ["untitled-9"], hold: false });
   } finally {
     autosave.mockRestore();
+    prefs.value = structuredClone(DEFAULT_PREFERENCES);
+    vi.mocked(invoke).mockImplementation(defaultInvoke);
+  }
+});
+
+test("with restore off, only a real edit lets the autosave replace the saved session", async () => {
+  unmount(cmp!);
+  await tabs.reset();
+  const defaultInvoke = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+    if (cmd === "get_preferences") return { ...DEFAULT_PREFERENCES, restoreSession: false };
+    if (cmd === "load_session") return JSON.stringify({ version: 1, layout: { kind: "group", id: "g1" }, activeGroupId: "g1", groups: { g1: { tabIds: [], activeId: null } }, tabs: [] });
+    return defaultInvoke(cmd, args as never);
+  });
+  const saves = () => vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_session").length;
+  try {
+    cmp = mount(App, { target: document.body });
+    flushSync();
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    vi.mocked(invoke).mockClear();
+    // Opening an empty tab is not an edit.
+    tabs.newTab();
+    flushSync();
+    await new Promise((r) => setTimeout(r, AUTOSAVE_MS + 200));
+    expect(saves()).toBe(0);
+    tabs.active!.pane!.edited();
+    flushSync();
+    await new Promise((r) => setTimeout(r, AUTOSAVE_MS + 200));
+    expect(saves()).toBe(1);
+  } finally {
     prefs.value = structuredClone(DEFAULT_PREFERENCES);
     vi.mocked(invoke).mockImplementation(defaultInvoke);
   }

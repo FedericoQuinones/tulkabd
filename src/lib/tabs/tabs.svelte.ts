@@ -171,6 +171,8 @@ export class TabsStore {
   /** Open transactions the user must answer for before a tab or the window closes. */
   closePrompt = $state.raw<ClosePrompt | null>(null);
 
+  /** Grows whenever a tab is added or brought forward, so the shell can leave a screen covering the tabs. */
+  shown = $state(0);
   private counter = 0;
   private pending = new Map<string, Pending>();
   private saveNotices = new WeakMap<PaneState, string>();
@@ -246,6 +248,7 @@ export class TabsStore {
     const g = this.group(this.activeGroupId)!;
     g.tabIds.push(tab.id);
     g.activeId = tab.id;
+    this.shown++;
   }
 
   open(spec: TabSpec): string {
@@ -301,6 +304,7 @@ export class TabsStore {
     if (!g) return;
     g.activeId = id;
     this.activeGroupId = g.id;
+    this.shown++;
   }
 
   focusGroup(groupId: string) {

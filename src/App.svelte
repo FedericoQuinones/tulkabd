@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, tick } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { t } from "./lib/i18n/t";
@@ -119,11 +119,18 @@
   // The Settings screen takes the place of the workspace; the tabs stay mounted underneath.
   let settingsOpen = $state(false);
 
-  function closeSettings() {
+  /** Leaves Settings. The focus goes back to the gear unless something else is taking it. */
+  function closeSettings(focusGear = true) {
+    if (!settingsOpen) return;
     settingsOpen = false;
-    // Focus goes back to the gear once the workspace is shown again.
-    void tick().then(() => document.querySelector<HTMLElement>(`nav button[aria-label="${t("rail.settings")}"]`)?.focus());
+    if (focusGear) void tick().then(() => document.querySelector<HTMLElement>(`nav button[aria-label="${t("rail.settings")}"]`)?.focus());
   }
+
+  // Opening or showing a tab (Explorer, palette, saved queries, files) leaves Settings.
+  $effect(() => {
+    void tabs.shown;
+    untrack(() => closeSettings(false));
+  });
 
   /** A panel icon shows its panel; pressed again while shown, it hides the left panel. */
   function onrail(key: string) {
@@ -132,6 +139,8 @@
       else settingsOpen = true;
       return;
     }
+    // Any other icon acts on the workspace, which Settings covers.
+    closeSettings(false);
     if (key === "rail.search") palette.show();
     if (key !== "rail.explorer" && key !== "rail.saved") return;
     if (!explorerHidden && leftPanel !== key) leftPanel = key;
@@ -171,8 +180,8 @@
     if (document.querySelector('[aria-modal="true"]')) return;
     const action = shortcutAction(e, isMac);
     if (!action) return;
-    // Behind the Settings screen only the zoom applies: the tabs are out of sight.
-    if (settingsOpen && action !== "zoomIn" && action !== "zoomOut" && action !== "zoomReset") return;
+    // A shortcut that acts on the tabs leaves Settings first; the zoom applies to both.
+    if (action !== "zoomIn" && action !== "zoomOut" && action !== "zoomReset") closeSettings(false);
     e.preventDefault();
     if (action === "zoomIn" || action === "zoomOut" || action === "zoomReset") zoom.apply(action);
     else if (action === "palette") palette.show();
@@ -229,7 +238,7 @@
       <div class="ws" hidden={settingsOpen}>
         {#if restored}<Workspace />{/if}
       </div>
-      {#if settingsOpen}<Settings onclose={closeSettings} />{/if}
+      {#if settingsOpen}<Settings onclose={() => closeSettings()} />{/if}
       {#if tabs.fileError}
         <div class="file-error" role="alert">
           <span>{tabs.fileError}</span>
