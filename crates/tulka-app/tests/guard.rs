@@ -1,9 +1,11 @@
 //! Guard enforcement in `run_query`, against a recording fake driver.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::Notify;
 use tulka_app::*;
 use tulka_core::guard::{GuardFinding, GuardKind};
 use tulka_core::{
@@ -16,7 +18,7 @@ type Executed = Arc<Mutex<Vec<String>>>;
 
 /// Records every script that reaches the server and analyzes with the real
 /// T-SQL analyzer.
-struct RecordingDriver(Executed);
+struct RecordingDriver(Executed, Arc<Notify>);
 
 #[async_trait]
 impl Driver for RecordingDriver {
@@ -25,7 +27,7 @@ impl Driver for RecordingDriver {
     }
 
     async fn connect(&self, _p: &ConnectParams) -> Result<Box<dyn Session>, DriverError> {
-        Ok(Box::new(RecordingSession(self.0.clone())))
+        Ok(Box::new(RecordingSession(self.0.clone(), self.1.clone())))
     }
 
     fn guard_findings(&self, sql: &str) -> Vec<GuardFinding> {
@@ -33,7 +35,8 @@ impl Driver for RecordingDriver {
     }
 }
 
-struct RecordingSession(Executed);
+/// The script `hold` stays running until the notify is signalled.
+struct RecordingSession(Executed, Arc<Notify>);
 
 struct NoCancel;
 
@@ -83,6 +86,9 @@ impl Session for RecordingSession {
     }
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError> {
         self.0.lock().unwrap().push(sql.to_string());
+        if sql == "hold" {
+            self.1.notified().await;
+        }
         let _ = tx.send(ExecEvent::BatchDone { batch: 0 }).await;
         Ok(())
     }
@@ -95,6 +101,8 @@ struct Fixture {
     state: AppState,
     executed: Executed,
     conn_id: String,
+    release: Arc<Notify>,
+    config_path: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -102,10 +110,12 @@ struct Fixture {
 async fn fixture(level: GuardLevel) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let executed = Executed::default();
+    let release = Arc::new(Notify::new());
+    let config_path = dir.path().join("config.json");
     let state = AppState::new(
-        ConfigStore::at(dir.path().join("config.json")),
+        ConfigStore::at(config_path.clone()),
         Arc::new(MemoryStore::default()),
-        vec![Arc::new(RecordingDriver(executed.clone()))],
+        vec![Arc::new(RecordingDriver(executed.clone(), release.clone()))],
     )
     .unwrap();
     let mut conn = ConnectionConfig::new("Fake", "host", 1433, "sa", Environment::Local);
@@ -122,6 +132,8 @@ async fn fixture(level: GuardLevel) -> Fixture {
         state,
         executed,
         conn_id: conn.id,
+        release,
+        config_path,
         _dir: dir,
     }
 }
@@ -192,7 +204,7 @@ async fn session_off_overrides_block_until_cleared() {
 }
 
 #[tokio::test]
-async fn blocked_tab_stays_usable_and_a_busy_check_comes_after_analysis() {
+async fn blocked_script_leaves_the_session_usable() {
     let f = fixture(GuardLevel::Block).await;
     assert_eq!(
         run(&f, "DROP TABLE t", false).await.outcome,
@@ -218,6 +230,42 @@ async fn permanent_change_returns_previous_and_clears_session_off() {
     let saved = list_connections(&f.state).await;
     assert_eq!(saved[0].guard, GuardLevel::Off);
     assert!(!guard_off_for_session(&f.state).contains(&f.conn_id));
+
+    // The change is on disk, not just in memory.
+    let reloaded = ConfigStore::at(f.config_path.clone()).load().unwrap();
+    assert_eq!(reloaded.connections[0].guard, GuardLevel::Off);
+}
+
+#[tokio::test]
+async fn confirm_runs_safe_sql_without_asking() {
+    let f = fixture(GuardLevel::Confirm).await;
+    let s = run(&f, "SELECT 1", false).await;
+    assert_eq!(s.outcome, RunOutcome::Ok);
+    assert!(s.findings.is_empty());
+}
+
+#[tokio::test]
+async fn block_answers_blocked_even_while_the_tab_is_busy() {
+    let f = Arc::new(fixture(GuardLevel::Block).await);
+    let running = {
+        let f = f.clone();
+        tokio::spawn(async move { run(&f, "hold", false).await })
+    };
+    while f.executed.lock().unwrap().is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The tab is busy, but a dangerous script is refused, not "busy".
+    let s = run_query(&f.state, "t1".into(), "DELETE FROM t".into(), false, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(s.outcome, RunOutcome::Blocked);
+    // A safe script does find it busy.
+    let err = run_query(&f.state, "t1".into(), "SELECT 1".into(), false, |_| {})
+        .await
+        .unwrap_err();
+    assert_eq!(err, BUSY);
+    f.release.notify_one();
+    assert_eq!(running.await.unwrap().outcome, RunOutcome::Ok);
 }
 
 #[tokio::test]
