@@ -170,8 +170,9 @@ impl ResultBuffer {
             .collect();
         if let Some(SortSpec { column, descending }) = spec.sort {
             // Sorting cells side by side, with decimals and offsets parsed
-            // once, is much faster than looking up and parsing on every
-            // comparison. Two parsed keys compare as `compare_values` does.
+            // and text lower-cased once, is much faster than looking up and
+            // parsing on every comparison. Two parsed keys of one variant
+            // compare as `compare_values` does.
             let mut keyed: Vec<(&Value, Option<Parsed>, u32)> = view
                 .iter()
                 .map(|&i| {
@@ -183,6 +184,7 @@ impl ResultBuffer {
                 let order = match (&a.1, &b.1) {
                     (Some(Parsed::Dec(x)), Some(Parsed::Dec(y))) => x.cmp(y),
                     (Some(Parsed::Instant(x)), Some(Parsed::Instant(y))) => x.cmp(y),
+                    (Some(Parsed::Folded(x)), Some(Parsed::Folded(y))) => x.cmp(y),
                     _ => compare_values(a.0, b.0),
                 };
                 if descending {
@@ -329,6 +331,9 @@ enum SortKind {
 enum Parsed<'a> {
     Dec(Dec<'a>),
     Instant(Instant<'a>),
+    /// A text-like value (see [`SortKind::Text`]) lower-cased; UTF-8 byte order is the order of its chars, so
+    /// comparing two of these is [`compare_ignoring_case`].
+    Folded(Cow<'a, str>),
 }
 
 impl<'a> Parsed<'a> {
@@ -336,6 +341,16 @@ impl<'a> Parsed<'a> {
         match v {
             Value::Decimal(d) => Dec::parse(d).map(Self::Dec),
             Value::DateTimeOffset(t) => Instant::parse(t).map(Self::Instant),
+            v if sort_kind(v) == SortKind::Text => {
+                let t = text_of(v);
+                Some(Self::Folded(
+                    if t.is_ascii() && !t.bytes().any(|c| c.is_ascii_uppercase()) {
+                        Cow::Borrowed(t)
+                    } else {
+                        Cow::Owned(t.chars().flat_map(char::to_lowercase).collect())
+                    },
+                ))
+            }
             _ => None,
         }
     }
