@@ -77,7 +77,8 @@ pub enum ColumnFilter {
         column: usize,
     },
     /// The cell's text is exactly `text` (case-sensitive). Numbers match
-    /// with or without thousands separators; `NULL` never matches.
+    /// with or without thousands separators, long text and binary also as
+    /// the grid shortens them (ending in `…`); `NULL` never matches.
     Equals {
         column: usize,
         text: String,
@@ -637,13 +638,29 @@ fn contains_ignoring_case(haystack: &str, needle_lower: &str) -> bool {
 }
 
 /// The `Equals` filter: the cell's text is exactly `text`.
+/// Besides the full value, a long text or binary cell also matches the
+/// shortened form the grid shows (see [`display_cell`]): its first
+/// [`DISPLAY_TEXT_CHARS`] characters, or `0x` and its first [`DISPLAY_BYTES`]
+/// bytes, plus `…`.
 fn cell_equals(value: &Value, text: &str) -> bool {
     let Some(plain) = plain_text(value) else {
         return false;
     };
-    plain == text
-        || (matches!(value, Value::Int(_) | Value::Float(_) | Value::Decimal(_))
-            && group_digits(&plain) == text)
+    if plain == text {
+        return true;
+    }
+    match value {
+        Value::Int(_) | Value::Float(_) | Value::Decimal(_) => group_digits(&plain) == text,
+        Value::Text(full) => text.strip_suffix('…').is_some_and(|shown| {
+            full.char_indices()
+                .nth(DISPLAY_TEXT_CHARS)
+                .is_some_and(|(end, _)| &full[..end] == shown)
+        }),
+        Value::Bytes(bytes) => text.strip_suffix('…').is_some_and(|shown| {
+            bytes.len() > DISPLAY_BYTES && hex(&bytes[..DISPLAY_BYTES], true) == shown
+        }),
+        _ => false,
+    }
 }
 
 /// Shortens a text cell to at most `max` bytes (at a character boundary) or
@@ -1152,6 +1169,42 @@ mod tests {
         b.set_view(&equals("1234.50"));
         assert_eq!(b.visible_len(), 1);
         b.set_view(&equals("NULL"));
+        assert_eq!(b.visible_len(), 0);
+    }
+
+    #[test]
+    fn equals_matches_long_values_as_the_grid_shows_them() {
+        let long = "é".repeat(DISPLAY_TEXT_CHARS) + "tail";
+        let shown_text = "é".repeat(DISPLAY_TEXT_CHARS) + "…";
+        let blob: Vec<u8> = (0..40).collect();
+        let shown_blob = format!("{}…", hex(&blob[..DISPLAY_BYTES], true));
+        let mut b = buffer_of(vec![
+            vec![Value::Text(long.clone()), Value::Bytes(blob.clone())],
+            vec![text("short"), Value::Bytes(vec![0xAB])],
+        ]);
+        let equals = |column: usize, t: &str| ViewSpec {
+            columns: vec![ColumnFilter::Equals {
+                column,
+                text: t.into(),
+            }],
+            ..ViewSpec::default()
+        };
+        // What the grid shows ("Filter by this value" on a long cell)...
+        b.set_view(&equals(0, &shown_text));
+        assert_eq!(b.visible_len(), 1);
+        b.set_view(&equals(1, &shown_blob));
+        assert_eq!(b.visible_len(), 1);
+        // ...and the full value both match.
+        b.set_view(&equals(0, &long));
+        assert_eq!(b.visible_len(), 1);
+        b.set_view(&equals(1, &hex(&blob, true)));
+        assert_eq!(b.visible_len(), 1);
+        // A short value is shown whole, so "…" makes it a different text.
+        b.set_view(&equals(0, "short…"));
+        assert_eq!(b.visible_len(), 0);
+        b.set_view(&equals(1, "0xAB"));
+        assert_eq!(b.visible_len(), 1);
+        b.set_view(&equals(1, "0xAB…"));
         assert_eq!(b.visible_len(), 0);
     }
 

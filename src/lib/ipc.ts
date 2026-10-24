@@ -98,7 +98,10 @@ export interface CopyOutcome {
 export type ColumnFilter =
   | { kind: "isNull"; column: number }
   | { kind: "notNull"; column: number }
-  /** Exact text (case-sensitive); numbers also match with thousands separators; NULL never. */
+  /**
+   * Exact text (case-sensitive); numbers also match with thousands separators, long text and
+   * binary also as the grid shortens them (ending in "…"); NULL never.
+   */
   | { kind: "equals"; column: number; text: string };
 /** How a received result is shown: filtered, then sorted (stable). All empty = rows as received. */
 export interface ViewSpec {
