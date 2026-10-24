@@ -47,8 +47,8 @@ pub use queries::{
     rename_saved_query, save_query, saved_query_path, QueriesStore,
 };
 pub use query::{
-    cancel_query, close_session, copy_results, fetch_rows, open_session, run_query,
-    set_result_view, use_database, MAX_FETCH_ROWS,
+    cancel_query, close_session, copy_results, end_transactions, fetch_rows, open_session,
+    run_query, set_result_view, transaction_count, use_database, MAX_FETCH_ROWS,
 };
 pub use results::{
     cap_cell, cell_matches, compare_values, display_cell, ColumnFilter, ResultBuffer, Selection,

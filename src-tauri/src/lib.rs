@@ -100,6 +100,8 @@ pub fn run() {
             query::set_result_view,
             query::copy_results,
             query::close_session,
+            query::transaction_count,
+            query::end_transactions,
             session::load_session,
             session::save_session,
             queries::list_saved_queries,

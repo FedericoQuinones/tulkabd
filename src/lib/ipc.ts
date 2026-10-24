@@ -353,6 +353,12 @@ export const copyResults = (
 
 export const closeSession = (tabId: string) => invoke<void>("close_session", { tabId });
 
+/** Open transactions on the tab's session; 0 without one. Rejects with "busy" while it runs, "disconnected" when lost. */
+export const transactionCount = (tabId: string) => invoke<number>("transaction_count", { tabId });
+
+/** Commits or rolls back every open transaction of the tab's session. */
+export const endTransactions = (tabId: string, commit: boolean) => invoke<void>("end_transactions", { tabId, commit });
+
 /** Why the connections file could not be read at startup (the app is then read-only for connections), if it could not. */
 export const startupError = () => invoke<string | null>("startup_error");
 

@@ -161,6 +161,15 @@ pub trait Session: Send {
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError>;
     /// A handle that cancels the running `execute` from another task.
     fn cancel_handle(&self) -> Box<dyn CancelHandle>;
+    /// How many transactions are open on this session (nested ones count).
+    /// A driver without transactions reports none.
+    async fn transaction_count(&mut self) -> Result<u32, DriverError> {
+        Ok(0)
+    }
+    /// Commits every open transaction, or rolls them all back.
+    async fn end_transactions(&mut self, _commit: bool) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 /// Cancels the request running on a session.

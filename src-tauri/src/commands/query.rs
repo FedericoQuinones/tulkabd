@@ -87,3 +87,17 @@ pub async fn copy_results(
 pub async fn close_session(state: State<'_, AppState>, tab_id: String) -> Result<(), String> {
     tulka_app::close_session(&state, tab_id).await
 }
+
+#[tauri::command]
+pub async fn transaction_count(state: State<'_, AppState>, tab_id: String) -> Result<u32, String> {
+    tulka_app::transaction_count(&state, tab_id).await
+}
+
+#[tauri::command]
+pub async fn end_transactions(
+    state: State<'_, AppState>,
+    tab_id: String,
+    commit: bool,
+) -> Result<(), String> {
+    tulka_app::end_transactions(&state, tab_id, commit).await
+}

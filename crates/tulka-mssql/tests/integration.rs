@@ -508,3 +508,73 @@ async fn large_result_streams_in_batches() {
     assert_eq!(sizes.iter().sum::<usize>(), 2000);
     assert!(events.contains(&ExecEvent::RowsAffected { count: 2000 }));
 }
+
+#[tokio::test]
+async fn transaction_count_and_end() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+    assert_eq!(s.transaction_count().await.unwrap(), 0);
+    collect(s.as_mut(), "BEGIN TRAN").await.0.unwrap();
+    assert_eq!(s.transaction_count().await.unwrap(), 1);
+    collect(s.as_mut(), "BEGIN TRAN").await.0.unwrap();
+    assert_eq!(s.transaction_count().await.unwrap(), 2);
+    s.end_transactions(false).await.unwrap();
+    assert_eq!(s.transaction_count().await.unwrap(), 0);
+    // Nothing open: ending is not an error.
+    s.end_transactions(false).await.unwrap();
+    s.end_transactions(true).await.unwrap();
+
+    // Commit keeps the work, rollback discards it.
+    let table = format!("##tulka_tx_{}", std::process::id());
+    collect(s.as_mut(), &format!("CREATE TABLE {table} (a int)"))
+        .await
+        .0
+        .unwrap();
+    collect(
+        s.as_mut(),
+        &format!("BEGIN TRAN; INSERT {table} VALUES (1)"),
+    )
+    .await
+    .0
+    .unwrap();
+    s.end_transactions(true).await.unwrap();
+    assert_eq!(s.transaction_count().await.unwrap(), 0);
+    collect(
+        s.as_mut(),
+        &format!("BEGIN TRAN; INSERT {table} VALUES (2)"),
+    )
+    .await
+    .0
+    .unwrap();
+    s.end_transactions(false).await.unwrap();
+    let (r, events) = collect(s.as_mut(), &format!("SELECT a FROM {table}")).await;
+    r.unwrap();
+    assert_eq!(rows(&events), vec![vec![Value::Int(1)]]);
+    collect(s.as_mut(), &format!("DROP TABLE {table}"))
+        .await
+        .0
+        .unwrap();
+}
+
+#[tokio::test]
+async fn end_transactions_on_a_lost_connection_is_disconnected() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+    let mut killer = connect(&p).await;
+    let (_, events) = collect(s.as_mut(), "SELECT @@SPID").await;
+    let spid = match rows(&events).as_slice() {
+        [row] => match row.as_slice() {
+            [Value::Int(spid)] => *spid,
+            other => panic!("unexpected row {other:?}"),
+        },
+        other => panic!("unexpected rows {other:?}"),
+    };
+    collect(killer.as_mut(), &format!("KILL {spid}"))
+        .await
+        .0
+        .unwrap();
+    assert!(matches!(
+        s.end_transactions(true).await,
+        Err(DriverError::Disconnected(_))
+    ));
+}

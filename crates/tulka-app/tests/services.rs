@@ -10,6 +10,7 @@ use tempfile::TempDir;
 
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver};
 use tokio::sync::Notify;
+use tulka_app::tulka_store::RunLogOutcome;
 use tulka_app::*;
 use tulka_core::{
     estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, CancelHandle, Column,
@@ -43,6 +44,7 @@ impl Driver for FakeDriver {
             database: p.database.clone().unwrap_or_else(|| "master".into()),
             cancel: Arc::new(FakeCancel::default()),
             dropped: None,
+            fail_end: p.user == "failtx",
         }))
     }
 }
@@ -70,6 +72,7 @@ impl Driver for GatedDriver {
             database: "master".into(),
             cancel: Arc::new(FakeCancel::default()),
             dropped: Some(self.dropped.clone()),
+            fail_end: false,
         }))
     }
 }
@@ -79,6 +82,8 @@ struct FakeSession {
     database: String,
     cancel: Arc<FakeCancel>,
     dropped: Option<Arc<AtomicBool>>,
+    /// `end_transactions` fails.
+    fail_end: bool,
 }
 
 impl Drop for FakeSession {
@@ -298,6 +303,20 @@ impl Session for FakeSession {
 
     fn cancel_handle(&self) -> Box<dyn CancelHandle> {
         Box::new(CancelRef(self.cancel.clone()))
+    }
+
+    async fn transaction_count(&mut self) -> Result<u32, DriverError> {
+        Ok(2)
+    }
+
+    async fn end_transactions(&mut self, _commit: bool) -> Result<(), DriverError> {
+        if self.fail_end {
+            return Err(DriverError::Query {
+                message: "cannot end".into(),
+                line: None,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -819,6 +838,93 @@ async fn close_session_cancels_a_running_query() {
     let (result, _) = run(&f.state, "t1", "rows 1").await;
     assert_eq!(result.unwrap_err(), "no session is open on this tab");
     close_session(&f.state, "t1".into()).await.unwrap();
+}
+
+#[tokio::test]
+async fn transaction_count_is_busy_while_running() {
+    let (f, _) = connected("t1").await;
+    assert_eq!(transaction_count(&f.state, "t1".into()).await, Ok(2));
+    let (sink, mut rx) = streamer();
+    let state = f.state.clone();
+    let running = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 1; wait".into(), false, sink).await
+    });
+    wait_for_total(&mut rx, 1).await;
+
+    assert_eq!(
+        transaction_count(&f.state, "t1".into()).await,
+        Err("busy".to_string())
+    );
+    assert_eq!(
+        end_transactions(&f.state, "t1".into(), false).await,
+        Err("busy".to_string())
+    );
+    cancel_query(&f.state, "t1".into()).await.unwrap();
+    tokio::time::timeout(TIMEOUT, running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(transaction_count(&f.state, "t1".into()).await, Ok(2));
+}
+
+#[tokio::test]
+async fn transaction_count_without_session_is_zero() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    assert_eq!(transaction_count(&f.state, "nope".into()).await, Ok(0));
+    assert_eq!(
+        end_transactions(&f.state, "nope".into(), true).await,
+        Ok(())
+    );
+    assert!(list_run_log(&f.state, None, 10).await.is_empty());
+}
+
+#[tokio::test]
+async fn transaction_count_on_a_lost_connection_is_disconnected() {
+    let (f, _) = connected("t1").await;
+    let (result, _) = run(&f.state, "t1", "disconnect").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Disconnected);
+    assert_eq!(
+        transaction_count(&f.state, "t1".into()).await,
+        Err("disconnected".to_string())
+    );
+}
+
+#[tokio::test]
+async fn end_transactions_is_logged() {
+    let (f, _) = connected("t1").await;
+    end_transactions(&f.state, "t1".into(), true).await.unwrap();
+    end_transactions(&f.state, "t1".into(), false)
+        .await
+        .unwrap();
+    let log = list_run_log(&f.state, None, 10).await;
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0].sql, "ROLLBACK TRANSACTION");
+    assert_eq!(log[1].sql, "COMMIT TRANSACTION");
+    assert!(log.iter().all(|e| e.outcome == RunLogOutcome::Ok));
+    assert!(log
+        .iter()
+        .all(|e| e.rows.is_none() && e.elapsed_ms.is_some()));
+
+    // A failure is reported and logged as an error.
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let mut conn = new_conn();
+    conn.user = "failtx".into();
+    let saved = save_connection(&f.state, conn, Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    open_session(&f.state, "t1".into(), saved.id, None, None)
+        .await
+        .unwrap();
+    let err = end_transactions(&f.state, "t1".into(), true)
+        .await
+        .unwrap_err();
+    assert!(err.contains("cannot end"), "{err}");
+    let log = list_run_log(&f.state, None, 10).await;
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].sql, "COMMIT TRANSACTION");
+    assert_eq!(log[0].outcome, RunLogOutcome::Error);
 }
 
 #[tokio::test]

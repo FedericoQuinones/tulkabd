@@ -250,6 +250,63 @@ where
     })
 }
 
+/// How many transactions are open on the tab's session. `0` when the tab has
+/// no session; fails with `"busy"` while a command uses the session and with
+/// `"disconnected"` after a lost connection (the server rolled back by then).
+pub async fn transaction_count(state: &AppState, tab_id: String) -> Result<u32, String> {
+    let (checkout, mut session) = match Checkout::take(state, &tab_id, false, None) {
+        Ok(taken) => taken,
+        Err(e) if e == no_session() => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let result = session.transaction_count().await;
+    let lost = matches!(result, Err(DriverError::Disconnected(_)));
+    checkout.checkin(session, lost);
+    match result {
+        Ok(count) => Ok(count),
+        Err(DriverError::Disconnected(_)) => Err(DISCONNECTED.into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Commits or rolls back every transaction open on the tab's session, and
+/// records it in the run log. Does nothing for a tab without a session. Fails
+/// with `"busy"` while a command uses the session and with `"disconnected"`
+/// after a lost connection.
+pub async fn end_transactions(
+    state: &AppState,
+    tab_id: String,
+    commit: bool,
+) -> Result<(), String> {
+    let (checkout, mut session) = match Checkout::take(state, &tab_id, false, None) {
+        Ok(taken) => taken,
+        Err(e) if e == no_session() => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let snap = runlog::snapshot(state, &tab_id).await;
+    let started = Instant::now();
+    let result = session.end_transactions(commit).await;
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let lost = matches!(result, Err(DriverError::Disconnected(_)));
+    checkout.checkin(session, lost);
+    let sql = if commit {
+        "COMMIT TRANSACTION"
+    } else {
+        "ROLLBACK TRANSACTION"
+    };
+    let outcome = if result.is_ok() {
+        RunLogOutcome::Ok
+    } else {
+        RunLogOutcome::Error
+    };
+    runlog::record(state, snap, sql, outcome, None, Some(elapsed_ms)).await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(DriverError::Disconnected(_)) => Err(DISCONNECTED.into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Cancels the query running on the tab; does nothing if none is running.
 pub async fn cancel_query(state: &AppState, tab_id: String) -> Result<(), String> {
     let handle = state
