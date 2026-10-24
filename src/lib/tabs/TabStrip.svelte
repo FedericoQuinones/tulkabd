@@ -54,7 +54,7 @@
   function tabMenu(tab: Tab, x: number, y: number, trigger: HTMLElement | null) {
     const items: MenuItem[] = [];
     if (tab.pane) items.push({ id: "saveAsQuery", label: t("tabs.saveAsQuery"), run: () => tabs.saveAsQuery(tab.id) });
-    items.push({ id: "close", label: t("tabs.closeTab"), run: () => tabs.close(tab.id) });
+    items.push({ id: "close", label: t("tabs.closeTab"), run: () => tabs.requestClose(tab.id) });
     menu = { items, x, y, label: t("tabs.menu"), trigger };
   }
 
@@ -162,7 +162,7 @@
           <span class="lab">{tab.title}</span>
           {#if tab.dirty}<span class="mod" title={t("tabs.unsaved")}><span class="sr">{t("tabs.unsaved")}</span></span>{/if}
         </button>
-        <button type="button" class="x" aria-label={t("tabs.close", { title: tab.title })} onclick={() => tabs.close(tab.id)}>
+        <button type="button" class="x" aria-label={t("tabs.close", { title: tab.title })} onclick={() => void tabs.requestClose(tab.id)}>
           <svg viewBox="0 0 16 16" width="10" height="10"><path d="M3 3l10 10M13 3L3 13" /></svg>
         </button>
       </div>

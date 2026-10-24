@@ -8,6 +8,7 @@ import { PaneState } from "../pane/pane.svelte";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { groups, removeGroup, split, type Layout } from "../workspace/layout";
 import { snapshot, watchSession } from "../workspace/session";
+import { checkFrom, closePlan, errorText, type CloseCheck } from "./closeFlow";
 
 export type TabSpec =
   | {
@@ -82,6 +83,30 @@ export const AUTOSAVE_MAX_WAIT_MS = 5000;
 /** Longest a save may hold up the next one, or the window close. */
 export const SAVE_TIMEOUT_MS = 2000;
 
+/** Pause between attempts to end the transactions of a tab whose query is still stopping. */
+export const END_RETRY_MS = 50;
+/** Attempts before giving up on a tab whose query does not stop. */
+export const END_RETRIES = 100;
+
+/** A tab to ask about before it closes, and where it runs. */
+export interface CloseItem {
+  tabId: string;
+  connection: string;
+  database: string;
+  state: "open" | "unknown";
+  count: number;
+}
+
+/** The dialog asking whether to commit or roll back before a tab, or the window, closes. */
+export interface ClosePrompt {
+  scope: "tab" | "window";
+  items: CloseItem[];
+  /** An answer is being carried out. */
+  busy: boolean;
+  /** Why the last answer failed; the tabs stay open. */
+  error: string | null;
+}
+
 /** Resolves when `p` settles or after `ms`, whichever comes first; never rejects. */
 function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -132,6 +157,8 @@ export class TabsStore {
   nameRequest = $state.raw<NameRequest | null>(null);
   /** Why the last files opened could not all be opened; App shows it until dismissed or the next open. */
   fileError = $state<string | null>(null);
+  /** Open transactions the user must answer for before a tab or the window closes. */
+  closePrompt = $state.raw<ClosePrompt | null>(null);
 
   private counter = 0;
   private pending = new Map<string, Pending>();
@@ -334,6 +361,93 @@ export class TabsStore {
       this.dropIfEmpty(g);
     }
     void tab.pane?.close();
+  }
+
+  /** Closes a tab the way the UI asks for it: first asks what to do with an open transaction. */
+  async requestClose(id: string): Promise<void> {
+    const tab = this.list.find((x) => x.id === id);
+    if (!tab || this.closePrompt) return;
+    const plan = closePlan([await this.checkTab(tab)]);
+    // Closed meanwhile, or another prompt took over while counting.
+    if (!this.list.some((x) => x.id === id) || this.closePrompt) return;
+    if (plan.ask) this.closePrompt = { scope: "tab", items: this.itemsOf(plan.tabs), busy: false, error: null };
+    else this.close(id);
+  }
+
+  /** What the tab's session holds. A tab with no session or a lost one holds nothing. */
+  private async checkTab(tab: Tab): Promise<CloseCheck> {
+    if (!tab.pane || tab.pane.status === "disconnected") return { tabId: tab.id, state: "none", count: 0 };
+    try {
+      return checkFrom(tab.id, { count: await ipc.transactionCount(tab.id) });
+    } catch (error) {
+      return checkFrom(tab.id, { error });
+    }
+  }
+
+  private itemsOf(checks: CloseCheck[]): CloseItem[] {
+    return checks.flatMap((c) => {
+      const pane = this.list.find((x) => x.id === c.tabId)?.pane;
+      if (c.state === "none") return [];
+      const connection = connections.list.find((x) => x.id === pane?.connectionId)?.name ?? "";
+      return [{ tabId: c.tabId, connection, database: pane?.database ?? "", state: c.state, count: c.count }];
+    });
+  }
+
+  /** The window is being closed: ask once for every tab that holds, or may hold, a transaction. */
+  private async confirmWindowClose(event: { preventDefault: () => void }): Promise<void> {
+    if (this.closePrompt) {
+      // Answering an earlier prompt: the window stays until that is done.
+      event.preventDefault();
+      return;
+    }
+    const checks = await Promise.all(this.list.map((x) => this.checkTab(x)));
+    const plan = closePlan(checks);
+    if (!plan.ask) return;
+    event.preventDefault();
+    this.closePrompt = { scope: "window", items: this.itemsOf(plan.tabs), busy: false, error: null };
+  }
+
+  /** Ends the transactions of one listed tab; a running tab is cancelled first. */
+  private async endOne(item: CloseItem, commit: boolean): Promise<void> {
+    if (item.state === "open") return ipc.endTransactions(item.tabId, commit);
+    await ipc.cancelQuery(item.tabId).catch(() => {});
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await ipc.endTransactions(item.tabId, commit);
+      } catch (e) {
+        // The cancelled query still holds the session for a moment.
+        if (errorText(e) !== "busy" || attempt >= END_RETRIES) throw e;
+        await new Promise((r) => setTimeout(r, END_RETRY_MS));
+      }
+    }
+  }
+
+  /**
+   * Carries out the user's answer to `closePrompt`. Whatever fails stops there: the tabs left
+   * (and the window) stay open and the prompt shows the error, so nothing is lost silently.
+   */
+  async answerClose(commit: boolean): Promise<void> {
+    const prompt = this.closePrompt;
+    if (!prompt || prompt.busy) return;
+    this.closePrompt = { ...prompt, busy: true, error: null };
+    const left = [...prompt.items];
+    while (left.length > 0) {
+      try {
+        await this.endOne(left[0], commit);
+      } catch (e) {
+        this.closePrompt = { ...prompt, items: left, busy: false, error: t("tx.failed", { error: errorText(e) }) };
+        return;
+      }
+      const [done] = left.splice(0, 1);
+      if (prompt.scope === "tab") this.close(done.tabId);
+    }
+    this.closePrompt = null;
+    if (prompt.scope === "window") await getCurrentWindow().destroy();
+  }
+
+  /** Leaves the transactions alone and keeps the tab (or the window) open. */
+  cancelClose(): void {
+    if (this.closePrompt && !this.closePrompt.busy) this.closePrompt = null;
   }
 
   /** Opens (or reopens) the tab's session. The password prompt is raised through `passwordRequest`. */
@@ -717,6 +831,7 @@ export class TabsStore {
     this.activeGroupId = w.activeGroupId;
     this.passwordRequests = [];
     this.nameRequest = null;
+    this.closePrompt = null;
     this.pending.clear();
     this.wanted.clear();
     for (const tab of w.list) this.track(tab);
@@ -784,8 +899,9 @@ export class TabsStore {
       });
     });
     getCurrentWindow()
-      .onCloseRequested(async () => {
+      .onCloseRequested(async (event) => {
         if (!stopped && !held) await flush();
+        await this.confirmWindowClose(event);
       })
       .then((fn) => {
         if (stopped) fn();
@@ -811,6 +927,7 @@ export class TabsStore {
     this.activeGroupId = g.id;
     this.passwordRequests = [];
     this.nameRequest = null;
+    this.closePrompt = null;
     this.pending.clear();
     this.wanted.clear();
     this.counter = 0;

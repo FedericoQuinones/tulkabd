@@ -18,6 +18,7 @@ vi.mock("../ipc", () => ({
   onAppEvent: vi.fn(),
   allowDroppedPaths: vi.fn(),
   sqlFilesExist: vi.fn(),
+  transactionCount: vi.fn(),
 }));
 
 let closeRequested: (() => Promise<void>) | null = null;
@@ -55,6 +56,7 @@ beforeEach(async () => {
   vi.mocked(ipc.closeSession).mockResolvedValue();
   vi.mocked(ipc.openSession).mockResolvedValue(info);
   vi.mocked(ipc.runQuery).mockResolvedValue(ok);
+  vi.mocked(ipc.transactionCount).mockResolvedValue(0);
   vi.mocked(ipc.objectDefinition).mockRejectedValue("not_connected");
   vi.mocked(ipc.tableStructure).mockRejectedValue("not_connected");
   vi.mocked(ipc.completionMetadata).mockResolvedValue({ schemas: [], objects: [], columns: {} } as never);

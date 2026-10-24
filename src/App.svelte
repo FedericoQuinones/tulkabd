@@ -8,6 +8,7 @@
   import { loadSession, saveSession, type ConnectionConfig, type ParsedConnection } from "./lib/ipc";
   import ConnectionDialog from "./lib/connections/ConnectionDialog.svelte";
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
+  import TransactionDialog from "./lib/tabs/TransactionDialog.svelte";
   import { connections } from "./lib/connections/store.svelte";
   import ExplorerTree from "./lib/explorer/ExplorerTree.svelte";
   import { explorer } from "./lib/explorer/tree.svelte";
@@ -159,7 +160,7 @@
     else if (action === "new") tabs.newTab();
     else if (action === "splitRight") tabs.splitActive("row");
     else if (action === "splitDown") tabs.splitActive("column");
-    else if (tabs.activeId) tabs.close(tabs.activeId);
+    else if (tabs.activeId) void tabs.requestClose(tabs.activeId);
   }
 </script>
 
@@ -239,6 +240,9 @@
 {/if}
 {#if palette.isOpen}
   <Palette />
+{/if}
+{#if tabs.closePrompt}
+  <TransactionDialog prompt={tabs.closePrompt} onanswer={(commit) => void tabs.answerClose(commit)} oncancel={() => tabs.cancelClose()} />
 {/if}
 {#if tabs.nameRequest}
   {#key tabs.nameRequest}
