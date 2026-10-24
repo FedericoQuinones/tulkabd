@@ -251,7 +251,7 @@ async function checkFiles(store: TabsStore, files: { pane: PaneState; path: stri
  * Replaces the store's workspace with a saved session. Connects nothing: a bound query tab opens
  * its session on its first Run. A tab whose connection is not in `known` keeps its text, unbound,
  * with a notice. Definition tabs try to load their text (it needs the Explorer connected). The
- * backend may read and write the files of restored file tabs again (plan D7); a tab whose file is
+ * backend may read and write the files of restored file tabs again; a tab whose file is
  * gone keeps its text but not the file, with a notice (see `checkFiles`).
  */
 export function restore(store: TabsStore, s: SessionV1, known: { connectionIds: Set<string> }): void {

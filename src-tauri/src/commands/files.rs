@@ -1,6 +1,9 @@
-//! `.sql` files from disk (plan D7). The open dialog runs from Rust: the
-//! webview gets no dialog permission, so only paths the user picked here,
-//! dropped on the window or restored with the session are allowed.
+//! `.sql` files opened from disk. The open dialog runs from Rust (the
+//! webview gets no dialog permission) and allows the paths picked in it.
+//! The UI allows the paths dropped on the window or restored with the
+//! session through `allow_dropped_paths`, which takes any `.sql` path: the
+//! allowed list keeps the UI to the files the user chose, it is not a
+//! security boundary against the webview.
 
 use tauri::{State, Window};
 use tauri_plugin_dialog::DialogExt;
@@ -34,6 +37,8 @@ pub async fn pick_sql_files(
 }
 
 /// Allows `.sql` paths dropped on the window or restored with the session.
+/// The backend cannot tell where they came from: any absolute `.sql` path
+/// is allowed.
 #[tauri::command]
 pub fn allow_dropped_paths(state: State<'_, AppState>, paths: Vec<String>) {
     tulka_app::allow_paths(&state, paths);

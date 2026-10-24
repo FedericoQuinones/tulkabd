@@ -778,7 +778,7 @@ class ExplorerStore {
 
   // ---- saved queries -----------------------------------------------------
 
-  /** The connection a saved query of `database` opens on, outside the tree (plan D6). */
+  /** The connection a saved query of `database` opens on, outside the tree (see `pickConnection`). */
   savedQueryConnection(database: string): string | null {
     const active = tabs.active;
     const activeId = tabs.binding(active).connectionId;

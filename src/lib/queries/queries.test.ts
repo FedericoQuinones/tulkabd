@@ -183,7 +183,7 @@ test("the tree shows Saved queries first under each database, with the count and
   expect(names).toEqual(["Reporte", "Top clientes"]);
 });
 
-test("D6: a saved query opens on the active tab's connection when it has that database", () => {
+test("a saved query opens on the active tab's connection when it has that database", () => {
   const active = { id: "c1", connected: false, databases: ["Ventas"] };
   const other = { id: "c2", connected: true, databases: ["Ventas"] };
   expect(pickConnection("Ventas", "c1", [other, active])).toBe("c1");

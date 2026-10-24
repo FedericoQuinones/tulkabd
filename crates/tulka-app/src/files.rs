@@ -1,4 +1,5 @@
-//! `.sql` files from disk (plan D7).
+//! `.sql` files opened from disk: decoding, encoding, and the read and
+//! write commands.
 //!
 //! # Text
 //!
@@ -12,11 +13,15 @@
 //!
 //! # Allowed paths
 //!
-//! The backend only reads or writes the paths the user picked in the open
-//! dialog or dropped on the window in this session, or that came back with
-//! the restored session (the UI passes those last two to [`allow_paths`]).
-//! Only absolute paths ending in `.sql` are ever allowed. Any other path
-//! fails with [`NOT_ALLOWED`].
+//! The file commands only read or write paths allowed in this run: those
+//! the user picked in the open dialog (allowed by the backend itself), and
+//! those the UI passes to [`allow_paths`] (files dropped on the window and
+//! the files of the restored session). Only absolute paths ending in `.sql`
+//! are allowed; any other path fails with [`NOT_ALLOWED`].
+//!
+//! The list is advisory, not a security boundary: it keeps the UI to the
+//! files the user chose, but the UI can add any `.sql` path to it, so code
+//! running in the webview can read and write any `.sql` file the user can.
 //!
 //! # Writes
 //!
@@ -156,7 +161,8 @@ pub fn encode_text(text: &str, encoding: FileEncoding, line_ending: LineEnding) 
     }
 }
 
-/// The paths the file commands may touch (see the module docs).
+/// The paths the file commands may touch (see the module docs: advisory,
+/// the UI can add to it).
 #[derive(Default)]
 pub(crate) struct AllowedFiles(Mutex<HashSet<PathBuf>>);
 
@@ -177,9 +183,10 @@ fn is_sql_file_path(path: &Path) -> bool {
             .is_some_and(|e| e.eq_ignore_ascii_case("sql"))
 }
 
-/// Lets the file commands read and write `paths`: ones the user picked,
-/// dropped on the window or that came back with the restored session.
-/// Returns those accepted, in order: absolute paths ending in `.sql`.
+/// Lets the file commands read and write `paths` from now on. Meant for the
+/// ones the user picked, dropped on the window or that came back with the
+/// restored session, but nothing checks where they came from. Returns those
+/// accepted, in order: absolute paths ending in `.sql`.
 pub fn allow_paths(state: &AppState, paths: Vec<String>) -> Vec<String> {
     let accepted: Vec<String> = paths
         .into_iter()

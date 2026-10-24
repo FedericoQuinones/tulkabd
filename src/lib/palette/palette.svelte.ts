@@ -148,7 +148,7 @@ class PaletteStore {
     });
   }
 
-  /** Opens a saved query in a tab bound as plan D6 says (see `explorer.savedQueryConnection`). */
+  /** Opens a saved query in a tab bound to the connection `explorer.savedQueryConnection` picks. */
   private async openQuery(database: string, name: string): Promise<void> {
     this.hide();
     try {

@@ -30,7 +30,7 @@ export interface QueryGroup {
   queries: SavedQueryHit[];
 }
 
-/** Groups saved query hits by database ("Saved queries › <database>", plan D6), keeping the ranking order. */
+/** Groups saved query hits by database ("Saved queries › <database>"), keeping the ranking order. */
 export function groupQueries(queries: SavedQueryHit[]): QueryGroup[] {
   const groups = new Map<string, QueryGroup>();
   for (const q of queries) {

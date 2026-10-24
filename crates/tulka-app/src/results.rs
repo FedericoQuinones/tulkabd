@@ -287,7 +287,7 @@ fn cell_at(row: &[Value], column: usize) -> &Value {
     row.get(column).unwrap_or(&Value::Null)
 }
 
-/// Sort order of cells (D4): `NULL` before everything; booleans, integers,
+/// Sort order of cells: `NULL` before everything; booleans, integers,
 /// floats and decimals by numeric value (decimals exactly, from their text);
 /// binary by bytes; text and the rest (dates, times, ids) by their text,
 /// ignoring case; `datetimeoffset` by its instant in UTC (then by its text;
@@ -1333,7 +1333,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "performance budget; run with --release (Task 13)"]
+    #[ignore = "performance budget; run with --release"]
     fn view_sorts_and_filters_100k_rows_under_budget() {
         use std::time::{Duration, Instant};
         let mut b = wide_buffer();

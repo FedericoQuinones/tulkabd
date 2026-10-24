@@ -10,18 +10,21 @@ use tulka_core::{Column, ConnectionConfig, DbObject, ExecEvent, MessageKind, Ser
 pub const PASSWORD_REQUIRED: &str = "password_required";
 /// Folder command error: a folder cannot move into itself or a descendant.
 pub const CYCLE: &str = "cycle";
-/// Folder command error: an unknown folder or connection id.
+/// Command error: an unknown folder, connection or database, or a saved
+/// query or `.sql` file that does not exist (any more).
 pub const NOT_FOUND: &str = "not_found";
 /// Folder or saved-query command error: the name is empty.
 pub const EMPTY_NAME: &str = "empty_name";
 /// Saved-query command error: a query with that name already exists.
 pub const EXISTS: &str = "exists";
-/// File command error: the path was not picked in the open dialog, dropped
-/// on the window or restored with the session (plan D7).
+/// File command error: the path was never allowed in this run (picked in
+/// the open dialog, or passed to `allow_paths` by the UI).
 pub const NOT_ALLOWED: &str = "not_allowed";
-/// File command error: the file is neither UTF-8 nor UTF-16 with a BOM.
+/// File or saved-query command error: the file is not text, neither UTF-8
+/// nor UTF-16 with a BOM, or it holds NUL characters.
 pub const NOT_TEXT: &str = "not_text";
-/// File command error: the file is larger than `MAX_SQL_FILE_BYTES`, so it
+/// File command error: the file is larger than
+/// [`MAX_SQL_FILE_BYTES`](crate::files::MAX_SQL_FILE_BYTES) (20 MB), so it
 /// is not read.
 pub const TOO_LARGE: &str = "too_large";
 /// Command error meaning the tab's connection was lost; only `open_session`

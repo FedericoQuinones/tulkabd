@@ -158,7 +158,7 @@ export type Row =
   | (RowBase & { kind: "connection"; conn: ConnectionConfig; status: ConnStatus })
   | (RowBase & { kind: "database"; connectionId: string; db: CachedDatabase; indexing: boolean })
   | (RowBase & { kind: "group"; connectionId: string; database: string; objectKind: ObjectKind; count: number | null })
-  /** "Saved queries" under a database: those saved for any database with its name (spec §5.9). */
+  /** "Saved queries" under a database: those saved for a database of that name, whatever the connection. */
   | (RowBase & { kind: "saved"; connectionId: string; database: string; count: number })
   | (RowBase & { kind: "savedQuery"; connectionId: string; database: string; name: string })
   | (RowBase & { kind: "object"; connectionId: string; database: string; object: DbObject })

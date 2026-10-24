@@ -1,4 +1,4 @@
-//! `.sql` files from disk (plan D7): decoding and encoding, the allowed
+//! `.sql` files from disk: decoding and encoding, the allowed
 //! paths and the read and write commands.
 
 use std::path::Path;

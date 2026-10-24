@@ -28,7 +28,7 @@
     return out;
   });
 
-  /** Opens on a connection that has the query's database, as from the palette (plan D6). */
+  /** Opens on a connection that has the query's database, as from the palette (see `pickConnection`). */
   async function open(q: SavedQuery) {
     error = null;
     try {

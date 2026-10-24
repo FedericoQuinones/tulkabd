@@ -27,7 +27,7 @@
     final: boolean;
     /** The sort and filters of this result; it outlives the grid. */
     view: ResultView;
-    /** True once the run ended: only then can the view change (D4). */
+    /** True once the run ended: only then can the view change (the rows are all in). */
     ready: boolean;
     /** Ctrl+C in the grid. */
     oncopy: () => void;

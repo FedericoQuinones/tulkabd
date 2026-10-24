@@ -37,7 +37,7 @@
   const active = $derived(tab !== "messages" && pane.results[tab] ? tab : "messages");
   const result = $derived(active === "messages" ? null : pane.results[active]);
   const count = (n: number) => n.toLocaleString("en-US");
-  // Sorting and filtering wait for the run to end (D4); the backend says "busy" before that.
+  // Sorting and filtering wait for the run to end, when all the rows are in; the backend says "busy" before that.
   const ready = $derived(pane.status !== "running");
 
   /** Sends the view of result `index` of run `run`; a later run has new results without a view. */

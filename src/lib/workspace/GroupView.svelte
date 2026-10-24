@@ -58,7 +58,7 @@
     grid-template-rows: 36px minmax(0, 1fr);
     background: var(--ground);
   }
-  /* Environment signal (§5.1): a 2 px line on the left edge, colored by the active tab's connection. */
+  /* Environment signal: a 2 px line on the left edge, colored by the active tab's connection. */
   .group::before {
     content: "";
     position: absolute;

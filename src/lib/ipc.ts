@@ -229,8 +229,10 @@ export type AppEvent =
 /**
  * Command errors arrive as plain strings. Sentinels: `"password_required"`, `"disconnected"`,
  * `"busy"` (the tab's session is in use), `"closed"` (tab closed, or explorer disconnected or reconnected, while connecting),
- * `"not_connected"` (no explorer session), `"not_found"`, `"cycle"` and `"empty_name"` (folders),
- * `"too_large"` (a `.sql` file over 20 MB).
+ * `"not_connected"` (no explorer session), `"not_found"` (an unknown folder, connection or database, a saved query or
+ * file that does not exist), `"cycle"` (folders), `"empty_name"` (folders and saved queries), `"exists"` (saved
+ * queries), and for `.sql` files `"not_allowed"` (a path never allowed in this run), `"not_text"` (also saved
+ * queries) and `"too_large"` (over 20 MB).
  */
 export const listConnections = () => invoke<ConnectionConfig[]>("list_connections");
 
@@ -368,7 +370,7 @@ export const deleteSavedQuery = (database: string, name: string) =>
 export const revealSavedQuery = (database: string, name: string) =>
   invoke<void>("reveal_saved_query", { database, name });
 
-/** How a `.sql` file from disk is encoded (plan D7); Ctrl+S writes it back the same way. */
+/** How a `.sql` file from disk is encoded; Ctrl+S writes it back the same way. */
 export type FileEncoding = "utf8" | "utf8Bom" | "utf16Le" | "utf16Be";
 /** The line ending a `.sql` file is written back with (its more frequent one when read). */
 export type LineEnding = "lf" | "crlf";
@@ -387,7 +389,10 @@ export interface OpenedFile {
  * write the picked paths, which it returns. `filterName` labels the `*.sql` filter. Empty when cancelled.
  */
 export const pickSqlFiles = (filterName: string) => invoke<string[]>("pick_sql_files", { filterName });
-/** Lets the backend read and write `.sql` paths dropped on the window or restored with the session. */
+/**
+ * Lets the backend read and write `.sql` paths dropped on the window or restored with the session.
+ * It accepts any absolute `.sql` path: the allowed list is advisory, not a security boundary.
+ */
 export const allowDroppedPaths = (paths: string[]) => invoke<void>("allow_dropped_paths", { paths });
 /**
  * For each path, whether the backend allows it and its file still exists: `false` when it is not

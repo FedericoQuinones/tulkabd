@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use tulka_app::*;
 use tulka_core::{ConfigStore, MemoryStore};
 
-/// The odd names of the review: Windows-forbidden characters, separators,
+/// Odd database and query names: Windows-forbidden characters, separators,
 /// reserved device names, a trailing dot, non-ASCII, `%` and `..`.
 const ODD: &[&str] = &[
     "Ventas:2024",

@@ -1,4 +1,4 @@
-// Saved queries (spec §5.9): a cache of the `.sql` files under `queries/<database>/`, reloaded after
+// Saved queries: a cache of the `.sql` files under `queries/<database>/`, reloaded after
 // every change made here. Opening, saving and renaming them in tabs lives in the tabs store, which
 // keeps open tabs in step; the Explorer, the palette and the Rail panel read this cache.
 import { t } from "../i18n/t";
@@ -32,7 +32,7 @@ export interface ConnectionDatabases {
 }
 
 /**
- * The connection a saved query of `database` opens on (plan D6): the active tab's connection when
+ * The connection a saved query of `database` opens on: the active tab's connection when
  * it has a database with that name; else the first connected connection that has it; else none.
  * `candidates` are in the order "first" means.
  */
