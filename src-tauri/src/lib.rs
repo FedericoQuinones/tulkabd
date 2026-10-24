@@ -77,6 +77,7 @@ pub fn run() {
             conn::list_expanded,
             conn::set_expanded,
             conn::get_preferences,
+            conn::set_preferences,
             conn::set_zoom,
             conn::list_server_databases,
             conn::parse_connection_string,

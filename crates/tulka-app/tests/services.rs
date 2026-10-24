@@ -15,8 +15,9 @@ use tulka_app::*;
 use tulka_core::{
     estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, CancelHandle, Column,
     ColumnInfo, ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, DatabaseSnapshot,
-    DbObject, Driver, DriverError, Environment, ExecEvent, MemoryStore, MessageKind, ObjectKind,
-    SecretStore, ServerInfo, Session, TableStructure, UnavailableStore, Value,
+    DbObject, Driver, DriverError, Environment, ExecEvent, MemoryStore, MessageKind, NumberFormat,
+    ObjectKind, Preferences, SecretStore, ServerInfo, Session, TableStructure, UnavailableStore,
+    Value,
 };
 
 const PASSWORD: &str = "s3cret-pw";
@@ -2061,4 +2062,158 @@ async fn session_saves_even_when_the_config_is_read_only() {
         load_session(&state).await.as_deref(),
         Some(r#"{"tabs":[]}"#)
     );
+}
+
+// --------------------------------------------------------------- preferences
+
+async fn with_prefs(state: &AppState, edit: impl FnOnce(&mut Preferences)) {
+    let mut prefs = get_preferences(state).await;
+    edit(&mut prefs);
+    set_preferences(state, prefs).await.unwrap();
+}
+
+#[tokio::test]
+async fn set_preferences_clamps_persists_and_set_zoom_keeps_the_rest() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let mut prefs = Preferences {
+        max_rows: 5,
+        run_log_days: 9999,
+        ..Preferences::default()
+    };
+    prefs.environments.local.color = "nope".into();
+    let kept = set_preferences(&f.state, prefs).await.unwrap();
+    assert_eq!((kept.max_rows, kept.run_log_days), (1_000, 365));
+    assert_eq!(kept.environments.local.color, "#4a8ad6");
+    assert_eq!(get_preferences(&f.state).await, kept);
+    let saved = ConfigStore::at(f._dir.path().join("config.json"))
+        .load()
+        .unwrap();
+    assert_eq!(saved.preferences, kept);
+
+    assert_eq!(set_zoom(&f.state, 150).await.unwrap(), 150);
+    let after = get_preferences(&f.state).await;
+    assert_eq!((after.zoom, after.max_rows), (150, 1_000));
+}
+
+#[tokio::test]
+async fn max_rows_preference_caps_the_buffer() {
+    let (f, _) = connected("t1").await;
+    with_prefs(&f.state, |p| p.max_rows = 1_000).await;
+    let (result, events) = run(&f.state, "t1", "rows 1500").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    // The buffer holds 1000 rows and the result is flagged as truncated.
+    assert_eq!(row_counts(&events, 0).last(), Some(&(1_000, true)));
+    assert_eq!(
+        fetch_rows(&f.state, "t1".into(), 0, 990, 100)
+            .await
+            .unwrap()
+            .len(),
+        10
+    );
+}
+
+#[tokio::test]
+async fn rows_beyond_the_buffer_limit_still_count_in_the_run_log() {
+    let (f, _) = connected("t1").await;
+    with_prefs(&f.state, |p| p.max_rows = 1_000).await;
+    let (result, _) = run(&f.state, "t1", "rows 1500").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    let log = list_run_log(&f.state, None, 10).await;
+    assert_eq!(log[0].rows, Some(1_500));
+}
+
+#[tokio::test]
+async fn query_timeout_cancels() {
+    let (f, _) = connected("t1").await;
+    with_prefs(&f.state, |p| p.query_timeout_s = 1).await;
+    let started = std::time::Instant::now();
+    let (result, events) = run(&f.state, "t1", "wait 0").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Cancelled);
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert!(events.contains(&UiEvent::Message {
+        kind: MessageKind::Warning,
+        text: "Query timeout (1 s) reached; the query was cancelled.".into(),
+        line: None,
+    }));
+    let log = list_run_log(&f.state, None, 10).await;
+    assert_eq!(log[0].outcome, RunLogOutcome::Cancelled);
+    // The session is usable again.
+    let (result, _) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+}
+
+#[tokio::test]
+async fn a_query_that_ends_before_the_timeout_is_left_alone() {
+    let (f, _) = connected("t1").await;
+    with_prefs(&f.state, |p| p.query_timeout_s = 1).await;
+    let (result, events) = run(&f.state, "t1", "rows 3").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, UiEvent::Message { text, .. } if text.contains("timeout"))));
+    // No stray timer fires later and cancels the next run.
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    let (result, _) = run(&f.state, "t1", "rows 3").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+}
+
+#[tokio::test]
+async fn invariant_copy_uses_a_dot() {
+    let (f, _) = connected("t1").await;
+    let (result, _) = run(&f.state, "t1", "rows 4").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    with_prefs(&f.state, |p| p.copy_numbers = NumberFormat::Invariant).await;
+    let all_rows: Vec<_> = (0..4).map(fake_row).collect();
+    let clipboard = Arc::new(FakeClipboard::default());
+    copy_results(
+        &f.state,
+        "t1".into(),
+        0,
+        CopyMode::Excel,
+        Selection::All,
+        clipboard.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = to_excel_tsv(&fake_columns(), &all_rows, '.');
+    assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+    assert!(expected.contains("0.50"));
+}
+
+#[tokio::test]
+async fn pruning_uses_the_run_log_days_preference() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(tulka_app::tulka_store::RunLogStore::in_memory());
+    let state = AppState::new(
+        ConfigStore::at(dir.path().join("config.json")),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakeDriver)],
+    )
+    .unwrap()
+    .with_runlog(store.clone());
+    let day = 24 * 60 * 60 * 1000;
+    let now = chrono::Utc::now().timestamp_millis();
+    for (age_days, sql) in [(40, "old"), (10, "recent"), (0, "today")] {
+        store
+            .insert(&tulka_app::tulka_store::NewRun {
+                at_ms: now - age_days * day,
+                connection_id: "c".into(),
+                connection_name: "C".into(),
+                color: "#000000".into(),
+                database: "d".into(),
+                sql: sql.into(),
+                outcome: RunLogOutcome::Ok,
+                rows: None,
+                elapsed_ms: None,
+            })
+            .unwrap();
+    }
+    with_prefs(&state, |p| p.run_log_days = 30).await;
+    prune_run_log(&state).await;
+    assert_eq!(list_run_log(&state, None, 10).await.len(), 2);
+    with_prefs(&state, |p| p.run_log_days = 5).await;
+    prune_run_log(&state).await;
+    let left = list_run_log(&state, None, 10).await;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].sql, "today");
 }

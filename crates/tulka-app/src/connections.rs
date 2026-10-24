@@ -418,8 +418,19 @@ pub async fn get_preferences(state: &AppState) -> Preferences {
     state.connections.lock().await.preferences.clone()
 }
 
+/// Stores the preferences, with every value brought into its range, and
+/// returns what was stored.
+pub async fn set_preferences(state: &AppState, prefs: Preferences) -> Result<Preferences, String> {
+    let prefs = prefs.clamped();
+    mutate(state, |config| {
+        config.preferences = prefs.clone();
+        Ok(prefs)
+    })
+    .await
+}
+
 /// Stores the zoom of the editor and the grid, brought into 70 to 200, and
-/// returns the stored value.
+/// returns the stored value. The other preferences stay as they are.
 pub async fn set_zoom(state: &AppState, zoom: u16) -> Result<u16, String> {
     let zoom = clamp_zoom(zoom);
     mutate(state, |config| {

@@ -6,18 +6,16 @@ use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
 use tokio::sync::mpsc::{self, Receiver};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio::time::Instant;
 use tulka_core::{
     estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, Column, DatabaseScope,
-    DriverError, ExecEvent, MessageKind, Session, Value,
+    DriverError, ExecEvent, MessageKind, NumberFormat, Session, Value,
 };
 use tulka_store::RunLogOutcome;
 
 use crate::connections::{blocking, connect_params, resolve_password};
-use crate::results::{
-    display_cell, ResultBuffer, Selection, ViewSpec, CELLS_CAPPED_WARNING, MAX_ROWS,
-};
+use crate::results::{display_cell, ResultBuffer, Selection, ViewSpec, CELLS_CAPPED_WARNING};
 use crate::runlog;
 use crate::state::{AppState, SharedBuffer, TabState, Tabs};
 use crate::types::{
@@ -192,6 +190,7 @@ where
         crate::guard::Verdict::Run { generation } => generation,
     };
     let snap = runlog::snapshot(state, &tab_id).await;
+    let prefs = crate::connections::get_preferences(state).await;
     let (checkout, mut session) = Checkout::take(state, &tab_id, true, Some(generation))?;
     let started = Instant::now();
     let (tx, rx) = mpsc::channel(EVENT_QUEUE);
@@ -200,10 +199,40 @@ where
         tab_id: &tab_id,
         generation: checkout.generation,
         emit: &on_event,
+        max_rows: prefs.max_rows as usize,
     };
     // The driver must be polled until `execute` returns, also after a
-    // cancel, so both run to completion here.
-    let (result, tally) = tokio::join!(session.execute(&sql, tx), forwarder.run(rx));
+    // cancel, so all of these run to completion here. The timer ends as soon
+    // as the script does; if it fires first it cancels the script the same
+    // way Stop does.
+    let cancel = session.cancel_handle();
+    let finished = Notify::new();
+    let timer = async {
+        let limit = Duration::from_secs(u64::from(prefs.query_timeout_s));
+        if limit.is_zero() {
+            return;
+        }
+        tokio::select! {
+            () = tokio::time::sleep(limit) => {
+                on_event(UiEvent::Message {
+                    kind: MessageKind::Warning,
+                    text: format!(
+                        "Query timeout ({} s) reached; the query was cancelled.",
+                        prefs.query_timeout_s
+                    ),
+                    line: None,
+                });
+                let _ = cancel.cancel().await;
+            }
+            () = finished.notified() => {}
+        }
+    };
+    let execute = async {
+        let result = session.execute(&sql, tx).await;
+        finished.notify_one();
+        result
+    };
+    let (result, tally, ()) = tokio::join!(execute, forwarder.run(rx), timer);
     let saw_disconnect = tally.disconnected;
     let elapsed = started.elapsed();
 
@@ -384,12 +413,19 @@ pub async fn copy_results(
     clipboard: Arc<dyn Clipboard>,
 ) -> Result<CopyOutcome, String> {
     let buffer = result_of(state, &tab_id, result_index)?;
+    let separator = match crate::connections::get_preferences(state)
+        .await
+        .copy_numbers
+    {
+        NumberFormat::System => system_decimal_separator(),
+        NumberFormat::Invariant => '.',
+    };
     blocking(move || {
         let (text, outcome) = buffer
             .blocking_read()
             .with_selection(&selection, |columns, rows| match mode {
                 CopyMode::Excel => {
-                    let text = to_excel_tsv(columns, rows, system_decimal_separator());
+                    let text = to_excel_tsv(columns, rows, separator);
                     let outcome = CopyOutcome {
                         rows: rows.len(),
                         tokens: 0,
@@ -547,8 +583,8 @@ impl Drop for Checkout<'_> {
     }
 }
 
-fn new_buffer(columns: Vec<Column>) -> SharedBuffer {
-    Arc::new(RwLock::new(ResultBuffer::new(columns, MAX_ROWS)))
+fn new_buffer(columns: Vec<Column>, max_rows: usize) -> SharedBuffer {
+    Arc::new(RwLock::new(ResultBuffer::new(columns, max_rows)))
 }
 
 /// What a run produced, for the run log.
@@ -584,6 +620,8 @@ struct Forwarder<'a, F> {
     tab_id: &'a str,
     generation: u64,
     emit: &'a F,
+    /// Rows kept per result; later ones are counted but dropped.
+    max_rows: usize,
 }
 
 impl<F: Fn(UiEvent)> Forwarder<'_, F> {
@@ -658,10 +696,10 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
         let index = index as usize;
         if tab.results.len() <= index {
             tab.results
-                .resize_with(index + 1, || new_buffer(Vec::new()));
+                .resize_with(index + 1, || new_buffer(Vec::new(), self.max_rows));
         }
         if let Some(columns) = columns {
-            tab.results[index] = new_buffer(columns);
+            tab.results[index] = new_buffer(columns, self.max_rows);
         }
         Some(tab.results[index].clone())
     }

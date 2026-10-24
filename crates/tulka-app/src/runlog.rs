@@ -15,8 +15,6 @@ use crate::types::AppEvent;
 
 /// Most entries one `list_run_log` returns.
 const MAX_LIST: u32 = 500;
-/// How long entries are kept, until the preferences hold a setting for it.
-const DEFAULT_KEEP_DAYS: i64 = 30;
 /// Pruning after an insert happens at most this often.
 const PRUNE_INTERVAL_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -110,12 +108,17 @@ pub async fn clear_run_log(state: &AppState) -> Result<(), String> {
     blocking(move || store.clear()).await?
 }
 
-/// Deletes the entries older than the retention period.
+/// Deletes the entries older than the retention period of the preferences.
 pub async fn prune_run_log(state: &AppState) {
+    let keep_days = i64::from(
+        crate::connections::get_preferences(state)
+            .await
+            .run_log_days,
+    );
     let now = Utc::now().timestamp_millis();
     state.runlog_pruned_ms.store(now, Ordering::Relaxed);
     let store = state.runlog.clone();
-    let _ = blocking(move || store.prune(now - DEFAULT_KEEP_DAYS * DAY_MS)).await;
+    let _ = blocking(move || store.prune(now - keep_days * DAY_MS)).await;
 }
 
 async fn prune_if_due(state: &AppState) {
