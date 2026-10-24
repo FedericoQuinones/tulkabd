@@ -22,6 +22,7 @@
   import { zoom } from "./lib/zoom.svelte";
   import { prefs } from "./lib/settings/prefs.svelte";
   import { tabs } from "./lib/tabs/tabs.svelte";
+  import Settings from "./lib/settings/Settings.svelte";
   import Workspace from "./lib/workspace/Workspace.svelte";
   import { parseSession, restore } from "./lib/workspace/session";
 
@@ -115,8 +116,22 @@
   let leftPanel = $state<"rail.explorer" | "rail.saved">("rail.explorer");
   const remember = () => saveLayout({ width: explorerWidth, hidden: explorerHidden });
 
+  // The Settings screen takes the place of the workspace; the tabs stay mounted underneath.
+  let settingsOpen = $state(false);
+
+  function closeSettings() {
+    settingsOpen = false;
+    // Focus goes back to the gear once the workspace is shown again.
+    void tick().then(() => document.querySelector<HTMLElement>(`nav button[aria-label="${t("rail.settings")}"]`)?.focus());
+  }
+
   /** A panel icon shows its panel; pressed again while shown, it hides the left panel. */
   function onrail(key: string) {
+    if (key === "rail.settings") {
+      if (settingsOpen) closeSettings();
+      else settingsOpen = true;
+      return;
+    }
     if (key === "rail.search") palette.show();
     if (key !== "rail.explorer" && key !== "rail.saved") return;
     if (!explorerHidden && leftPanel !== key) leftPanel = key;
@@ -156,6 +171,8 @@
     if (document.querySelector('[aria-modal="true"]')) return;
     const action = shortcutAction(e, isMac);
     if (!action) return;
+    // Behind the Settings screen only the zoom applies: the tabs are out of sight.
+    if (settingsOpen && action !== "zoomIn" && action !== "zoomOut" && action !== "zoomReset") return;
     e.preventDefault();
     if (action === "zoomIn" || action === "zoomOut" || action === "zoomReset") zoom.apply(action);
     else if (action === "palette") palette.show();
@@ -172,7 +189,7 @@
 
 <div class="win">
   <div class="cols" class:no-explorer={explorerHidden}>
-    <Rail active={explorerHidden ? null : leftPanel} onselect={onrail} />
+    <Rail active={explorerHidden ? null : leftPanel} onselect={onrail} {settingsOpen} />
     {#if !explorerHidden}
       <aside class="explorer" style:width="{explorerWidth}px">
         {#if leftPanel === "rail.saved"}
@@ -209,7 +226,10 @@
       </aside>
     {/if}
     <main class="workspace">
-      {#if restored}<Workspace />{/if}
+      <div class="ws" hidden={settingsOpen}>
+        {#if restored}<Workspace />{/if}
+      </div>
+      {#if settingsOpen}<Settings onclose={closeSettings} />{/if}
       {#if tabs.fileError}
         <div class="file-error" role="alert">
           <span>{tabs.fileError}</span>
@@ -321,6 +341,12 @@
     background: var(--ground);
     min-width: 0;
     min-height: 0;
+  }
+  .ws {
+    height: 100%;
+  }
+  .ws[hidden] {
+    display: none;
   }
   /* Files that could not be opened, over the top right of the workspace. */
   .file-error {

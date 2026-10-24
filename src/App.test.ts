@@ -63,6 +63,38 @@ test("the rail button hides the explorer and the workspace takes its column", ()
   expect(cols.classList.contains("no-explorer")).toBe(false);
 });
 
+const gear = () => document.querySelector<HTMLButtonElement>('nav button[aria-label="Settings"]')!;
+
+test("the gear opens Settings in place of the workspace, and Escape returns with the focus on the gear", async () => {
+  await new Promise((r) => setTimeout(r, 0));
+  flushSync();
+  expect(gear().getAttribute("aria-pressed")).toBe("false");
+  expect(document.querySelector("h1")).toBeNull();
+
+  gear().click();
+  flushSync();
+  expect(document.querySelector("h1")?.textContent).toBe("Settings");
+  expect(gear().getAttribute("aria-pressed")).toBe("true");
+  // The rail stays, the tabs are kept (hidden), and nothing else changes.
+  expect(document.querySelector("nav.rail")).not.toBeNull();
+  expect(document.querySelector<HTMLElement>(".ws")!.hidden).toBe(true);
+
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  flushSync();
+  await new Promise((r) => setTimeout(r, 0));
+  expect(document.querySelector("h1")).toBeNull();
+  expect(document.querySelector<HTMLElement>(".ws")!.hidden).toBe(false);
+  expect(gear().getAttribute("aria-pressed")).toBe("false");
+  expect(document.activeElement).toBe(gear());
+
+  // The gear also closes it.
+  gear().click();
+  flushSync();
+  gear().click();
+  flushSync();
+  expect(document.querySelector("h1")).toBeNull();
+});
+
 test("a failed tab connect is shown in the workspace while the explorer is hidden", async () => {
   rail().click();
   flushSync();

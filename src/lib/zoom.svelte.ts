@@ -28,9 +28,10 @@ class Zoom {
       .catch(() => {});
   }
 
-  /** Repaints the font size after the preferences changed. */
-  refreshFontSize() {
-    this.#show(this.level);
+  /** Repaints the zoom and the font size after the Settings screen changed the preferences. */
+  refresh() {
+    this.#touched = true;
+    this.#show(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, prefs.zoom)));
   }
 
   apply(action: ZoomAction) {
