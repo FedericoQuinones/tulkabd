@@ -401,6 +401,10 @@ impl Scan<'_> {
             if self.is_punct(j, '(') {
                 depth += 1;
             } else if self.is_punct(j, ')') {
+                if depth == 0 {
+                    // Closes a parenthesis opened before the statement.
+                    return (j, where_seen);
+                }
                 depth -= 1;
             } else if depth <= 0 {
                 if self.is_punct(j, ';') {
@@ -498,7 +502,16 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
             i += 1;
             continue;
         }
-        if depth > 0 || sc.toks[i].kind != Kind::Word {
+        if sc.toks[i].kind != Kind::Word {
+            i += 1;
+            continue;
+        }
+        // A data-changing statement can be composed inside parentheses:
+        // `SELECT ... FROM (DELETE ... OUTPUT ...) AS d`.
+        let composed = depth > 0
+            && sc.is_punct(i.wrapping_sub(1), '(')
+            && (sc.is_kw(i, "UPDATE") || sc.is_kw(i, "DELETE"));
+        if depth > 0 && !composed {
             i += 1;
             continue;
         }
@@ -953,5 +966,27 @@ mod tests {
         let f = findings("SELECT 1\nGO\n\n  DELETE FROM t");
         assert_eq!(f[0].line, 3);
         assert_eq!(f[0].statement, "DELETE FROM t");
+    }
+
+    #[test]
+    fn flags_dml_nested_in_parentheses() {
+        use GuardKind::*;
+        let cases: &[Case] = &[
+            (
+                "INSERT INTO dbo.Log SELECT * FROM (DELETE FROM dbo.Orders OUTPUT deleted.*) AS d;",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "INSERT INTO dbo.Log (Id) SELECT d.Id FROM (UPDATE dbo.Orders SET Total = 0 OUTPUT inserted.Id) AS d WHERE d.Id > 0;",
+                &[(UpdateWithoutWhere, Some("dbo.Orders"))],
+            ),
+        ];
+        for (sql, w) in cases {
+            assert_eq!(kinds(sql), want(w), "{sql}");
+        }
+        assert_eq!(
+            kinds("INSERT INTO l SELECT * FROM (DELETE FROM o OUTPUT deleted.* WHERE id = 1) AS d"),
+            vec![]
+        );
     }
 }
