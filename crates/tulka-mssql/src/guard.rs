@@ -245,6 +245,53 @@ fn advance_while(text: &str, mut i: usize, f: impl Fn(char) -> bool) -> usize {
     i
 }
 
+/// Words that start a statement, and so end the one before them.
+const OPENERS: &[&str] = &[
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "MERGE",
+    "DROP",
+    "TRUNCATE",
+    "CREATE",
+    "ALTER",
+    "EXEC",
+    "EXECUTE",
+    "DECLARE",
+    "IF",
+    "ELSE",
+    "WHILE",
+    "BEGIN",
+    "END",
+    "RETURN",
+    "PRINT",
+    "USE",
+    "GRANT",
+    "COMMIT",
+    "ROLLBACK",
+    "SAVE",
+    "RAISERROR",
+    "THROW",
+    "WAITFOR",
+    "RECEIVE",
+    "SEND",
+    "GET",
+    "MOVE",
+    "OPEN",
+    "FETCH",
+    "CLOSE",
+    "DEALLOCATE",
+    "DENY",
+    "REVOKE",
+    "GOTO",
+    "BREAK",
+    "CONTINUE",
+    "KILL",
+    "DBCC",
+    "CHECKPOINT",
+];
+
 /// Cursor over the tokens of one batch.
 struct Scan<'a> {
     text: &'a str,
@@ -380,51 +427,6 @@ impl Scan<'_> {
     /// The statement is an `UPDATE` when `is_update`, whose first `SET` is
     /// part of it. Also reports whether a top-level `WHERE` was seen.
     fn statement_end(&self, from: usize, is_update: bool) -> (usize, bool) {
-        const OPENERS: &[&str] = &[
-            "SELECT",
-            "INSERT",
-            "UPDATE",
-            "DELETE",
-            "MERGE",
-            "DROP",
-            "TRUNCATE",
-            "CREATE",
-            "ALTER",
-            "EXEC",
-            "EXECUTE",
-            "DECLARE",
-            "IF",
-            "ELSE",
-            "WHILE",
-            "BEGIN",
-            "END",
-            "RETURN",
-            "PRINT",
-            "USE",
-            "GRANT",
-            "COMMIT",
-            "ROLLBACK",
-            "SAVE",
-            "RAISERROR",
-            "THROW",
-            "WAITFOR",
-            "RECEIVE",
-            "SEND",
-            "GET",
-            "MOVE",
-            "OPEN",
-            "FETCH",
-            "CLOSE",
-            "DEALLOCATE",
-            "DENY",
-            "REVOKE",
-            "GOTO",
-            "BREAK",
-            "CONTINUE",
-            "KILL",
-            "DBCC",
-            "CHECKPOINT",
-        ];
         let mut depth = 0i32;
         let mut cases = 0u32;
         let mut seen_set = false;
@@ -524,7 +526,7 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         .first()
         .is_some_and(|t| matches!(t.kind, Kind::Word | Kind::Quoted))
     {
-        dynamic_call(&sc, 0, base_line + sc.toks[0].line, level, out);
+        dynamic_call(&sc, 0, true, base_line + sc.toks[0].line, level, out);
     }
 
     let mut depth = 0i32;
@@ -567,7 +569,7 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         }
 
         if sc.is_kw(i, "EXEC") || sc.is_kw(i, "EXECUTE") {
-            dynamic_call(&sc, i + 1, base_line + sc.toks[i].line, level, out);
+            dynamic_call(&sc, i + 1, false, base_line + sc.toks[i].line, level, out);
             i += 1;
             continue;
         }
@@ -724,7 +726,14 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
 
 /// Analyzes the literal statement of the dynamic call whose name or `(`
 /// is at token `arg`, if there is one. Findings are reported at `line`.
-fn dynamic_call(sc: &Scan, arg: usize, line: u32, level: u8, out: &mut Vec<GuardFinding>) {
+fn dynamic_call(
+    sc: &Scan,
+    arg: usize,
+    implicit: bool,
+    line: u32,
+    level: u8,
+    out: &mut Vec<GuardFinding>,
+) {
     if let Some(inner) = dynamic_sql(sc, arg) {
         if level < MAX_DYNAMIC_LEVEL {
             let mut found = Vec::new();
@@ -739,6 +748,25 @@ fn dynamic_call(sc: &Scan, arg: usize, line: u32, level: u8, out: &mut Vec<Guard
                 kind: GuardKind::Unparsed,
                 object: None,
                 statement: truncate_statement(&inner),
+                line,
+            });
+        }
+    } else if !(implicit && sc.is_any_kw(0, OPENERS))
+        && !(implicit && sc.is_any_kw(0, &["WITH", "SET"]))
+    {
+        // Not a plain literal, so it cannot be analyzed; if the arguments
+        // carry a dangerous word, say so instead of staying silent.
+        let (end, _) = sc.statement_end(arg, false);
+        let hit = (arg..end).any(|j| {
+            sc.toks[j].kind == Kind::Str && first_dangerous_word(&unquote(sc.src(j))).is_some()
+        });
+        if hit {
+            out.push(GuardFinding {
+                kind: GuardKind::Unparsed,
+                object: None,
+                statement: truncate_statement(
+                    &sc.text[sc.toks[arg].start..sc.toks[end.max(arg + 1) - 1].end],
+                ),
                 line,
             });
         }
@@ -1147,5 +1175,25 @@ mod tests {
             kinds("ALTER TABLE t ADD CONSTRAINT f FOREIGN KEY (a) REFERENCES u(id) ON DELETE NO ACTION"),
             vec![]
         );
+    }
+
+    #[test]
+    fn flags_calls_with_dangerous_literals_it_cannot_analyze() {
+        use GuardKind::*;
+        for sql in [
+            "EXEC sp_MSforeachtable 'TRUNCATE TABLE ?'",
+            "EXEC(N'DELETE FROM dbo.Orders' + @where)",
+            "sp_MSforeachtable 'DROP TABLE ?'",
+        ] {
+            assert_eq!(kinds(sql), want(&[(Unparsed, None)]), "{sql}");
+        }
+        for sql in [
+            "EXEC(@sql)",
+            "EXEC dbo.usp_Log 'started'",
+            "SELECT 'DELETE it' AS s",
+            "SET @a = 'DELETE'",
+        ] {
+            assert_eq!(kinds(sql), vec![], "{sql}");
+        }
     }
 }
