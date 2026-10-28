@@ -2217,3 +2217,41 @@ async fn pruning_uses_the_run_log_days_preference() {
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].sql, "today");
 }
+
+#[tokio::test]
+async fn running_a_query_does_not_prune_the_run_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(tulka_app::tulka_store::RunLogStore::in_memory());
+    let state = AppState::new(
+        ConfigStore::at(dir.path().join("config.json")),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakeDriver)],
+    )
+    .unwrap()
+    .with_runlog(store.clone());
+    store
+        .insert(&tulka_app::tulka_store::NewRun {
+            at_ms: chrono::Utc::now().timestamp_millis() - 40 * 24 * 60 * 60 * 1000,
+            connection_id: "c".into(),
+            connection_name: "C".into(),
+            color: "#000000".into(),
+            database: "d".into(),
+            sql: "old".into(),
+            outcome: RunLogOutcome::Ok,
+            rows: None,
+            elapsed_ms: None,
+        })
+        .unwrap();
+    with_prefs(&state, |p| p.run_log_days = 30).await;
+    let saved = save_connection(&state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    open_session(&state, "t1".into(), saved.id, None, None)
+        .await
+        .unwrap();
+    let (result, _) = run(&state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    // Pruning is the job of a background timer, never of the run itself.
+    assert_eq!(list_run_log(&state, None, 10).await.len(), 2);
+}

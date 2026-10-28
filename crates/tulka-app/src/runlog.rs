@@ -3,8 +3,6 @@
 //! statement text only, never passwords or result rows. A failure to write
 //! the log never fails the run it describes.
 
-use std::sync::atomic::Ordering;
-
 use chrono::Utc;
 use tulka_store::{NewRun, RunLogEntry, RunLogOutcome};
 
@@ -15,8 +13,6 @@ use crate::types::AppEvent;
 
 /// Most entries one `list_run_log` returns.
 const MAX_LIST: u32 = 500;
-/// Pruning after an insert happens at most this often.
-const PRUNE_INTERVAL_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// Where a run happens, as the entry will remember it.
@@ -69,7 +65,6 @@ pub(crate) async fn record(
     let store = state.runlog.clone();
     if let Ok(Ok(entry)) = blocking(move || store.insert(&run)).await {
         state.explorer.emit(AppEvent::RunLogged { entry });
-        prune_if_due(state).await;
     }
 }
 
@@ -116,15 +111,6 @@ pub async fn prune_run_log(state: &AppState) {
             .run_log_days,
     );
     let now = Utc::now().timestamp_millis();
-    state.runlog_pruned_ms.store(now, Ordering::Relaxed);
     let store = state.runlog.clone();
     let _ = blocking(move || store.prune(now - keep_days * DAY_MS)).await;
-}
-
-async fn prune_if_due(state: &AppState) {
-    let now = Utc::now().timestamp_millis();
-    let last = state.runlog_pruned_ms.load(Ordering::Relaxed);
-    if now - last >= PRUNE_INTERVAL_MS {
-        prune_run_log(state).await;
-    }
 }

@@ -131,13 +131,17 @@ pub fn run() {
             let events = Arc::new(events::TauriEvents(app.handle().clone()));
             app.manage(AppState::open_default(events));
             // Old run log entries are pruned a little after startup, so the
-            // first paint does not wait for it.
+            // first paint does not wait for it, and then once an hour. No
+            // statement ever waits for it.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(5));
-                tauri::async_runtime::block_on(async {
-                    tulka_app::prune_run_log(&handle.state::<AppState>()).await;
-                });
+                loop {
+                    tauri::async_runtime::block_on(async {
+                        tulka_app::prune_run_log(&handle.state::<AppState>()).await;
+                    });
+                    std::thread::sleep(std::time::Duration::from_secs(60 * 60));
+                }
             });
             Ok(())
         })

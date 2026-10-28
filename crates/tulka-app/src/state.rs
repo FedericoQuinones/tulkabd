@@ -51,7 +51,7 @@
 //! see [`crate::files`].
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, MutexGuard, PoisonError};
 
 use tokio::sync::{Mutex, RwLock};
@@ -94,8 +94,6 @@ pub struct AppState {
     pub(crate) guard_off_session: std::sync::Mutex<HashSet<String>>,
     /// Every statement run, with where it ran; see [`crate::runlog`].
     pub(crate) runlog: Arc<RunLogStore>,
-    /// Unix milliseconds of the last prune of the run log.
-    pub(crate) runlog_pruned_ms: AtomicI64,
 }
 
 /// A result buffer shared between the run that fills it and the commands
@@ -153,7 +151,6 @@ impl AppState {
             files: AllowedFiles::default(),
             guard_off_session: std::sync::Mutex::default(),
             runlog: Arc::new(RunLogStore::in_memory()),
-            runlog_pruned_ms: AtomicI64::new(0),
         })
     }
 
@@ -180,7 +177,6 @@ impl AppState {
             files: AllowedFiles::default(),
             guard_off_session: std::sync::Mutex::default(),
             runlog: Arc::new(RunLogStore::in_memory()),
-            runlog_pruned_ms: AtomicI64::new(0),
         }
     }
 
