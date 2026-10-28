@@ -358,6 +358,23 @@ impl Scan<'_> {
         false
     }
 
+    /// The name after each top-level `FROM` in `from..end` (`None` when no
+    /// name follows, as with a subquery).
+    fn level0_from_names(&self, from: usize, end: usize) -> Vec<Option<(String, bool, usize)>> {
+        let mut depth = 0i32;
+        let mut names = Vec::new();
+        for j in from..end {
+            if self.is_punct(j, '(') {
+                depth += 1;
+            } else if self.is_punct(j, ')') {
+                depth -= 1;
+            } else if depth == 0 && self.is_kw(j, "FROM") {
+                names.push(self.name(j + 1));
+            }
+        }
+        names
+    }
+
     /// Finds where the statement that starts at `from` ends: the index of the
     /// `;` or of the word that opens the next statement, or the token count.
     /// The statement is an `UPDATE` when `is_update`, whose first `SET` is
@@ -588,7 +605,7 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         }
 
         // The object, and whether it is a temporary one nobody will miss.
-        let (kind, object, temp, start) = if sc.is_kw(i, "UPDATE") {
+        let (kind, object, mut temp, start) = if sc.is_kw(i, "UPDATE") {
             let n = sc.name(sc.skip_top(i + 1));
             let temp = n.as_ref().is_some_and(|n| n.1);
             (GuardKind::UpdateWithoutWhere, n.map(|n| n.0), temp, i)
@@ -645,6 +662,24 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
             (GuardKind::Drop, first, all_temp, i)
         };
 
+        let mut object = object;
+        if temp && is_dml {
+            // `DELETE #o FROM dbo.Orders AS #o` changes a real table through
+            // an alias: any `FROM` beyond the one naming the target says so.
+            let (end, _) = sc.statement_end(i, sc.is_kw(i, "UPDATE"));
+            let own_from = sc.is_kw(i, "DELETE") && sc.is_kw(sc.skip_top(i + 1), "FROM");
+            let real = sc
+                .level0_from_names(i + 1, end)
+                .into_iter()
+                .skip(usize::from(own_from))
+                .find(|n| n.as_ref().is_none_or(|n| !n.1));
+            if let Some(from) = real {
+                temp = false;
+                if let Some((name, _, _)) = from {
+                    object = Some(name);
+                }
+            }
+        }
         if temp {
             i += 1;
             continue;
@@ -1031,6 +1066,35 @@ mod tests {
         ];
         for (sql, w) in cases {
             assert_eq!(kinds(sql), want(w), "{sql}");
+        }
+    }
+
+    #[test]
+    fn real_tables_behind_a_hash_alias_are_flagged() {
+        use GuardKind::*;
+        let cases: &[Case] = &[
+            (
+                "DELETE #o FROM dbo.Orders AS #o",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "UPDATE #o SET Total = 0 FROM dbo.Orders #o",
+                &[(UpdateWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DELETE FROM #o FROM dbo.Orders #o",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+        ];
+        for (sql, w) in cases {
+            assert_eq!(kinds(sql), want(w), "{sql}");
+        }
+        for sql in [
+            "DELETE FROM #o",
+            "UPDATE #o SET a = 1",
+            "DELETE #o FROM #o JOIN #p ON #o.id = #p.id",
+        ] {
+            assert_eq!(kinds(sql), vec![], "{sql}");
         }
     }
 }
