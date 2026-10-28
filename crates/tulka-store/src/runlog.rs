@@ -5,6 +5,8 @@ use std::time::Duration;
 use rusqlite::{params, Connection, ErrorCode};
 use serde::{Deserialize, Serialize};
 
+use crate::private_file;
+
 /// Bump when the table layout changes; a mismatching file is discarded.
 const RUNLOG_VERSION: i64 = 1;
 
@@ -123,47 +125,9 @@ impl From<rusqlite::Error> for OpenError {
     }
 }
 
-/// Creates the file readable by its owner only, before SQLite opens it, so the
-/// statement text is never exposed to other users even briefly.
-fn create_private(path: &Path) -> Result<(), OpenError> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options
-        .open(path)
-        .map(|_| ())
-        .map_err(|_| OpenError::Unavailable)
-}
-
-/// Makes an existing file (and its sidecars, if any) private to the owner,
-/// whatever mode an earlier version or another tool left on it.
-fn restrict_permissions(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut files = vec![path.to_path_buf()];
-        for suffix in ["-wal", "-shm"] {
-            let mut s = path.as_os_str().to_owned();
-            s.push(suffix);
-            files.push(PathBuf::from(s));
-        }
-        for file in files {
-            if file.exists() {
-                let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-}
-
 fn try_open(path: &Path) -> Result<Connection, OpenError> {
-    create_private(path)?;
-    restrict_permissions(path);
+    private_file::create_private(path).map_err(|_| OpenError::Unavailable)?;
+    private_file::restrict_permissions(path);
     let conn = Connection::open(path)?;
     // A file locked by another instance costs startup at most this long.
     conn.busy_timeout(BUSY_TIMEOUT)?;
@@ -188,7 +152,7 @@ fn try_open(path: &Path) -> Result<Connection, OpenError> {
     let _ = conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()));
     // Deleted statement text is overwritten, not left in free pages.
     conn.pragma_update(None, "secure_delete", "ON")?;
-    restrict_permissions(path);
+    private_file::restrict_permissions(path);
     Ok(conn)
 }
 

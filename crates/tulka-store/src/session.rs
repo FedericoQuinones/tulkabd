@@ -4,6 +4,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 
+use crate::private_file;
+
 /// Bump when the table layout changes; a mismatching file is discarded.
 const SESSION_VERSION: i64 = 1;
 
@@ -62,6 +64,9 @@ impl From<rusqlite::Error> for OpenError {
 }
 
 fn try_open(path: &Path) -> Result<Connection, OpenError> {
+    // A file that cannot be written (read-only) still opens for reading.
+    let _ = private_file::create_private(path);
+    private_file::restrict_permissions(path);
     let conn = Connection::open(path)?;
     // A file locked by another instance costs startup at most this long.
     conn.busy_timeout(BUSY_TIMEOUT)?;
@@ -87,6 +92,7 @@ fn try_open(path: &Path) -> Result<Connection, OpenError> {
     let _ = conn.execute_batch(ALLOWED_TABLE);
     // `journal_mode` returns a row, so it cannot go through `pragma_update`.
     let _ = conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()));
+    private_file::restrict_permissions(path);
     Ok(conn)
 }
 
@@ -470,5 +476,63 @@ mod tests {
         assert_eq!(store.load().as_deref(), Some("kept"));
         assert!(store.allowed_files().is_empty());
         store.remember_allowed(&[PathBuf::from("/q/a.sql")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let store = SessionStore::open(&path);
+        store.save("{}").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_file_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let store = SessionStore::open(&path);
+            store.save(r#"{"a":1}"#).unwrap();
+        }
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let store = SessionStore::open(&path);
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(store.load().as_deref(), Some(r#"{"a":1}"#));
+        for suffix in ["-wal", "-shm"] {
+            let mut s = path.as_os_str().to_owned();
+            s.push(suffix);
+            let side = PathBuf::from(s);
+            if side.exists() {
+                assert_eq!(mode(&side), 0o600, "{suffix}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_sidecars_are_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let store = SessionStore::open(&path);
+        store.save("{}").unwrap();
+        // The store is still open, so the sidecars exist.
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
+        assert!(wal.exists());
+        std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let second = SessionStore::open(&path);
+        let mode = std::fs::metadata(&wal).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        drop(second);
+        drop(store);
     }
 }

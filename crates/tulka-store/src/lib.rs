@@ -2,6 +2,7 @@
 //! offline. Tauri-free and blocking: callers use `spawn_blocking`.
 
 mod cache;
+mod private_file;
 mod runlog;
 mod search;
 mod session;
