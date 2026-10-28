@@ -485,6 +485,15 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         return;
     }
 
+    // A batch may start with the procedure name and no `EXEC`.
+    if sc
+        .toks
+        .first()
+        .is_some_and(|t| matches!(t.kind, Kind::Word | Kind::Quoted))
+    {
+        dynamic_call(&sc, 0, base_line + sc.toks[0].line, level, out);
+    }
+
     let mut depth = 0i32;
     // The latest `ALTER TABLE`: where it starts, the table it names and the
     // token after the table name. A `DROP` there is an action of that
@@ -525,25 +534,7 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         }
 
         if sc.is_kw(i, "EXEC") || sc.is_kw(i, "EXECUTE") {
-            if let Some(inner) = dynamic_sql(&sc, i + 1) {
-                let line = base_line + sc.toks[i].line;
-                if level < MAX_DYNAMIC_LEVEL {
-                    let mut found = Vec::new();
-                    analyze_batch(&inner, 0, level + 1, &mut found);
-                    for mut f in found {
-                        f.line = line;
-                        out.push(f);
-                    }
-                } else if first_dangerous_word(&inner).is_some() {
-                    // Too deep to analyze, but not safe to ignore.
-                    out.push(GuardFinding {
-                        kind: GuardKind::Unparsed,
-                        object: None,
-                        statement: truncate_statement(&inner),
-                        line,
-                    });
-                }
-            }
+            dynamic_call(&sc, i + 1, base_line + sc.toks[i].line, level, out);
             i += 1;
             continue;
         }
@@ -678,6 +669,29 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
     }
 }
 
+/// Analyzes the literal statement of the dynamic call whose name or `(`
+/// is at token `arg`, if there is one. Findings are reported at `line`.
+fn dynamic_call(sc: &Scan, arg: usize, line: u32, level: u8, out: &mut Vec<GuardFinding>) {
+    if let Some(inner) = dynamic_sql(sc, arg) {
+        if level < MAX_DYNAMIC_LEVEL {
+            let mut found = Vec::new();
+            analyze_batch(&inner, 0, level + 1, &mut found);
+            for mut f in found {
+                f.line = line;
+                out.push(f);
+            }
+        } else if first_dangerous_word(&inner).is_some() {
+            // Too deep to analyze, but not safe to ignore.
+            out.push(GuardFinding {
+                kind: GuardKind::Unparsed,
+                object: None,
+                statement: truncate_statement(&inner),
+                line,
+            });
+        }
+    }
+}
+
 /// The text of a literal dynamic statement: the argument of `EXEC(...)` or
 /// of `sp_executesql`, when it is made only of string literals joined by `+`.
 /// `i` is the token after `EXEC`.
@@ -694,7 +708,7 @@ fn dynamic_sql(sc: &Scan, i: usize) -> Option<String> {
         let (name, _, next) = sc.name(j)?;
         let last = name.rsplit('.').next().unwrap_or("");
         if !last
-            .trim_matches(['[', ']'])
+            .trim_matches(['[', ']', '"'])
             .eq_ignore_ascii_case("sp_executesql")
         {
             return None;
@@ -988,5 +1002,35 @@ mod tests {
             kinds("INSERT INTO l SELECT * FROM (DELETE FROM o OUTPUT deleted.* WHERE id = 1) AS d"),
             vec![]
         );
+    }
+
+    #[test]
+    fn flags_implicit_sp_executesql_calls() {
+        use GuardKind::*;
+        let cases: &[Case] = &[
+            (
+                "sp_executesql N'DELETE FROM dbo.Orders'",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "sys.sp_executesql N'TRUNCATE TABLE dbo.Orders'",
+                &[(Truncate, Some("dbo.Orders"))],
+            ),
+            (
+                "EXEC \"sp_executesql\" N'DELETE FROM dbo.Orders'",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "[sys].[sp_executesql] N'DELETE FROM dbo.Orders'",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "EXEC('sp_executesql N''DELETE FROM dbo.Orders''')",
+                &[(Unparsed, None)],
+            ),
+        ];
+        for (sql, w) in cases {
+            assert_eq!(kinds(sql), want(w), "{sql}");
+        }
     }
 }
