@@ -623,3 +623,15 @@ async fn a_file_over_20_mb_is_not_read() {
     // Read, then refused for its NUL bytes: the size itself is accepted.
     assert_eq!(read_sql_file(&st, limit).await.unwrap_err(), NOT_TEXT);
 }
+
+#[tokio::test]
+async fn stored_paths_that_are_not_sql_files_are_not_allowed() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("session.db");
+    let secret = dir.path().join("notes.txt");
+    std::fs::write(&secret, "private").unwrap();
+    let path = path_string(&secret);
+    SessionStore::open(&db).remember_allowed(&[secret.clone(), "relative.sql".into()]);
+    let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
+    assert_eq!(read_sql_file(&st, path).await.unwrap_err(), NOT_ALLOWED);
+}

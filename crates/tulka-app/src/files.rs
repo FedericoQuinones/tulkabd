@@ -168,7 +168,11 @@ pub(crate) struct AllowedFiles(Mutex<HashSet<PathBuf>>);
 
 impl AllowedFiles {
     pub(crate) fn from_paths(paths: Vec<PathBuf>) -> Self {
-        Self(Mutex::new(paths.into_iter().collect()))
+        // The stored list is a file anyone with write access to the data
+        // folder can edit: only well-formed `.sql` paths count.
+        Self(Mutex::new(
+            paths.into_iter().filter(|p| is_sql_file_path(p)).collect(),
+        ))
     }
 
     fn contains(&self, path: &Path) -> bool {
