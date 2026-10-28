@@ -408,6 +408,22 @@ impl Scan<'_> {
             "RAISERROR",
             "THROW",
             "WAITFOR",
+            "RECEIVE",
+            "SEND",
+            "GET",
+            "MOVE",
+            "OPEN",
+            "FETCH",
+            "CLOSE",
+            "DEALLOCATE",
+            "DENY",
+            "REVOKE",
+            "GOTO",
+            "BREAK",
+            "CONTINUE",
+            "KILL",
+            "DBCC",
+            "CHECKPOINT",
         ];
         let mut depth = 0i32;
         let mut cases = 0u32;
@@ -1095,6 +1111,26 @@ mod tests {
             "DELETE #o FROM #o JOIN #p ON #o.id = #p.id",
         ] {
             assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+    }
+
+    #[test]
+    fn statements_after_less_common_openers_are_separate() {
+        use GuardKind::*;
+        for opener in [
+            "RECEIVE TOP (1) * FROM dbo.Q",
+            "GOTO done",
+            "KILL 55",
+            "DBCC CHECKDB",
+            "CHECKPOINT",
+            "DEALLOCATE c",
+        ] {
+            let sql = format!("DELETE FROM dbo.Orders {opener} WHERE x = 1");
+            assert_eq!(
+                kinds(&sql),
+                want(&[(DeleteWithoutWhere, Some("dbo.Orders"))]),
+                "{sql}"
+            );
         }
     }
 }
