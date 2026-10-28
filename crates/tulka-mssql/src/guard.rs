@@ -582,7 +582,9 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         // `ON DELETE CASCADE` and friends are foreign key actions, but a bare
         // `ON` ends statements like `SET NOCOUNT ON`.
         let fk_action = sc.is_kw(i.wrapping_sub(1), "ON")
-            && (sc.is_any_kw(i + 1, &["CASCADE", "NO"]) || sc.is_kw(i + 1, "SET"));
+            && (sc.is_kw(i + 1, "CASCADE")
+                || (sc.is_kw(i + 1, "NO") && sc.is_kw(i + 2, "ACTION"))
+                || sc.is_kw(i + 1, "SET"));
         let prev_blocks = i > 0
             && (fk_action
                 || sc.is_any_kw(
@@ -1132,5 +1134,18 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    #[test]
+    fn only_no_action_is_a_foreign_key_action() {
+        use GuardKind::*;
+        assert_eq!(
+            kinds("SET NOCOUNT ON DELETE NO"),
+            want(&[(DeleteWithoutWhere, Some("NO"))])
+        );
+        assert_eq!(
+            kinds("ALTER TABLE t ADD CONSTRAINT f FOREIGN KEY (a) REFERENCES u(id) ON DELETE NO ACTION"),
+            vec![]
+        );
     }
 }
