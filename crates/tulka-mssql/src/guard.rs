@@ -778,9 +778,9 @@ fn dynamic_call(
         // Not a plain literal, so it cannot be analyzed; if the arguments
         // carry a dangerous word, say so instead of staying silent.
         let (end, _) = sc.statement_end(arg, false);
-        let hit = (arg..end).any(|j| {
-            sc.toks[j].kind == Kind::Str && first_dangerous_word(&unquote(sc.src(j))).is_some()
-        });
+        let hit = literal_chains(sc, arg, end)
+            .iter()
+            .any(|(_, text)| first_dangerous_word(text).is_some());
         if hit {
             out.push(GuardFinding {
                 kind: GuardKind::Unparsed,
@@ -792,6 +792,28 @@ fn dynamic_call(
             });
         }
     }
+}
+
+/// The string literals in tokens `from..end`, each run of literals joined by
+/// `+` as one text, with the index of its first token.
+fn literal_chains(sc: &Scan, from: usize, end: usize) -> Vec<(usize, String)> {
+    let mut chains = Vec::new();
+    let mut j = from;
+    while j < end {
+        if sc.toks[j].kind != Kind::Str {
+            j += 1;
+            continue;
+        }
+        let first = j;
+        let mut text = unquote(sc.src(j));
+        j += 1;
+        while j + 1 < end && sc.is_punct(j, '+') && sc.toks[j + 1].kind == Kind::Str {
+            text.push_str(&unquote(sc.src(j + 1)));
+            j += 2;
+        }
+        chains.push((first, text));
+    }
+    chains
 }
 
 /// Whether the batch starts like a procedure call without `EXEC`: a name
@@ -1279,6 +1301,15 @@ mod tests {
         );
         assert_eq!(
             kinds("sp_MSforeachtable @command1 = 'TRUNCATE TABLE ?'"),
+            want(&[(Unparsed, None)])
+        );
+    }
+
+    #[test]
+    fn literals_joined_with_plus_are_checked_as_one() {
+        use GuardKind::*;
+        assert_eq!(
+            kinds("EXEC(N'DEL' + N'ETE FROM dbo.Orders' + @w)"),
             want(&[(Unparsed, None)])
         );
     }
