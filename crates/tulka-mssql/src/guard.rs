@@ -677,11 +677,16 @@ impl Scan<'_> {
                         && !self.is_punct(j - 1, ';')
                         && !self.is_punct(j - 1, ':')
                         && !self.is_punct(j - 1, ')')));
-            // `JOIN dbo.Log Throw ON ...`: followed by ON it is an alias.
-            let next_blocks = self.is_kw(j + 1, "ON")
-                || [',', '.', ')', '=']
-                    .iter()
-                    .any(|&c| self.is_punct(j + 1, c));
+            // `JOIN dbo.Log Throw ON ...`: followed by what follows a table alias.
+            let next_blocks = self.is_any_kw(
+                j + 1,
+                &[
+                    "ON", "JOIN", "CROSS", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "WITH",
+                    "WHERE", "SET", "GROUP", "ORDER",
+                ],
+            ) || [',', '.', ')', '=']
+                .iter()
+                .any(|&c| self.is_punct(j + 1, c));
             return !prev_blocks && !next_blocks;
         }
         true
@@ -1849,5 +1854,25 @@ mod tests {
         ] {
             assert_eq!(kinds(sql), want(&[(Unparsed, None)]), "{sql}");
         }
+    }
+
+    #[test]
+    fn an_alias_named_throw_without_on_is_not_an_opener() {
+        use GuardKind::*;
+        for sql in [
+            "DELETE #o FROM #t CROSS JOIN dbo.Log Throw CROSS JOIN dbo.Orders #o",
+            "DELETE #o FROM #t JOIN dbo.Log Throw WITH (NOLOCK) ON 1=1 JOIN dbo.Orders #o ON 1=1",
+            "DELETE #o FROM #t JOIN dbo.Log AS Receive INNER JOIN dbo.Orders #o ON 1=1",
+        ] {
+            assert_eq!(
+                kinds(sql),
+                want(&[(DeleteWithoutWhere, Some("dbo.Orders"))]),
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            kinds("DELETE FROM dbo.Orders THROW 50000, 'x', 1 WHERE x = 1"),
+            want(&[(DeleteWithoutWhere, Some("dbo.Orders"))])
+        );
     }
 }
