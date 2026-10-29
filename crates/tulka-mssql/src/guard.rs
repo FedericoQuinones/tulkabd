@@ -422,6 +422,29 @@ impl Scan<'_> {
         names
     }
 
+    /// Whether the opener word at `j` begins a statement here: some of them
+    /// are also ordinary column or alias names.
+    fn starts_statement(&self, j: usize) -> bool {
+        if self.is_kw(j, "SEND") {
+            return self.is_kw(j + 1, "ON");
+        }
+        if self.is_any_kw(j, &["GET", "MOVE"]) {
+            return self.is_kw(j + 1, "CONVERSATION");
+        }
+        if self.is_any_kw(j, &["RECEIVE", "THROW"]) {
+            let prev_blocks = j > 0
+                && (self.is_kw(j - 1, "SET")
+                    || (self.toks[j - 1].kind == Kind::Punct
+                        && !self.is_punct(j - 1, ';')
+                        && !self.is_punct(j - 1, ')')));
+            let next_blocks = [',', '.', ')', '=']
+                .iter()
+                .any(|&c| self.is_punct(j + 1, c));
+            return !prev_blocks && !next_blocks;
+        }
+        true
+    }
+
     /// Finds where the statement that starts at `from` ends: the index of the
     /// `;` or of the word that opens the next statement, or the token count.
     /// The statement is an `UPDATE` when `is_update`, whose first `SET` is
@@ -469,7 +492,7 @@ impl Scan<'_> {
                         && !self.is_punct(j + 2, '(')
                     {
                         // `IF EXISTS` of a DROP; `IF EXISTS (...)` is a condition.
-                    } else if self.is_any_kw(j, OPENERS) {
+                    } else if self.is_any_kw(j, OPENERS) && self.starts_statement(j) {
                         return (j, where_seen);
                     }
                 }
@@ -1194,6 +1217,35 @@ mod tests {
             "SET @a = 'DELETE'",
         ] {
             assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+    }
+
+    #[test]
+    fn ambiguous_openers_only_count_in_their_statement_form() {
+        use GuardKind::*;
+        for sql in [
+            "UPDATE dbo.Orders SET Send = 1 WHERE Id = 1",
+            "UPDATE dbo.Orders SET Total=1, Receive=2 WHERE Id=1",
+            "UPDATE o SET Total = o.[Total] + o.Get FROM dbo.Orders o WHERE o.Id = 1",
+            "DELETE o FROM dbo.Orders o JOIN dbo.Log l ON l.Move = o.Id WHERE o.Id = 1",
+            "UPDATE dbo.Orders SET Throw = 1 WHERE Id = 1",
+            "UPDATE dbo.Orders SET Total = Receive + 1 WHERE Id = 1",
+        ] {
+            assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+        for opener in [
+            "SEND ON CONVERSATION @h",
+            "GET CONVERSATION GROUP @g FROM dbo.Q",
+            "MOVE CONVERSATION @h TO @g",
+            "THROW 50000, 'x', 1",
+            "RECEIVE TOP (1) * FROM dbo.Q",
+        ] {
+            let sql = format!("DELETE FROM dbo.Orders {opener} WHERE x = 1");
+            assert_eq!(
+                kinds(&sql),
+                want(&[(DeleteWithoutWhere, Some("dbo.Orders"))]),
+                "{sql}"
+            );
         }
     }
 }
