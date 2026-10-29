@@ -405,21 +405,80 @@ impl Scan<'_> {
         false
     }
 
-    /// The name after each top-level `FROM` in `from..end` (`None` when no
-    /// name follows, as with a subquery).
-    fn level0_from_names(&self, from: usize, end: usize) -> Vec<Option<(String, bool, usize)>> {
-        let mut depth = 0i32;
-        let mut names = Vec::new();
-        for j in from..end {
-            if self.is_punct(j, '(') {
-                depth += 1;
-            } else if self.is_punct(j, ')') {
-                depth -= 1;
-            } else if depth == 0 && self.is_kw(j, "FROM") {
-                names.push(self.name(j + 1));
+    /// The real table that the temporary-looking `target` of the statement
+    /// at `stmt..end` stands for, if any: `<table> [AS] <target>` after
+    /// `FROM`, `JOIN`, `,` or `(`, or a CTE of that name over a real table.
+    fn real_table_behind(&self, target: &str, stmt: usize, end: usize) -> Option<String> {
+        for k in stmt + 1..end {
+            if self.toks[k].kind != Kind::Temp || !self.src(k).eq_ignore_ascii_case(target) {
+                continue;
+            }
+            let m = if self.is_kw(k - 1, "AS") {
+                k - 2
+            } else {
+                k - 1
+            };
+            if !matches!(self.toks[m].kind, Kind::Word | Kind::Quoted) {
+                continue;
+            }
+            let mut s = m;
+            loop {
+                if s >= 2 && self.is_punct(s - 1, '.') && self.is_name_part(s - 2) {
+                    s -= 2;
+                } else if s >= 3
+                    && self.is_punct(s - 1, '.')
+                    && self.is_punct(s - 2, '.')
+                    && self.is_name_part(s - 3)
+                {
+                    s -= 3;
+                } else {
+                    break;
+                }
+            }
+            let opens = s > 0
+                && (self.is_any_kw(s - 1, &["FROM", "JOIN"])
+                    || self.is_punct(s - 1, ',')
+                    || self.is_punct(s - 1, '('));
+            if opens && matches!(self.toks[s].kind, Kind::Word | Kind::Quoted) {
+                return Some(self.text[self.toks[s].start..self.toks[m].end].to_string());
             }
         }
-        names
+        // `WITH #c [(cols)] AS (SELECT ... FROM <table> ...)`.
+        for k in 0..stmt {
+            let named = self.toks[k].kind == Kind::Temp
+                && self.src(k).eq_ignore_ascii_case(target)
+                && k > 0
+                && (self.is_kw(k - 1, "WITH") || self.is_punct(k - 1, ','));
+            if !named {
+                continue;
+            }
+            let mut a = k + 1;
+            if self.is_punct(a, '(') {
+                while a < stmt && !self.is_punct(a, ')') {
+                    a += 1;
+                }
+                a += 1;
+            }
+            if !(self.is_kw(a, "AS") && self.is_punct(a + 1, '(')) {
+                continue;
+            }
+            let mut depth = 0i32;
+            for j in a + 1..stmt {
+                if self.is_punct(j, '(') {
+                    depth += 1;
+                } else if self.is_punct(j, ')') {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                } else if self.is_any_kw(j, &["FROM", "JOIN"]) {
+                    if let Some((name, false, _)) = self.name(j + 1) {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Whether the opener word at `j` begins a statement here: some of them
@@ -734,20 +793,13 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
 
         let mut object = object;
         if temp && is_dml {
-            // `DELETE #o FROM dbo.Orders AS #o` changes a real table through
-            // an alias: any `FROM` beyond the one naming the target says so.
+            // A `#name` can stand for a real table: an alias in the FROM
+            // clause (`DELETE #o FROM dbo.Orders #o`) or a CTE.
             let (end, _) = sc.statement_end(i, sc.is_kw(i, "UPDATE"));
-            let own_from = sc.is_kw(i, "DELETE") && sc.is_kw(sc.skip_top(i + 1), "FROM");
-            let real = sc
-                .level0_from_names(i + 1, end)
-                .into_iter()
-                .skip(usize::from(own_from))
-                .find(|n| n.as_ref().is_none_or(|n| !n.1));
-            if let Some(from) = real {
+            let target = object.clone().unwrap_or_default();
+            if let Some(real) = sc.real_table_behind(&target, i, end) {
                 temp = false;
-                if let Some((name, _, _)) = from {
-                    object = Some(name);
-                }
+                object = Some(real);
             }
         }
         if temp {
@@ -1360,6 +1412,50 @@ mod tests {
         for sql in [
             "DECLARE @s nvarchar(max) = N'SELECT 1'; EXEC(@s)",
             "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders'; SELECT @s",
+        ] {
+            assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_hash_name_that_stands_for_a_real_table_is_flagged() {
+        use GuardKind::*;
+        let cases: &[Case] = &[
+            (
+                "UPDATE #o SET Total = 0 FROM #t JOIN dbo.Orders #o ON 1 = 1",
+                &[(UpdateWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DELETE #o FROM #t, dbo.Orders #o",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DELETE #o FROM #t CROSS JOIN dbo.Orders AS #o",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DELETE #o FROM (#t JOIN dbo.Orders #o ON 1 = 1)",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "WITH #c AS (SELECT * FROM dbo.Orders) DELETE FROM #c",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "WITH #c (a) AS (SELECT Total FROM dbo.Orders) UPDATE #c SET a = 0",
+                &[(UpdateWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "UPDATE #o SET Send = 1 FROM dbo.Orders #o",
+                &[(UpdateWithoutWhere, Some("dbo.Orders"))],
+            ),
+        ];
+        for (sql, w) in cases {
+            assert_eq!(kinds(sql), want(w), "{sql}");
+        }
+        for sql in [
+            "UPDATE #s SET Total = 1 FROM dbo.Orders o JOIN #s ON #s.Id = o.Id",
+            "WITH #c AS (SELECT * FROM #t) DELETE FROM #c",
         ] {
             assert_eq!(kinds(sql), vec![], "{sql}");
         }
