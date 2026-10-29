@@ -685,6 +685,65 @@ impl Scan<'_> {
         (text, pure)
     }
 
+    /// The `(` of the `CONCAT(` call that directly encloses token `k`.
+    fn concat_open(&self, k: usize) -> Option<usize> {
+        let mut depth = 0i32;
+        for j in (0..k).rev() {
+            if self.is_punct(j, ')') {
+                depth += 1;
+            } else if self.is_punct(j, '(') {
+                if depth == 0 {
+                    return (j > 0 && self.is_kw(j - 1, "CONCAT")).then_some(j);
+                }
+                depth -= 1;
+            }
+        }
+        None
+    }
+
+    /// Like [`Scan::expr_text`] for the arguments of the `CONCAT(` at `open`:
+    /// they are parts of one expression.
+    fn concat_text(&self, open: usize) -> (String, bool) {
+        let mut text = String::new();
+        let mut pure = true;
+        let mut depth = 0i32;
+        let mut j = open;
+        while j < self.toks.len() {
+            if self.is_punct(j, '(') {
+                depth += 1;
+            } else if self.is_punct(j, ')') {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            } else if depth == 1 {
+                if self.toks[j].kind == Kind::Str {
+                    text.push_str(&unquote(self.src(j)));
+                } else if !self.is_punct(j, ',') && !self.is_punct(j, '+') {
+                    pure = false;
+                    text.push_str(" __v ");
+                    while self.is_punct(j + 1, '(') {
+                        let mut d = 0i32;
+                        j += 1;
+                        while j < self.toks.len() {
+                            if self.is_punct(j, '(') {
+                                d += 1;
+                            } else if self.is_punct(j, ')') {
+                                d -= 1;
+                                if d == 0 {
+                                    break;
+                                }
+                            }
+                            j += 1;
+                        }
+                    }
+                }
+            }
+            j += 1;
+        }
+        (text, pure)
+    }
+
     /// Whether the literal at `start` is an argument of `PRINT`, `RAISERROR`
     /// or `THROW`: a message, not code.
     fn in_message_context(&self, start: usize) -> bool {
@@ -877,12 +936,18 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         }
     }
     if runs_variable {
+        let other_literal_has_set = sc
+            .toks
+            .iter()
+            .enumerate()
+            .any(|(k, t)| t.kind == Kind::Str && has_word(&unquote(sc.src(k)), "SET"));
         let mut seen = Vec::new();
         for k in 0..sc.toks.len() {
             if sc.toks[k].kind != Kind::Str {
                 continue;
             }
-            let start = sc.expr_start(k);
+            let concat = sc.concat_open(k);
+            let start = concat.unwrap_or_else(|| sc.expr_start(k));
             if seen.contains(&start) {
                 continue;
             }
@@ -894,7 +959,10 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
             {
                 continue;
             }
-            let (text, pure) = sc.expr_text(start);
+            let (text, pure) = match concat {
+                Some(open) => sc.concat_text(open),
+                None => sc.expr_text(start),
+            };
             let line = base_line + sc.toks[start].line;
             let unparsed = || GuardFinding {
                 kind: GuardKind::Unparsed,
@@ -916,6 +984,15 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
                 let mut found = Vec::new();
                 analyze_batch(&text, 0, level + 1, &mut found);
                 for mut f in found {
+                    // `N'Update finished'` is prose; a lone UPDATE counts
+                    // only with a SET here or in another literal.
+                    if pure
+                        && f.kind == GuardKind::UpdateWithoutWhere
+                        && !has_word(&f.statement, "SET")
+                        && !other_literal_has_set
+                    {
+                        continue;
+                    }
                     f.line = line;
                     if !pure {
                         // Built in pieces: what runs is not known, only that
@@ -1157,9 +1234,18 @@ fn dynamic_call(
         // Not a plain literal, so it cannot be analyzed; if the arguments
         // carry a dangerous word, say so instead of staying silent.
         let (end, _) = sc.statement_end(arg, false);
-        let hit = literal_chains(sc, arg, end)
-            .iter()
-            .any(|(_, text)| first_dangerous_word(text).is_some());
+        // A named procedure taking `N'Update totals'` is far more often a
+        // message than a statement: its UPDATE needs a SET to count.
+        let procedure = !sc.is_punct(arg, '(') && call_args(sc, arg).is_none();
+        let hit = literal_chains(sc, arg, end).iter().any(|(_, text)| {
+            first_dangerous_word(text).is_some_and(|at| {
+                !procedure
+                    || !text[at..]
+                        .get(..6)
+                        .is_some_and(|w| w.eq_ignore_ascii_case("UPDATE"))
+                    || has_word(text, "SET")
+            })
+        });
         if hit {
             out.push(GuardFinding {
                 kind: GuardKind::Unparsed,
@@ -2000,6 +2086,25 @@ mod tests {
             "SET @s = N'UPDATE ' + QUOTENAME(@t) + N' SET v = 0 WHERE Id = @id'; EXEC(@s)",
         ] {
             assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+    }
+
+    #[test]
+    fn prose_with_update_is_not_a_statement() {
+        for sql in [
+            "SET @msg = N'Update finished'; EXEC(@s)",
+            "SELECT @msg = N'Update totals'; EXEC(@s)",
+            "DECLARE @msg nvarchar(50) = N'Update totals step'; EXEC(@s)",
+            "SELECT 1 FROM t WHERE op = 'UPDATE'; EXEC(@s)",
+            "EXEC dbo.LogStep @step = N'Update totals'; EXEC(@s)",
+        ] {
+            assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+        for sql in [
+            "DECLARE @s nvarchar(max) = CONCAT(N'UPDATE ', QUOTENAME(@t), N' SET v = 0'); EXEC(@s)",
+            "DECLARE @s nvarchar(max) = CONCAT(N'UPDATE dbo.Orders', N' SET Total = 0'); EXEC(@s)",
+        ] {
+            assert!(!kinds(sql).is_empty(), "{sql}");
         }
     }
 }
