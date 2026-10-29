@@ -1237,15 +1237,9 @@ fn dynamic_call(
         // A named procedure taking `N'Update totals'` is far more often a
         // message than a statement: its UPDATE needs a SET to count.
         let procedure = !sc.is_punct(arg, '(') && call_args(sc, arg).is_none();
-        let hit = literal_chains(sc, arg, end).iter().any(|(_, text)| {
-            first_dangerous_word(text).is_some_and(|at| {
-                !procedure
-                    || !text[at..]
-                        .get(..6)
-                        .is_some_and(|w| w.eq_ignore_ascii_case("UPDATE"))
-                    || has_word(text, "SET")
-            })
-        });
+        let hit = literal_chains(sc, arg, end)
+            .iter()
+            .any(|(_, text)| has_dangerous_word(text, procedure));
         if hit {
             out.push(GuardFinding {
                 kind: GuardKind::Unparsed,
@@ -1357,6 +1351,17 @@ fn dynamic_sql(sc: &Scan, i: usize) -> Option<String> {
 fn unquote(lit: &str) -> String {
     let body = lit.trim_start_matches(['N', 'n']);
     body[1..body.len() - 1].replace("''", "'")
+}
+
+/// Whether any word of `text` is `DELETE`, `DROP` or `TRUNCATE`, or `UPDATE`
+/// (which counts only with a `SET` when `update_needs_set`).
+fn has_dangerous_word(text: &str, update_needs_set: bool) -> bool {
+    text.split(|c: char| !is_word_char(c)).any(|w| {
+        ["DELETE", "DROP", "TRUNCATE"]
+            .iter()
+            .any(|k| w.eq_ignore_ascii_case(k))
+            || (w.eq_ignore_ascii_case("UPDATE") && (!update_needs_set || has_word(text, "SET")))
+    })
 }
 
 /// Whether `text` has `word` as a whole word, ignoring case.
@@ -2106,5 +2111,18 @@ mod tests {
         ] {
             assert!(!kinds(sql).is_empty(), "{sql}");
         }
+    }
+
+    #[test]
+    fn every_dangerous_word_of_a_call_literal_counts() {
+        use GuardKind::*;
+        for sql in [
+            "EXEC sp_MSforeachtable N'UPDATE STATISTICS ?; TRUNCATE TABLE ?'",
+            "sp_MSforeachtable N'UPDATE STATISTICS ?; DELETE FROM ?'",
+            "sp_MSforeachtable @command1 = N'UPDATE STATISTICS ? WITH FULLSCAN; DROP TABLE ?'",
+        ] {
+            assert_eq!(kinds(sql), want(&[(Unparsed, None)]), "{sql}");
+        }
+        assert_eq!(kinds("EXEC dbo.LogStep @step = N'Update totals'"), vec![]);
     }
 }
