@@ -941,6 +941,14 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
             .iter()
             .enumerate()
             .any(|(k, t)| t.kind == Kind::Str && has_word(&unquote(sc.src(k)), "SET"));
+        // A header such as `N'MERGE dbo.Orders AS tgt'` is told from the word
+        // in prose by a USING or INTO in some literal of the batch.
+        let other_literal_has_merge_part = sc.toks.iter().enumerate().any(|(k, t)| {
+            t.kind == Kind::Str && {
+                let lit = unquote(sc.src(k));
+                has_word(&lit, "USING") || has_word(&lit, "INTO")
+            }
+        });
         let mut seen = Vec::new();
         for k in 0..sc.toks.len() {
             if sc.toks[k].kind != Kind::Str {
@@ -975,9 +983,7 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
                 .split(|c: char| !is_word_char(c))
                 .next()
                 .unwrap_or("");
-            if first_word.eq_ignore_ascii_case("MERGE")
-                && (has_word(&text, "USING") || has_word(&text, "INTO"))
-            {
+            if first_word.eq_ignore_ascii_case("MERGE") && (!pure || other_literal_has_merge_part) {
                 // MERGE is not inspected, so it cannot be called safe.
                 out.push(unparsed());
             } else if level < MAX_DYNAMIC_LEVEL {
@@ -2124,5 +2130,21 @@ mod tests {
             assert_eq!(kinds(sql), want(&[(Unparsed, None)]), "{sql}");
         }
         assert_eq!(kinds("EXEC dbo.LogStep @step = N'Update totals'"), vec![]);
+    }
+
+    #[test]
+    fn merge_built_in_parts_is_reported() {
+        use GuardKind::*;
+        for sql in [
+            "SET @sql = N'MERGE ' + QUOTENAME(@t) + N' AS tgt '; SET @sql += N'USING dbo.X s ON 1=1 WHEN NOT MATCHED BY SOURCE THEN DELETE;'; EXEC(@sql)",
+            "SET @sql = N'MERGE dbo.Orders AS tgt'; SET @sql += N' USING dbo.X s ON 1=1 WHEN MATCHED THEN DELETE;'; EXEC(@sql)",
+            "SET @sql = N'MERGE ' + QUOTENAME(@t) + N' AS tgt'; EXEC(@sql)",
+        ] {
+            assert!(
+                kinds(sql).iter().any(|k| *k == (Unparsed, None)),
+                "{sql}"
+            );
+        }
+        assert_eq!(kinds("SET @msg = N'Merge complete'; EXEC(@s)"), vec![]);
     }
 }
