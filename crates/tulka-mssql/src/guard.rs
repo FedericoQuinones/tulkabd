@@ -445,6 +445,22 @@ impl Scan<'_> {
         false
     }
 
+    /// The `(` that matches the `)` at `close`.
+    fn matching_open(&self, close: usize) -> Option<usize> {
+        let mut depth = 0i32;
+        for j in (0..=close).rev() {
+            if self.is_punct(j, ')') {
+                depth += 1;
+            } else if self.is_punct(j, '(') {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+        }
+        None
+    }
+
     /// The name at token `k` without its delimiters, lowercased (Unicode
     /// aware), for comparing identifiers.
     fn norm(&self, k: usize) -> String {
@@ -507,39 +523,32 @@ impl Scan<'_> {
     /// cannot be named.
     fn real_table_behind(&self, target: &str, stmt: usize, end: usize) -> Option<String> {
         let t = target.trim_matches(['[', ']', '"']).to_lowercase();
-        // A CTE named like the target: `WITH #c [(cols)] AS (...)`.
-        for k in 1..stmt {
-            if self.toks[k].kind == Kind::Punct
-                || self.norm(k) != t
-                || !(self.is_kw(k - 1, "WITH") || self.is_punct(k - 1, ','))
-            {
-                continue;
-            }
-            let mut a = k + 1;
-            if self.is_punct(a, '(') {
-                while a < stmt && !self.is_punct(a, ')') {
-                    a += 1;
+        // A CTE named like the target, in the `WITH` list that comes right
+        // before the statement: `WITH #c [(cols)] AS (...) DELETE ...`.
+        if stmt > 0 && self.is_punct(stmt - 1, ')') {
+            let mut close = stmt - 1;
+            while let Some(open) = self.matching_open(close) {
+                if open < 2 || !self.is_kw(open - 1, "AS") {
+                    break;
                 }
-                a += 1;
-            }
-            if self.is_kw(a, "AS") && self.is_punct(a + 1, '(') {
-                let mut depth = 0i32;
-                let mut close = stmt;
-                for j in a + 1..stmt {
-                    if self.is_punct(j, '(') {
-                        depth += 1;
-                    } else if self.is_punct(j, ')') {
-                        depth -= 1;
-                        if depth == 0 {
-                            close = j;
-                            break;
-                        }
+                let mut n = open - 2;
+                if self.is_punct(n, ')') {
+                    match self.matching_open(n) {
+                        Some(cols) if cols > 0 => n = cols - 1,
+                        _ => break,
                     }
                 }
-                return Some(
-                    self.first_real_source(a + 1, close)
-                        .unwrap_or_else(|| target.to_string()),
-                );
+                if self.toks[n].kind != Kind::Punct && self.norm(n) == t {
+                    return Some(
+                        self.first_real_source(open + 1, close)
+                            .unwrap_or_else(|| target.to_string()),
+                    );
+                }
+                if n >= 2 && self.is_punct(n - 1, ',') && self.is_punct(n - 2, ')') {
+                    close = n - 2;
+                } else {
+                    break;
+                }
             }
         }
         // An alias: the first occurrence is the target itself; any later one
@@ -1940,5 +1949,23 @@ mod tests {
         ] {
             assert_eq!(kinds(sql).len(), 1, "{sql}");
         }
+    }
+
+    #[test]
+    fn only_the_cte_list_right_before_the_statement_counts() {
+        for sql in [
+            "WITH #c AS (SELECT 1 AS x) SELECT * FROM #c; DELETE FROM #c",
+            "WITH #c AS (SELECT * FROM dbo.Orders) SELECT * FROM #c\nDELETE FROM #c",
+            "WITH #c AS (SELECT * FROM dbo.Orders) SELECT 1; WITH #d AS (SELECT 1 AS y) DELETE FROM #c",
+        ] {
+            assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+        assert_eq!(
+            kinds(
+                "WITH #a AS (SELECT 1 AS x), #c (x) AS (SELECT * FROM dbo.Orders) DELETE FROM #c"
+            )
+            .len(),
+            1
+        );
     }
 }
