@@ -405,51 +405,74 @@ impl Scan<'_> {
         false
     }
 
-    /// The real table that the temporary-looking `target` of the statement
-    /// at `stmt..end` stands for, if any: `<table> [AS] <target>` after
-    /// `FROM`, `JOIN`, `,` or `(`, or a CTE of that name over a real table.
-    fn real_table_behind(&self, target: &str, stmt: usize, end: usize) -> Option<String> {
-        for k in stmt + 1..end {
-            if self.toks[k].kind != Kind::Temp || !self.src(k).eq_ignore_ascii_case(target) {
-                continue;
-            }
-            let m = if self.is_kw(k - 1, "AS") {
-                k - 2
+    /// The name at token `k` without its delimiters, lowercased (Unicode
+    /// aware), for comparing identifiers.
+    fn norm(&self, k: usize) -> String {
+        let src = self.src(k);
+        let src = if self.toks[k].kind == Kind::Quoted {
+            src.trim_matches(['[', ']', '"'])
+        } else {
+            src
+        };
+        src.to_lowercase()
+    }
+
+    /// The dotted name that ends at token `m`: where it starts and its text.
+    fn name_ending_at(&self, m: usize) -> (usize, String) {
+        let mut s = m;
+        loop {
+            if s >= 2 && self.is_punct(s - 1, '.') && self.is_name_part(s - 2) {
+                s -= 2;
+            } else if s >= 3
+                && self.is_punct(s - 1, '.')
+                && self.is_punct(s - 2, '.')
+                && self.is_name_part(s - 3)
+            {
+                s -= 3;
             } else {
-                k - 1
-            };
-            if !matches!(self.toks[m].kind, Kind::Word | Kind::Quoted) {
-                continue;
-            }
-            let mut s = m;
-            loop {
-                if s >= 2 && self.is_punct(s - 1, '.') && self.is_name_part(s - 2) {
-                    s -= 2;
-                } else if s >= 3
-                    && self.is_punct(s - 1, '.')
-                    && self.is_punct(s - 2, '.')
-                    && self.is_name_part(s - 3)
-                {
-                    s -= 3;
-                } else {
-                    break;
-                }
-            }
-            let opens = s > 0
-                && (self.is_any_kw(s - 1, &["FROM", "JOIN"])
-                    || self.is_punct(s - 1, ',')
-                    || self.is_punct(s - 1, '('));
-            if opens && matches!(self.toks[s].kind, Kind::Word | Kind::Quoted) {
-                return Some(self.text[self.toks[s].start..self.toks[m].end].to_string());
+                break;
             }
         }
-        // `WITH #c [(cols)] AS (SELECT ... FROM <table> ...)`.
-        for k in 0..stmt {
-            let named = self.toks[k].kind == Kind::Temp
-                && self.src(k).eq_ignore_ascii_case(target)
-                && k > 0
-                && (self.is_kw(k - 1, "WITH") || self.is_punct(k - 1, ','));
-            if !named {
+        (
+            s,
+            self.text[self.toks[s].start..self.toks[m].end].to_string(),
+        )
+    }
+
+    /// The first real (non-temporary) table named as a source in `from..to`:
+    /// after `FROM`, `JOIN`, `APPLY`, or after a `,` once a `FROM` was seen.
+    fn first_real_source(&self, from: usize, to: usize) -> Option<String> {
+        let mut in_from = false;
+        for j in from..to {
+            let after_from = self.is_any_kw(j, &["FROM", "JOIN", "APPLY"]);
+            if after_from {
+                in_from = true;
+            }
+            if after_from || (in_from && self.is_punct(j, ',')) {
+                if let Some((name, false, _)) = self.name(j + 1) {
+                    if matches!(self.toks[j + 1].kind, Kind::Word | Kind::Quoted) {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The real table that the temporary-looking `target` of the statement
+    /// at `stmt..end` stands for, if any. A `#name` is only a temporary
+    /// table when nothing says otherwise: a CTE of that name, or an alias of
+    /// that name in the statement, makes it a real table (or whatever the
+    /// alias covers). Returns the table's name, or `target` when the source
+    /// cannot be named.
+    fn real_table_behind(&self, target: &str, stmt: usize, end: usize) -> Option<String> {
+        let t = target.trim_matches(['[', ']', '"']).to_lowercase();
+        // A CTE named like the target: `WITH #c [(cols)] AS (...)`.
+        for k in 1..stmt {
+            if self.toks[k].kind == Kind::Punct
+                || self.norm(k) != t
+                || !(self.is_kw(k - 1, "WITH") || self.is_punct(k - 1, ','))
+            {
                 continue;
             }
             let mut a = k + 1;
@@ -459,22 +482,86 @@ impl Scan<'_> {
                 }
                 a += 1;
             }
-            if !(self.is_kw(a, "AS") && self.is_punct(a + 1, '(')) {
+            if self.is_kw(a, "AS") && self.is_punct(a + 1, '(') {
+                let mut depth = 0i32;
+                let mut close = stmt;
+                for j in a + 1..stmt {
+                    if self.is_punct(j, '(') {
+                        depth += 1;
+                    } else if self.is_punct(j, ')') {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = j;
+                            break;
+                        }
+                    }
+                }
+                return Some(
+                    self.first_real_source(a + 1, close)
+                        .unwrap_or_else(|| target.to_string()),
+                );
+            }
+        }
+        // An alias: the first occurrence is the target itself; any later one
+        // that is not a table reference (after FROM, JOIN, APPLY, `,` or
+        // `(`) and not a qualifier (`#o.col`) names something else's alias.
+        let first =
+            (stmt + 1..end).find(|&k| self.toks[k].kind != Kind::Punct && self.norm(k) == t)?;
+        for k in first + 1..end {
+            if self.toks[k].kind == Kind::Punct || self.norm(k) != t || self.is_punct(k + 1, '.') {
                 continue;
             }
-            let mut depth = 0i32;
-            for j in a + 1..stmt {
-                if self.is_punct(j, '(') {
-                    depth += 1;
-                } else if self.is_punct(j, ')') {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
+            let prev = k - 1;
+            if self.is_any_kw(prev, &["FROM", "JOIN", "APPLY"])
+                || self.is_punct(prev, ',')
+                || self.is_punct(prev, '(')
+            {
+                continue;
+            }
+            let m = if self.is_kw(prev, "AS") {
+                prev - 1
+            } else {
+                prev
+            };
+            if self.is_punct(m, ')') {
+                // `(subquery) #o`, `fn() #o`, `dbo.t (TABLOCK) #o`.
+                let mut depth = 0i32;
+                let mut open = m;
+                for j in (0..=m).rev() {
+                    if self.is_punct(j, ')') {
+                        depth += 1;
+                    } else if self.is_punct(j, '(') {
+                        depth -= 1;
+                        if depth == 0 {
+                            open = j;
+                            break;
+                        }
                     }
-                } else if self.is_any_kw(j, &["FROM", "JOIN"]) {
-                    if let Some((name, false, _)) = self.name(j + 1) {
+                }
+                if open > 0
+                    && self.is_name_part(open - 1)
+                    && !self.is_any_kw(open - 1, &["FROM", "JOIN", "APPLY"])
+                {
+                    let (start, name) = self.name_ending_at(open - 1);
+                    if matches!(self.toks[start].kind, Kind::Word | Kind::Quoted) {
                         return Some(name);
                     }
+                    continue;
+                }
+                return Some(
+                    self.first_real_source(open, m)
+                        .unwrap_or_else(|| target.to_string()),
+                );
+            }
+            const NOT_ALIAS_OF: &[&str] = &[
+                "INTO", "ON", "SET", "WHERE", "AND", "OR", "NOT", "IN", "BY", "UPDATE", "DELETE",
+                "INSERT", "TABLE", "VALUES", "SELECT", "TOP", "EXISTS", "OUTPUT", "HAVING", "WHEN",
+                "THEN", "ELSE", "CASE", "AS",
+            ];
+            if self.is_name_part(m) && !self.is_any_kw(m, NOT_ALIAS_OF) {
+                let (start, name) = self.name_ending_at(m);
+                if matches!(self.toks[start].kind, Kind::Word | Kind::Quoted) {
+                    return Some(name);
                 }
             }
         }
@@ -1455,9 +1542,76 @@ mod tests {
         }
         for sql in [
             "UPDATE #s SET Total = 1 FROM dbo.Orders o JOIN #s ON #s.Id = o.Id",
-            "WITH #c AS (SELECT * FROM #t) DELETE FROM #c",
+            "DELETE FROM #t",
+            "DELETE #t FROM dbo.Orders AS x JOIN #t ON x.Id = #t.Id",
         ] {
             assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_hash_target_is_temporary_only_when_nothing_says_otherwise() {
+        use GuardKind::*;
+        let cases: &[Case] = &[
+            (
+                "DELETE #o FROM dbo.Orders [#o]",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DELETE #o FROM (SELECT * FROM dbo.Orders) #o",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "UPDATE #o SET Total=0 FROM (SELECT * FROM dbo.Orders) AS #o",
+                &[(UpdateWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DELETE #o FROM dbo.Orders (TABLOCK) #o",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DELETE #o FROM dbo.fnOrders() #o",
+                &[(DeleteWithoutWhere, Some("dbo.fnOrders"))],
+            ),
+            (
+                "DELETE #ö FROM dbo.Orders #Ö",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DELETE #o FROM #t CROSS APPLY dbo.Orders #o",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DELETE #o FROM #t CROSS APPLY (SELECT * FROM dbo.Orders) #o",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DELETE #o FROM OPENQUERY(srv, 'select 1') #o",
+                &[(DeleteWithoutWhere, Some("OPENQUERY"))],
+            ),
+            (
+                "WITH #a AS (SELECT * FROM dbo.Orders), #c AS (SELECT * FROM #a) DELETE FROM #c",
+                &[(DeleteWithoutWhere, Some("#c"))],
+            ),
+            (
+                "WITH #c AS (SELECT o.Total FROM #t, dbo.Orders o) UPDATE #c SET Total=0",
+                &[(UpdateWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "WITH [#c] AS (SELECT * FROM dbo.Orders) DELETE FROM #c",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "WITH \"#c\" AS (SELECT * FROM dbo.Orders) DELETE FROM #c",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "WITH #c AS (SELECT * FROM #t) DELETE FROM #c",
+                &[(DeleteWithoutWhere, Some("#c"))],
+            ),
+        ];
+        for (sql, w) in cases {
+            assert_eq!(kinds(sql), want(w), "{sql}");
         }
     }
 }
