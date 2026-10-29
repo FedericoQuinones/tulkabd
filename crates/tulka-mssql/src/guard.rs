@@ -856,7 +856,15 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
                 statement: truncate_statement(&text),
                 line,
             };
-            if !pure {
+            let first_word = text
+                .trim_start()
+                .split(|c: char| !is_word_char(c))
+                .next()
+                .unwrap_or("");
+            if first_word.eq_ignore_ascii_case("MERGE") {
+                // MERGE is not inspected, so it cannot be called safe.
+                out.push(unparsed());
+            } else if !pure {
                 // Built in pieces: only a complete WHERE makes it safe.
                 if first_dangerous_word(&text).is_some() && !has_word(&text, "WHERE") {
                     out.push(unparsed());
@@ -1829,6 +1837,17 @@ mod tests {
             "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders WHERE Id = @id'; EXEC(@s)",
         ] {
             assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+    }
+
+    #[test]
+    fn merge_in_a_literal_run_through_a_variable_is_unparsed() {
+        use GuardKind::*;
+        for sql in [
+            "DECLARE @s nvarchar(max) = N'MERGE dbo.Orders t USING dbo.X s ON 1=1 WHEN MATCHED THEN DELETE;'; EXEC(@s)",
+            "DECLARE @s nvarchar(max) = N'MERGE dbo.Orders t USING ' + @src + N' s ON 1=1 WHEN MATCHED THEN DELETE;'; EXEC(@s)",
+        ] {
+            assert_eq!(kinds(sql), want(&[(Unparsed, None)]), "{sql}");
         }
     }
 }
