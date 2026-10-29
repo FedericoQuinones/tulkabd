@@ -579,13 +579,16 @@ impl Scan<'_> {
         }
         if self.is_any_kw(j, &["RECEIVE", "THROW"]) {
             let prev_blocks = j > 0
-                && (self.is_kw(j - 1, "SET")
+                && (self.is_any_kw(j - 1, &["SET", "AS"])
                     || (self.toks[j - 1].kind == Kind::Punct
                         && !self.is_punct(j - 1, ';')
+                        && !self.is_punct(j - 1, ':')
                         && !self.is_punct(j - 1, ')')));
-            let next_blocks = [',', '.', ')', '=']
-                .iter()
-                .any(|&c| self.is_punct(j + 1, c));
+            // `JOIN dbo.Log Throw ON ...`: followed by ON it is an alias.
+            let next_blocks = self.is_kw(j + 1, "ON")
+                || [',', '.', ')', '=']
+                    .iter()
+                    .any(|&c| self.is_punct(j + 1, c));
             return !prev_blocks && !next_blocks;
         }
         true
@@ -1612,6 +1615,24 @@ mod tests {
         ];
         for (sql, w) in cases {
             assert_eq!(kinds(sql), want(w), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_label_before_an_opener_and_an_alias_named_like_one() {
+        use GuardKind::*;
+        assert_eq!(
+            kinds("DELETE FROM dbo.Orders\nlbl:\nRECEIVE * FROM dbo.Q WHERE x=1"),
+            want(&[(DeleteWithoutWhere, Some("dbo.Orders"))])
+        );
+        for w in ["Throw", "Receive"] {
+            let sql =
+                format!("DELETE #o FROM #t JOIN dbo.Log {w} ON 1=1 JOIN dbo.Orders #o ON 1=1");
+            assert_eq!(
+                kinds(&sql),
+                want(&[(DeleteWithoutWhere, Some("dbo.Orders"))]),
+                "{sql}"
+            );
         }
     }
 }
