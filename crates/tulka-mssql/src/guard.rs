@@ -659,22 +659,7 @@ impl Scan<'_> {
             } else {
                 pure = false;
                 text.push_str(" __v ");
-                j += 1;
-                while self.is_punct(j, '(') {
-                    let mut depth = 0i32;
-                    while j < self.toks.len() {
-                        if self.is_punct(j, '(') {
-                            depth += 1;
-                        } else if self.is_punct(j, ')') {
-                            depth -= 1;
-                            if depth == 0 {
-                                j += 1;
-                                break;
-                            }
-                        }
-                        j += 1;
-                    }
-                }
+                j = self.skip_operand(j);
             }
             if self.is_punct(j, '+') {
                 j += 1;
@@ -704,44 +689,100 @@ impl Scan<'_> {
     /// Like [`Scan::expr_text`] for the arguments of the `CONCAT(` at `open`:
     /// they are parts of one expression.
     fn concat_text(&self, open: usize) -> (String, bool) {
-        let mut text = String::new();
-        let mut pure = true;
+        let mut close = open;
         let mut depth = 0i32;
-        let mut j = open;
-        while j < self.toks.len() {
-            if self.is_punct(j, '(') {
+        while close < self.toks.len() {
+            if self.is_punct(close, '(') {
                 depth += 1;
-            } else if self.is_punct(j, ')') {
+            } else if self.is_punct(close, ')') {
                 depth -= 1;
                 if depth == 0 {
                     break;
                 }
-            } else if depth == 1 {
-                if self.toks[j].kind == Kind::Str {
-                    text.push_str(&unquote(self.src(j)));
-                } else if !self.is_punct(j, ',') && !self.is_punct(j, '+') {
-                    pure = false;
-                    text.push_str(" __v ");
-                    while self.is_punct(j + 1, '(') {
-                        let mut d = 0i32;
-                        j += 1;
-                        while j < self.toks.len() {
-                            if self.is_punct(j, '(') {
-                                d += 1;
-                            } else if self.is_punct(j, ')') {
-                                d -= 1;
-                                if d == 0 {
-                                    break;
-                                }
-                            }
-                            j += 1;
-                        }
-                    }
-                }
             }
-            j += 1;
+            close += 1;
+        }
+        let mut text = String::new();
+        let mut pure = true;
+        let mut a = open + 1;
+        while a < close {
+            // The argument ends at the next top-level comma.
+            let mut b = a;
+            let mut d = 0i32;
+            while b < close {
+                if self.is_punct(b, '(') {
+                    d += 1;
+                } else if self.is_punct(b, ')') {
+                    d -= 1;
+                } else if d == 0 && self.is_punct(b, ',') {
+                    break;
+                }
+                b += 1;
+            }
+            // Only literals joined by `+` are text; a `CASE`, a call or a
+            // parenthesized argument can hide what it adds.
+            let direct = (b - a) % 2 == 1
+                && (a..b).all(|k| {
+                    if (k - a) % 2 == 0 {
+                        self.toks[k].kind == Kind::Str
+                    } else {
+                        self.is_punct(k, '+')
+                    }
+                });
+            if direct {
+                for k in (a..b).step_by(2) {
+                    text.push_str(&unquote(self.src(k)));
+                }
+            } else {
+                pure = false;
+                text.push_str(" __v ");
+            }
+            a = b + 1;
         }
         (text, pure)
+    }
+
+    /// The token after the non-literal operand that starts at `j`: a
+    /// parenthesized group, a `CASE ... END`, or a name with call parentheses.
+    fn skip_operand(&self, mut j: usize) -> usize {
+        let skip_group = |mut j: usize| {
+            let mut depth = 0i32;
+            while j < self.toks.len() {
+                if self.is_punct(j, '(') {
+                    depth += 1;
+                } else if self.is_punct(j, ')') {
+                    depth -= 1;
+                    if depth == 0 {
+                        return j + 1;
+                    }
+                }
+                j += 1;
+            }
+            j
+        };
+        if self.is_punct(j, '(') {
+            return skip_group(j);
+        }
+        if self.is_kw(j, "CASE") {
+            let mut cases = 0i32;
+            while j < self.toks.len() {
+                if self.is_kw(j, "CASE") {
+                    cases += 1;
+                } else if self.is_kw(j, "END") {
+                    cases -= 1;
+                    if cases == 0 {
+                        return j + 1;
+                    }
+                }
+                j += 1;
+            }
+            return j;
+        }
+        j += 1;
+        while self.is_punct(j, '(') {
+            j = skip_group(j);
+        }
+        j
     }
 
     /// Whether the literal at `start` is an argument of `PRINT`, `RAISERROR`
@@ -2146,5 +2187,26 @@ mod tests {
             );
         }
         assert_eq!(kinds("SET @msg = N'Merge complete'; EXEC(@s)"), vec![]);
+    }
+
+    #[test]
+    fn a_conditional_where_does_not_bound_built_up_sql() {
+        for sql in [
+            "SET @s = CONCAT(N'DELETE FROM ', QUOTENAME(@t), CASE WHEN @all = 1 THEN N'' ELSE N' WHERE Flag = 1' END); EXEC(@s)",
+            "SET @s = CONCAT(N'UPDATE ', QUOTENAME(@t), N' SET Flag = 0', CASE WHEN @id IS NULL THEN N'' ELSE N' WHERE Id = ' + CAST(@id AS nvarchar(10)) END); EXEC(@s)",
+            "SET @s = CONCAT(N'DELETE FROM ', QUOTENAME(@t), CASE @mode WHEN 1 THEN N' WHERE a = 1' WHEN 2 THEN N' WHERE b = 2' END); EXEC(@s)",
+            "SET @s = N'DELETE FROM ' + QUOTENAME(@t) + CASE WHEN @all = 1 THEN N'' ELSE N' WHERE Flag = 1' END; EXEC(@s)",
+            "SET @s = N'DELETE FROM ' + QUOTENAME(@t) + ISNULL(@w, N' WHERE 1 = 1'); EXEC(@s)",
+            "SET @s = CONCAT(N'DELETE FROM dbo.', (@t)); EXEC(@s)",
+            "SET @s = CONCAT(N'DELETE FROM ', IIF(@a = 1, N'', N' WHERE a = 1')); EXEC(@s)",
+        ] {
+            assert!(!kinds(sql).is_empty(), "{sql}");
+        }
+        assert_eq!(
+            kinds(
+                "SET @s = CONCAT(N'DELETE FROM ', QUOTENAME(@t), N' WHERE Id = ', @id); EXEC(@s)"
+            ),
+            vec![]
+        );
     }
 }
