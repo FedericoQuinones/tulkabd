@@ -552,6 +552,33 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         dynamic_call(&sc, 0, true, base_line + sc.toks[0].line, level, out);
     }
 
+    // `DECLARE @s = N'DELETE ...'; EXEC(@s)`: the text is out of reach, but a
+    // dangerous literal in a batch that runs a variable is worth a warning.
+    let runs_variable = (0..sc.toks.len()).any(|i| {
+        let arg = if i == 0 && starts_like_a_call(&sc) {
+            i
+        } else if sc.is_kw(i, "EXEC") || sc.is_kw(i, "EXECUTE") {
+            i + 1
+        } else {
+            return false;
+        };
+        call_args(&sc, arg)
+            .is_some_and(|(j, _)| sc.toks.get(j).is_some_and(|t| t.kind == Kind::Var))
+    });
+    if runs_variable {
+        if let Some((at, text)) = literal_chains(&sc, 0, sc.toks.len())
+            .into_iter()
+            .find(|(_, text)| first_dangerous_word(text).is_some())
+        {
+            out.push(GuardFinding {
+                kind: GuardKind::Unparsed,
+                object: None,
+                statement: truncate_statement(&text),
+                line: base_line + sc.toks[at].line,
+            });
+        }
+    }
+
     let mut depth = 0i32;
     // The latest `ALTER TABLE`: where it starts, the table it names and the
     // token after the table name. A `DROP` there is an action of that
@@ -832,35 +859,41 @@ fn starts_like_a_call(sc: &Scan) -> bool {
     }
 }
 
+/// Where the argument of a dynamic call starts: after the `(` of `EXEC(...)`,
+/// or after the name of `sp_executesql` and an optional `@stmt =`. Also says
+/// whether it is the parenthesized form. `i` is the token after `EXEC`.
+fn call_args(sc: &Scan, i: usize) -> Option<(usize, bool)> {
+    let mut j = i;
+    if sc.is_punct(j, '(') {
+        return Some((j + 1, true));
+    }
+    // `EXEC @rc = [schema.]sp_executesql [@stmt =] N'...'`
+    if sc.toks.get(j).is_some_and(|t| t.kind == Kind::Var) && sc.is_punct(j + 1, '=') {
+        j += 2;
+    }
+    let (name, _, next) = sc.name(j)?;
+    let last = name.rsplit('.').next().unwrap_or("");
+    if !last
+        .trim_matches(['[', ']', '"'])
+        .eq_ignore_ascii_case("sp_executesql")
+    {
+        return None;
+    }
+    j = next;
+    if sc.toks.get(j).is_some_and(|t| t.kind == Kind::Var)
+        && sc.src(j).eq_ignore_ascii_case("@stmt")
+        && sc.is_punct(j + 1, '=')
+    {
+        j += 2;
+    }
+    Some((j, false))
+}
+
 /// The text of a literal dynamic statement: the argument of `EXEC(...)` or
 /// of `sp_executesql`, when it is made only of string literals joined by `+`.
 /// `i` is the token after `EXEC`.
 fn dynamic_sql(sc: &Scan, i: usize) -> Option<String> {
-    let mut j = i;
-    let parens = sc.is_punct(j, '(');
-    if parens {
-        j += 1;
-    } else {
-        // `EXEC @rc = [schema.]sp_executesql [@stmt =] N'...'`
-        if sc.toks.get(j).is_some_and(|t| t.kind == Kind::Var) && sc.is_punct(j + 1, '=') {
-            j += 2;
-        }
-        let (name, _, next) = sc.name(j)?;
-        let last = name.rsplit('.').next().unwrap_or("");
-        if !last
-            .trim_matches(['[', ']', '"'])
-            .eq_ignore_ascii_case("sp_executesql")
-        {
-            return None;
-        }
-        j = next;
-        if sc.toks.get(j).is_some_and(|t| t.kind == Kind::Var)
-            && sc.src(j).eq_ignore_ascii_case("@stmt")
-            && sc.is_punct(j + 1, '=')
-        {
-            j += 2;
-        }
-    }
+    let (mut j, parens) = call_args(sc, i)?;
     let mut sql = String::new();
     loop {
         let t = sc.toks.get(j)?;
@@ -1312,5 +1345,23 @@ mod tests {
             kinds("EXEC(N'DEL' + N'ETE FROM dbo.Orders' + @w)"),
             want(&[(Unparsed, None)])
         );
+    }
+
+    #[test]
+    fn a_dangerous_literal_next_to_a_variable_exec_is_reported() {
+        use GuardKind::*;
+        for sql in [
+            "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders'; EXEC sp_executesql @s",
+            "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders'; EXEC(@s)",
+            "DECLARE @s nvarchar(max) = N'TRUNCATE TABLE ' + N'dbo.Orders'; EXEC sp_executesql @stmt = @s",
+        ] {
+            assert_eq!(kinds(sql), want(&[(Unparsed, None)]), "{sql}");
+        }
+        for sql in [
+            "DECLARE @s nvarchar(max) = N'SELECT 1'; EXEC(@s)",
+            "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders'; SELECT @s",
+        ] {
+            assert_eq!(kinds(sql), vec![], "{sql}");
+        }
     }
 }
