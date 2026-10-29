@@ -646,7 +646,7 @@ impl Scan<'_> {
     }
 
     /// The text of the `+` expression that starts at `start`: literals
-    /// joined, anything else (variables, function calls) as a ` @v ` gap.
+    /// joined, anything else (variables, function calls) as a ` __v ` gap.
     /// Also whether it is made of literals only.
     fn expr_text(&self, start: usize) -> (String, bool) {
         let mut text = String::new();
@@ -658,7 +658,7 @@ impl Scan<'_> {
                 j += 1;
             } else {
                 pure = false;
-                text.push_str(" @v ");
+                text.push_str(" __v ");
                 j += 1;
                 while self.is_punct(j, '(') {
                     let mut depth = 0i32;
@@ -912,16 +912,17 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
             {
                 // MERGE is not inspected, so it cannot be called safe.
                 out.push(unparsed());
-            } else if !pure {
-                // Built in pieces: only a complete WHERE makes it safe.
-                if first_dangerous_word(&text).is_some() && !has_word(&text, "WHERE") {
-                    out.push(unparsed());
-                }
             } else if level < MAX_DYNAMIC_LEVEL {
                 let mut found = Vec::new();
                 analyze_batch(&text, 0, level + 1, &mut found);
                 for mut f in found {
                     f.line = line;
+                    if !pure {
+                        // Built in pieces: what runs is not known, only that
+                        // the statement it starts has no bounding WHERE.
+                        f.kind = GuardKind::Unparsed;
+                        f.object = None;
+                    }
                     out.push(f);
                 }
             } else if first_dangerous_word(&text).is_some() {
@@ -1979,5 +1980,26 @@ mod tests {
             kinds("DECLARE @s nvarchar(max) = N'MERGE INTO dbo.Orders t USING dbo.X s ON 1=1 WHEN MATCHED THEN DELETE;'; EXEC(@s)"),
             want(&[(Unparsed, None)])
         );
+    }
+
+    #[test]
+    fn a_where_elsewhere_does_not_make_built_up_sql_safe() {
+        for sql in [
+            "SET @sql = N'IF EXISTS (SELECT 1 FROM sys.tables WHERE name = ''' + @t + N''') DROP TABLE ' + QUOTENAME(@t); EXEC(@sql)",
+            "SET @sql = N'IF EXISTS (SELECT 1 FROM sys.tables WHERE name = @n) DELETE FROM ' + QUOTENAME(@t); EXEC sp_executesql @sql, N'@n sysname', @n = @t",
+            "SET @sql = N'DELETE FROM ' + QUOTENAME(@t) + N' WHERE id < 2; DELETE FROM ' + QUOTENAME(@t2); EXEC(@sql)",
+            "SET @sql = N'UPDATE x SET v = 0 FROM ' + QUOTENAME(@t) + N' x JOIN (SELECT 1 AS id WHERE 1=1) s ON 1=1'; EXEC(@sql)",
+            "SET @sql = N'/* rows where obsolete */ DROP TABLE IF EXISTS ' + QUOTENAME(@t); EXEC(@sql)",
+            "SET @sql = N'DELETE FROM ' + @t + N' -- where'; EXEC(@sql)",
+            "SET @sql = N'UPDATE ' + QUOTENAME(@t) + N' SET v = (SELECT 1 WHERE 1=1)'; EXEC(@sql)",
+        ] {
+            assert!(!kinds(sql).is_empty(), "{sql}");
+        }
+        for sql in [
+            "SET @s = N'DELETE FROM ' + QUOTENAME(@t) + N' WHERE Id = @id'; EXEC(@s)",
+            "SET @s = N'UPDATE ' + QUOTENAME(@t) + N' SET v = 0 WHERE Id = @id'; EXEC(@s)",
+        ] {
+            assert_eq!(kinds(sql), vec![], "{sql}");
+        }
     }
 }
