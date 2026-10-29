@@ -568,6 +568,99 @@ impl Scan<'_> {
         None
     }
 
+    /// Start of the `+` expression that contains the token at `e`.
+    fn expr_start(&self, mut e: usize) -> usize {
+        while e >= 2 && self.is_punct(e - 1, '+') {
+            let l = e - 2;
+            let mut start = l;
+            if self.is_punct(l, ')') {
+                let mut depth = 0i32;
+                for j in (0..=l).rev() {
+                    if self.is_punct(j, ')') {
+                        depth += 1;
+                    } else if self.is_punct(j, '(') {
+                        depth -= 1;
+                        if depth == 0 {
+                            start = if j > 0 && self.is_name_part(j - 1) {
+                                j - 1
+                            } else {
+                                j
+                            };
+                            break;
+                        }
+                    }
+                }
+            }
+            e = start;
+        }
+        e
+    }
+
+    /// The text of the `+` expression that starts at `start`: literals
+    /// joined, anything else (variables, function calls) as a ` @v ` gap.
+    /// Also whether it is made of literals only.
+    fn expr_text(&self, start: usize) -> (String, bool) {
+        let mut text = String::new();
+        let mut pure = true;
+        let mut j = start;
+        while j < self.toks.len() {
+            if self.toks[j].kind == Kind::Str {
+                text.push_str(&unquote(self.src(j)));
+                j += 1;
+            } else {
+                pure = false;
+                text.push_str(" @v ");
+                j += 1;
+                while self.is_punct(j, '(') {
+                    let mut depth = 0i32;
+                    while j < self.toks.len() {
+                        if self.is_punct(j, '(') {
+                            depth += 1;
+                        } else if self.is_punct(j, ')') {
+                            depth -= 1;
+                            if depth == 0 {
+                                j += 1;
+                                break;
+                            }
+                        }
+                        j += 1;
+                    }
+                }
+            }
+            if self.is_punct(j, '+') {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        (text, pure)
+    }
+
+    /// Whether the literal at `start` is a message or a value, not code:
+    /// an argument of `PRINT`, `RAISERROR`, `THROW`, `VALUES` or a `SELECT`
+    /// list item that is not an assignment.
+    fn in_message_context(&self, start: usize) -> bool {
+        let mut assigns = false;
+        for j in (0..start).rev() {
+            if self.is_punct(j, ';') || self.is_kw(j, "SET") {
+                return false;
+            }
+            if self.is_punct(j, '=') {
+                assigns = true;
+            }
+            if self.is_any_kw(j, &["PRINT", "RAISERROR", "THROW", "VALUES"]) {
+                return true;
+            }
+            if self.is_kw(j, "SELECT") {
+                return !assigns;
+            }
+            if self.is_any_kw(j, OPENERS) {
+                return false;
+            }
+        }
+        false
+    }
+
     /// Whether the opener word at `j` begins a statement here: some of them
     /// are also ordinary column or alias names.
     fn starts_statement(&self, j: usize) -> bool {
@@ -705,7 +798,8 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
     // reach, but the literals of a batch that runs a variable may be it, so
     // each is analyzed as if it were executed.
     let mut runs_variable = false;
-    let mut analyzed_already = Vec::new();
+    // Token ranges of the arguments of dynamic calls, reported by the call.
+    let mut call_args_ranges: Vec<(usize, usize)> = Vec::new();
     for i in 0..sc.toks.len() {
         let arg = if i == 0 && starts_like_a_call(&sc) {
             i
@@ -717,14 +811,12 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         let Some((j, _)) = call_args(&sc, arg) else {
             continue;
         };
+        let (e, _) = sc.statement_end(j.saturating_sub(1), false);
+        call_args_ranges.push((j, e));
         if dynamic_sql(&sc, arg).is_some() {
-            analyzed_already.push(j);
             continue;
         }
         // Does the first argument hold a variable anywhere in its expression?
-        let (e, _) = sc.statement_end(j.saturating_sub(1), false);
-        // Literals in the call's own arguments are reported by the call.
-        analyzed_already.extend(literal_chains(&sc, j, e).into_iter().map(|(at, _)| at));
         let mut depth = 0i32;
         for k in j..e {
             if sc.is_punct(k, '(') {
@@ -739,34 +831,45 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         }
     }
     if runs_variable {
-        for (at, literal) in literal_chains(&sc, 0, sc.toks.len()) {
-            if analyzed_already.contains(&at) {
+        let mut seen = Vec::new();
+        for k in 0..sc.toks.len() {
+            if sc.toks[k].kind != Kind::Str {
                 continue;
             }
-            let line = base_line + sc.toks[at].line;
-            if level < MAX_DYNAMIC_LEVEL {
+            let start = sc.expr_start(k);
+            if seen.contains(&start) {
+                continue;
+            }
+            seen.push(start);
+            if call_args_ranges
+                .iter()
+                .any(|&(a, b)| start >= a && start < b)
+                || sc.in_message_context(start)
+            {
+                continue;
+            }
+            let (text, pure) = sc.expr_text(start);
+            let line = base_line + sc.toks[start].line;
+            let unparsed = || GuardFinding {
+                kind: GuardKind::Unparsed,
+                object: None,
+                statement: truncate_statement(&text),
+                line,
+            };
+            if !pure {
+                // Built in pieces: only a complete WHERE makes it safe.
+                if first_dangerous_word(&text).is_some() && !has_word(&text, "WHERE") {
+                    out.push(unparsed());
+                }
+            } else if level < MAX_DYNAMIC_LEVEL {
                 let mut found = Vec::new();
-                analyze_batch(&literal, 0, level + 1, &mut found);
+                analyze_batch(&text, 0, level + 1, &mut found);
                 for mut f in found {
-                    // Prose such as `'Update finished'` is not an UPDATE.
-                    if f.kind == GuardKind::UpdateWithoutWhere
-                        && !f
-                            .statement
-                            .split(|c: char| !is_word_char(c))
-                            .any(|w| w.eq_ignore_ascii_case("SET"))
-                    {
-                        continue;
-                    }
                     f.line = line;
                     out.push(f);
                 }
-            } else if first_dangerous_word(&literal).is_some() {
-                out.push(GuardFinding {
-                    kind: GuardKind::Unparsed,
-                    object: None,
-                    statement: truncate_statement(&literal),
-                    line,
-                });
+            } else if first_dangerous_word(&text).is_some() {
+                out.push(unparsed());
             }
         }
     }
@@ -1104,6 +1207,12 @@ fn dynamic_sql(sc: &Scan, i: usize) -> Option<String> {
 fn unquote(lit: &str) -> String {
     let body = lit.trim_start_matches(['N', 'n']);
     body[1..body.len() - 1].replace("''", "'")
+}
+
+/// Whether `text` has `word` as a whole word, ignoring case.
+fn has_word(text: &str, word: &str) -> bool {
+    text.split(|c: char| !is_word_char(c))
+        .any(|w| w.eq_ignore_ascii_case(word))
 }
 
 /// Offset of the first whole word `UPDATE`, `DELETE`, `DROP` or `TRUNCATE`.
@@ -1693,6 +1802,33 @@ mod tests {
                 want(&[(DeleteWithoutWhere, Some("dbo.Orders"))]),
                 "{sql}"
             );
+        }
+    }
+
+    #[test]
+    fn dynamic_sql_built_in_pieces_is_reported_and_prose_is_not() {
+        use GuardKind::*;
+        for sql in [
+            "DECLARE @sql nvarchar(max) = N'UPDATE ' + QUOTENAME(@t) + N' SET col = NULL'; EXEC(@sql)",
+            "DECLARE @sql nvarchar(max) = N'UPDATE dbo.Orders' + CHAR(13) + CHAR(10) + N'SET Total = 0'; EXEC(@sql)",
+            "DECLARE @sql nvarchar(max) = N'UPDATE dbo.Orders'; SET @sql += N' SET Total = 0'; EXEC(@sql)",
+            "DECLARE @sql nvarchar(max) = N'UPDATE dbo.Orders ' + @setClause; EXEC(@sql)",
+            "DECLARE @sql nvarchar(max) = CONCAT(N'UPDATE dbo.Orders', N' SET Total = 0'); EXEC(@sql)",
+            "DECLARE @sql nvarchar(max) = N'UPDATE o' + @nl + N'SET Total = 0' + @nl + N'FROM dbo.Orders o'; EXEC(@sql)",
+        ] {
+            let k = kinds(sql);
+            assert!(!k.is_empty(), "{sql}");
+        }
+        for sql in [
+            "RAISERROR('Cannot delete order', 16, 1); EXEC(@sql)",
+            "PRINT 'Drop old rows'; EXEC(@sql)",
+            "INSERT INTO m VALUES ('drop table requested'); EXEC(@sql)",
+            "PRINT 'Update finished'; EXEC(@sql)",
+            "SELECT 'delete me' AS m; EXEC(@sql)",
+            "DECLARE @s nvarchar(max) = N'DELETE FROM ' + QUOTENAME(@t) + N' WHERE Id = @id'; EXEC(@s)",
+            "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders WHERE Id = @id'; EXEC(@s)",
+        ] {
+            assert_eq!(kinds(sql), vec![], "{sql}");
         }
     }
 }
