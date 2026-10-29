@@ -701,30 +701,73 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         dynamic_call(&sc, 0, true, base_line + sc.toks[0].line, level, out);
     }
 
-    // `DECLARE @s = N'DELETE ...'; EXEC(@s)`: the text is out of reach, but a
-    // dangerous literal in a batch that runs a variable is worth a warning.
-    let runs_variable = (0..sc.toks.len()).any(|i| {
+    // `DECLARE @s = N'DELETE ...'; EXEC(@s)`: the executed text is out of
+    // reach, but the literals of a batch that runs a variable may be it, so
+    // each is analyzed as if it were executed.
+    let mut runs_variable = false;
+    let mut analyzed_already = Vec::new();
+    for i in 0..sc.toks.len() {
         let arg = if i == 0 && starts_like_a_call(&sc) {
             i
         } else if sc.is_kw(i, "EXEC") || sc.is_kw(i, "EXECUTE") {
             i + 1
         } else {
-            return false;
+            continue;
         };
-        call_args(&sc, arg)
-            .is_some_and(|(j, _)| sc.toks.get(j).is_some_and(|t| t.kind == Kind::Var))
-    });
+        let Some((j, _)) = call_args(&sc, arg) else {
+            continue;
+        };
+        if dynamic_sql(&sc, arg).is_some() {
+            analyzed_already.push(j);
+            continue;
+        }
+        // Does the first argument hold a variable anywhere in its expression?
+        let (e, _) = sc.statement_end(j.saturating_sub(1), false);
+        // Literals in the call's own arguments are reported by the call.
+        analyzed_already.extend(literal_chains(&sc, j, e).into_iter().map(|(at, _)| at));
+        let mut depth = 0i32;
+        for k in j..e {
+            if sc.is_punct(k, '(') {
+                depth += 1;
+            } else if sc.is_punct(k, ')') {
+                depth -= 1;
+            } else if depth == 0 && sc.is_punct(k, ',') {
+                break;
+            } else if sc.toks[k].kind == Kind::Var {
+                runs_variable = true;
+            }
+        }
+    }
     if runs_variable {
-        if let Some((at, text)) = literal_chains(&sc, 0, sc.toks.len())
-            .into_iter()
-            .find(|(_, text)| first_dangerous_word(text).is_some())
-        {
-            out.push(GuardFinding {
-                kind: GuardKind::Unparsed,
-                object: None,
-                statement: truncate_statement(&text),
-                line: base_line + sc.toks[at].line,
-            });
+        for (at, literal) in literal_chains(&sc, 0, sc.toks.len()) {
+            if analyzed_already.contains(&at) {
+                continue;
+            }
+            let line = base_line + sc.toks[at].line;
+            if level < MAX_DYNAMIC_LEVEL {
+                let mut found = Vec::new();
+                analyze_batch(&literal, 0, level + 1, &mut found);
+                for mut f in found {
+                    // Prose such as `'Update finished'` is not an UPDATE.
+                    if f.kind == GuardKind::UpdateWithoutWhere
+                        && !f
+                            .statement
+                            .split(|c: char| !is_word_char(c))
+                            .any(|w| w.eq_ignore_ascii_case("SET"))
+                    {
+                        continue;
+                    }
+                    f.line = line;
+                    out.push(f);
+                }
+            } else if first_dangerous_word(&literal).is_some() {
+                out.push(GuardFinding {
+                    kind: GuardKind::Unparsed,
+                    object: None,
+                    statement: truncate_statement(&literal),
+                    line,
+                });
+            }
         }
     }
 
@@ -1490,18 +1533,35 @@ mod tests {
     }
 
     #[test]
-    fn a_dangerous_literal_next_to_a_variable_exec_is_reported() {
+    fn literals_of_a_batch_that_executes_a_variable_are_analyzed() {
         use GuardKind::*;
-        for sql in [
-            "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders'; EXEC sp_executesql @s",
-            "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders'; EXEC(@s)",
-            "DECLARE @s nvarchar(max) = N'TRUNCATE TABLE ' + N'dbo.Orders'; EXEC sp_executesql @stmt = @s",
-        ] {
-            assert_eq!(kinds(sql), want(&[(Unparsed, None)]), "{sql}");
+        let cases: &[Case] = &[
+            (
+                "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders'; EXEC sp_executesql @s",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders'; EXEC(@s)",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders'; EXEC(N'' + @s)",
+                &[(DeleteWithoutWhere, Some("dbo.Orders"))],
+            ),
+            (
+                "DECLARE @s nvarchar(max) = N'TRUNCATE TABLE ' + N'dbo.Orders'; EXEC sp_executesql @stmt = @s",
+                &[(Truncate, Some("dbo.Orders"))],
+            ),
+        ];
+        for (sql, w) in cases {
+            assert_eq!(kinds(sql), want(w), "{sql}");
         }
         for sql in [
             "DECLARE @s nvarchar(max) = N'SELECT 1'; EXEC(@s)",
             "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders'; SELECT @s",
+            "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders WHERE Id=@id'; EXEC sp_executesql @s, N'@id int', @id=1",
+            "EXEC('DELETE FROM dbo.Orders WHERE Id=1'); EXEC(@s)",
+            "PRINT 'Update finished'; EXEC(@sql)",
         ] {
             assert_eq!(kinds(sql), vec![], "{sql}");
         }
