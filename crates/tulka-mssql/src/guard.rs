@@ -907,7 +907,9 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
                 .split(|c: char| !is_word_char(c))
                 .next()
                 .unwrap_or("");
-            if first_word.eq_ignore_ascii_case("MERGE") {
+            if first_word.eq_ignore_ascii_case("MERGE")
+                && (has_word(&text, "USING") || has_word(&text, "INTO"))
+            {
                 // MERGE is not inspected, so it cannot be called safe.
                 out.push(unparsed());
             } else if !pure {
@@ -1967,5 +1969,15 @@ mod tests {
             assert!(!kinds(sql).is_empty(), "{sql}");
         }
         assert_eq!(kinds("THROW 50000, 'drop table x', 1; EXEC(@s)"), vec![]);
+    }
+
+    #[test]
+    fn merge_needs_using_or_into_to_be_reported() {
+        use GuardKind::*;
+        assert_eq!(kinds("SET @msg = N'Merge complete'; EXEC(@s)"), vec![]);
+        assert_eq!(
+            kinds("DECLARE @s nvarchar(max) = N'MERGE INTO dbo.Orders t USING dbo.X s ON 1=1 WHEN MATCHED THEN DELETE;'; EXEC(@s)"),
+            want(&[(Unparsed, None)])
+        );
     }
 }
