@@ -774,9 +774,7 @@ fn dynamic_call(
                 line,
             });
         }
-    } else if !(implicit && sc.is_any_kw(0, OPENERS))
-        && !(implicit && sc.is_any_kw(0, &["WITH", "SET"]))
-    {
+    } else if !implicit || starts_like_a_call(sc) {
         // Not a plain literal, so it cannot be analyzed; if the arguments
         // carry a dangerous word, say so instead of staying silent.
         let (end, _) = sc.statement_end(arg, false);
@@ -793,6 +791,22 @@ fn dynamic_call(
                 line,
             });
         }
+    }
+}
+
+/// Whether the batch starts like a procedure call without `EXEC`: a name
+/// followed by an argument or nothing, which keeps `BACKUP DATABASE x TO
+/// DISK = '...'` and the like out.
+fn starts_like_a_call(sc: &Scan) -> bool {
+    if sc.is_any_kw(0, OPENERS) || sc.is_any_kw(0, &["WITH", "SET"]) {
+        return false;
+    }
+    match sc.name(0) {
+        Some((_, _, next)) => sc
+            .toks
+            .get(next)
+            .is_none_or(|t| matches!(t.kind, Kind::Str | Kind::Var | Kind::Num)),
+        None => false,
     }
 }
 
@@ -1247,5 +1261,25 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    #[test]
+    fn only_call_shaped_batches_count_as_implicit_calls() {
+        use GuardKind::*;
+        for sql in [
+            "BACKUP DATABASE x TO DISK = '/tmp/drop/x.bak'",
+            "RESTORE DATABASE x FROM DISK = '/tmp/delete/x.bak'",
+            "BULK INSERT dbo.t FROM '/tmp/truncate/x.csv'",
+        ] {
+            assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+        assert_eq!(
+            kinds("sp_MSforeachtable 'TRUNCATE TABLE ?'"),
+            want(&[(Unparsed, None)])
+        );
+        assert_eq!(
+            kinds("sp_MSforeachtable @command1 = 'TRUNCATE TABLE ?'"),
+            want(&[(Unparsed, None)])
+        );
     }
 }
