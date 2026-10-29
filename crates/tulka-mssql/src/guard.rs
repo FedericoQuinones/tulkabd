@@ -723,7 +723,7 @@ impl Scan<'_> {
             // parenthesized argument can hide what it adds.
             let direct = (b - a) % 2 == 1
                 && (a..b).all(|k| {
-                    if (k - a) % 2 == 0 {
+                    if (k - a).is_multiple_of(2) {
                         self.toks[k].kind == Kind::Str
                     } else {
                         self.is_punct(k, '+')
@@ -2182,7 +2182,7 @@ mod tests {
             "SET @sql = N'MERGE ' + QUOTENAME(@t) + N' AS tgt'; EXEC(@sql)",
         ] {
             assert!(
-                kinds(sql).iter().any(|k| *k == (Unparsed, None)),
+                kinds(sql).contains(&(Unparsed, None)),
                 "{sql}"
             );
         }
