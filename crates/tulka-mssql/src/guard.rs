@@ -405,6 +405,46 @@ impl Scan<'_> {
         false
     }
 
+    /// Whether `target`, a plain name in `DELETE`/`UPDATE` at `stmt..end`,
+    /// is an alias of a temporary table or table variable in the `FROM`.
+    fn alias_of_temporary(&self, target: &str, stmt: usize, end: usize) -> bool {
+        if target.contains('.') {
+            return false;
+        }
+        let t = target.trim_matches(['[', ']', '"']).to_lowercase();
+        let named =
+            |k: usize| matches!(self.toks[k].kind, Kind::Word | Kind::Quoted) && self.norm(k) == t;
+        let Some(first) = (stmt + 1..end).find(|&k| named(k)) else {
+            return false;
+        };
+        for k in first + 1..end {
+            if !named(k) || self.is_punct(k + 1, '.') {
+                continue;
+            }
+            let m = if self.is_kw(k - 1, "AS") {
+                k - 2
+            } else {
+                k - 1
+            };
+            if self.is_name_part(m)
+                && !self.is_any_kw(
+                    m,
+                    &["FROM", "JOIN", "APPLY", "ON", "SET", "WHERE", "AND", "OR"],
+                )
+            {
+                let (start, _) = self.name_ending_at(m);
+                let source_start = start > 0
+                    && (self.is_any_kw(start - 1, &["FROM", "JOIN", "APPLY"])
+                        || self.is_punct(start - 1, ',')
+                        || self.is_punct(start - 1, '('));
+                if source_start {
+                    return matches!(self.toks[start].kind, Kind::Temp | Kind::Var);
+                }
+            }
+        }
+        false
+    }
+
     /// The name at token `k` without its delimiters, lowercased (Unicode
     /// aware), for comparing identifiers.
     fn norm(&self, k: usize) -> String {
@@ -1040,6 +1080,13 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
             (GuardKind::Drop, first, all_temp, i)
         };
 
+        if !temp && is_dml {
+            // `DELETE t FROM #t t`: the alias stands for a temporary table.
+            if let Some(target) = &object {
+                let (end, _) = sc.statement_end(i, sc.is_kw(i, "UPDATE"));
+                temp = sc.alias_of_temporary(target, i, end);
+            }
+        }
         let mut object = object;
         if temp && is_dml {
             // A `#name` can stand for a real table: an alias in the FROM
@@ -1874,5 +1921,24 @@ mod tests {
             kinds("DELETE FROM dbo.Orders THROW 50000, 'x', 1 WHERE x = 1"),
             want(&[(DeleteWithoutWhere, Some("dbo.Orders"))])
         );
+    }
+
+    #[test]
+    fn an_alias_of_a_temporary_table_is_temporary() {
+        use GuardKind::*;
+        for sql in [
+            "DELETE t FROM #t t JOIN #u u ON t.id = u.id",
+            "UPDATE t SET x = 1 FROM #t t JOIN #s s ON t.id = s.id",
+            "DELETE t FROM ##g AS t",
+            "DELETE t FROM @v t",
+        ] {
+            assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+        for sql in [
+            "DELETE t FROM dbo.Orders t JOIN #u u ON t.id = u.id",
+            "UPDATE t SET x = 1 FROM #u u JOIN dbo.Orders t ON t.id = u.id",
+        ] {
+            assert_eq!(kinds(sql).len(), 1, "{sql}");
+        }
     }
 }
