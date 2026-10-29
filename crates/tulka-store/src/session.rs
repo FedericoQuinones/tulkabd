@@ -535,4 +535,18 @@ mod tests {
         drop(second);
         drop(store);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_locked_file_loses_group_and_other_access_but_stays_locked() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        drop(SessionStore::open(&path));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        crate::private_file::restrict_permissions(&path);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o400);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
 }

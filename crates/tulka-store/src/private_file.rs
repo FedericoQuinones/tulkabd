@@ -29,11 +29,10 @@ pub(crate) fn restrict_permissions(path: &Path) {
         }
         for file in files {
             if let Ok(meta) = std::fs::metadata(&file) {
-                // A file the user locked (read-only or unreadable) is left
-                // as it is: restoring access would undo that.
-                if meta.permissions().mode() & 0o600 == 0o600 {
-                    let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
-                }
+                // Only the owner's bits stay, whatever they are: a file the
+                // user locked (read-only or unreadable) is not reopened.
+                let mode = meta.permissions().mode() & 0o700;
+                let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode));
             }
         }
     }
