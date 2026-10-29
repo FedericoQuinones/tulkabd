@@ -685,23 +685,15 @@ impl Scan<'_> {
         (text, pure)
     }
 
-    /// Whether the literal at `start` is a message or a value, not code:
-    /// an argument of `PRINT`, `RAISERROR`, `THROW`, `VALUES` or a `SELECT`
-    /// list item that is not an assignment.
+    /// Whether the literal at `start` is an argument of `PRINT`, `RAISERROR`
+    /// or `THROW`: a message, not code.
     fn in_message_context(&self, start: usize) -> bool {
-        let mut assigns = false;
         for j in (0..start).rev() {
             if self.is_punct(j, ';') || self.is_kw(j, "SET") {
                 return false;
             }
-            if self.is_punct(j, '=') {
-                assigns = true;
-            }
-            if self.is_any_kw(j, &["PRINT", "RAISERROR", "THROW", "VALUES"]) {
+            if self.is_any_kw(j, &["PRINT", "RAISERROR", "THROW"]) {
                 return true;
-            }
-            if self.is_kw(j, "SELECT") {
-                return !assigns;
             }
             if self.is_any_kw(j, OPENERS) {
                 return false;
@@ -1890,9 +1882,7 @@ mod tests {
         for sql in [
             "RAISERROR('Cannot delete order', 16, 1); EXEC(@sql)",
             "PRINT 'Drop old rows'; EXEC(@sql)",
-            "INSERT INTO m VALUES ('drop table requested'); EXEC(@sql)",
             "PRINT 'Update finished'; EXEC(@sql)",
-            "SELECT 'delete me' AS m; EXEC(@sql)",
             "DECLARE @s nvarchar(max) = N'DELETE FROM ' + QUOTENAME(@t) + N' WHERE Id = @id'; EXEC(@s)",
             "DECLARE @s nvarchar(max) = N'DELETE FROM dbo.Orders WHERE Id = @id'; EXEC(@s)",
         ] {
@@ -1965,5 +1955,17 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    #[test]
+    fn generators_of_commands_are_not_messages() {
+        for sql in [
+            "DECLARE c CURSOR FOR SELECT N'TRUNCATE TABLE ' + QUOTENAME(name) FROM sys.tables; DECLARE @cmd nvarchar(max); FETCH c INTO @cmd; EXEC(@cmd)",
+            "INSERT INTO @cmds (sql) SELECT N'DELETE FROM ' + QUOTENAME(name) FROM sys.tables; EXEC(@s)",
+            "INSERT INTO @cmds VALUES (N'DROP TABLE ' + QUOTENAME(@t)); EXEC(@s)",
+        ] {
+            assert!(!kinds(sql).is_empty(), "{sql}");
+        }
+        assert_eq!(kinds("THROW 50000, 'drop table x', 1; EXEC(@s)"), vec![]);
     }
 }
