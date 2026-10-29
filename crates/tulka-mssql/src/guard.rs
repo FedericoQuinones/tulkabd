@@ -1876,7 +1876,6 @@ mod tests {
 
     #[test]
     fn dynamic_sql_built_in_pieces_is_reported_and_prose_is_not() {
-        use GuardKind::*;
         for sql in [
             "DECLARE @sql nvarchar(max) = N'UPDATE ' + QUOTENAME(@t) + N' SET col = NULL'; EXEC(@sql)",
             "DECLARE @sql nvarchar(max) = N'UPDATE dbo.Orders' + CHAR(13) + CHAR(10) + N'SET Total = 0'; EXEC(@sql)",
@@ -1934,7 +1933,6 @@ mod tests {
 
     #[test]
     fn an_alias_of_a_temporary_table_is_temporary() {
-        use GuardKind::*;
         for sql in [
             "DELETE t FROM #t t JOIN #u u ON t.id = u.id",
             "UPDATE t SET x = 1 FROM #t t JOIN #s s ON t.id = s.id",
