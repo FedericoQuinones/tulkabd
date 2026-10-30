@@ -2,22 +2,31 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use rusqlite::{params, Connection, ErrorCode};
+use rusqlite::{params, Connection, ErrorCode, Row};
 use serde::{Deserialize, Serialize};
 
 use crate::private_file;
 
-/// Bump when the table layout changes; a mismatching file is discarded.
+/// Bump when the table layout changes incompatibly; a mismatching file is
+/// discarded by the app. Columns added later are migrated in place and do not
+/// change this number.
 const RUNLOG_VERSION: i64 = 1;
 
-/// How long a call waits on a file locked by another process.
+/// How long the app waits on a file locked by another process.
 const BUSY_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// How long another process (the MCP server) waits on a busy file before it
+/// gives up on one write.
+const SHARED_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Longest statement text kept per entry, in bytes.
 pub const MAX_LOGGED_SQL_BYTES: usize = 100 * 1024;
 
+/// Longest client name kept per entry, in chars.
+const MAX_CLIENT_CHARS: usize = 100;
+
 const SCHEMA: &str = "
-CREATE TABLE run (
+CREATE TABLE IF NOT EXISTS run (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     at_ms INTEGER NOT NULL,
     connection_id TEXT NOT NULL,
@@ -28,10 +37,16 @@ CREATE TABLE run (
     sql_truncated INTEGER NOT NULL,
     outcome TEXT NOT NULL,
     rows INTEGER,
-    elapsed_ms INTEGER
+    elapsed_ms INTEGER,
+    source TEXT NOT NULL DEFAULT 'app',
+    client TEXT
 );
-CREATE INDEX run_at_ms ON run (at_ms);
+CREATE INDEX IF NOT EXISTS run_at_ms ON run (at_ms);
 ";
+
+/// Columns of the run table, in the order `entry_from_row` reads them.
+const COLUMNS: &str = "id, at_ms, connection_id, connection_name, color, database, sql,
+                    sql_truncated, outcome, rows, elapsed_ms, source, client";
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +81,33 @@ impl RunLogOutcome {
     }
 }
 
+/// Who ran a statement: the user in the app, or an AI client through the
+/// MCP server. Stored as `app` / `ai`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RunSource {
+    #[default]
+    App,
+    Ai,
+}
+
+impl RunSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            RunSource::App => "app",
+            RunSource::Ai => "ai",
+        }
+    }
+
+    /// Anything unknown reads as `App`, the only source older versions wrote.
+    fn parse(s: &str) -> RunSource {
+        match s {
+            "ai" => RunSource::Ai,
+            _ => RunSource::App,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunLogEntry {
@@ -85,6 +127,10 @@ pub struct RunLogEntry {
     pub rows: Option<u64>,
     /// `None` for a blocked statement and for a cancelled confirmation.
     pub elapsed_ms: Option<u64>,
+    #[serde(default)]
+    pub source: RunSource,
+    /// Name of the MCP client that ran it, at most 100 chars.
+    pub client: Option<String>,
 }
 
 /// A run to record; the store assigns the id and applies the size cap.
@@ -99,6 +145,9 @@ pub struct NewRun {
     pub outcome: RunLogOutcome,
     pub rows: Option<u64>,
     pub elapsed_ms: Option<u64>,
+    pub source: RunSource,
+    /// Name of the MCP client; cut to 100 chars when stored.
+    pub client: Option<String>,
 }
 
 /// Local history of executed statements in its own SQLite file. It keeps
@@ -109,7 +158,8 @@ pub struct RunLogStore {
 
 /// Why the run log file could not be opened.
 enum OpenError {
-    /// Not a database, corrupt, or another layout: the file can be replaced.
+    /// Not a database, corrupt, or another layout: the app may replace the
+    /// file; any other process must leave it alone.
     Unusable,
     /// Locked by another process, unreadable, or an I/O error: the file may
     /// hold the user's history and must be kept.
@@ -125,40 +175,85 @@ impl From<rusqlite::Error> for OpenError {
     }
 }
 
-fn try_open(path: &Path) -> Result<Connection, OpenError> {
+/// `<data dir>/runlog.db`, if the platform has a data dir.
+fn default_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("dev", "tulkabd", "tulkabd")
+        .map(|dirs| dirs.data_dir().join("runlog.db"))
+}
+
+/// Opens `path` (creating it if missing) and brings it to the current layout.
+/// Shared by the app and the MCP server; neither the layout check nor the
+/// connection setup deletes anything.
+fn open_connection(path: &Path, busy_timeout: Duration) -> Result<Connection, OpenError> {
     private_file::create_private(path).map_err(|_| OpenError::Unavailable)?;
     private_file::restrict_permissions(path);
     let conn = Connection::open(path)?;
-    // A file locked by another instance costs startup at most this long.
-    conn.busy_timeout(BUSY_TIMEOUT)?;
-    // The first read fails with "not a database" on garbage files.
-    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
-    if version == RUNLOG_VERSION {
-        let run: i64 = conn.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'run'",
-            [],
-            |r| r.get(0),
-        )?;
-        if run != 1 {
-            return Err(OpenError::Unusable);
-        }
-    } else if version != 0 || tables != 0 {
-        return Err(OpenError::Unusable);
-    } else {
-        init(&conn)?;
-    }
-    // `journal_mode` returns a row, so it cannot go through `pragma_update`.
-    let _ = conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()));
-    // Deleted statement text is overwritten, not left in free pages.
-    conn.pragma_update(None, "secure_delete", "ON")?;
+    // A file locked by another process costs a call at most this long.
+    conn.busy_timeout(busy_timeout)?;
+    ensure_schema(&conn)?;
+    configure(&conn)?;
     private_file::restrict_permissions(path);
     Ok(conn)
 }
 
-fn init(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)?;
-    conn.pragma_update(None, "user_version", RUNLOG_VERSION)
+fn try_open(path: &Path) -> Result<Connection, OpenError> {
+    open_connection(path, BUSY_TIMEOUT)
+}
+
+fn configure(conn: &Connection) -> rusqlite::Result<()> {
+    // `journal_mode` returns a row, so it cannot go through `pragma_update`.
+    let _ = conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()));
+    // Deleted statement text is overwritten, not left in free pages.
+    conn.pragma_update(None, "secure_delete", "ON")
+}
+
+/// Creates the table in an empty file, or adds the columns an older layout
+/// lacks. Runs in one `BEGIN IMMEDIATE` so two processes opening the same
+/// file at once cannot both alter it. Anything else is `Unusable`.
+fn ensure_schema(conn: &Connection) -> Result<(), OpenError> {
+    // The first statement fails with "not a database" on garbage files.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    match migrate(conn) {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+fn migrate(conn: &Connection) -> Result<(), OpenError> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
+    if version == 0 && tables == 0 {
+        conn.execute_batch(SCHEMA)?;
+        conn.pragma_update(None, "user_version", RUNLOG_VERSION)?;
+        return Ok(());
+    }
+    if version != RUNLOG_VERSION {
+        return Err(OpenError::Unusable);
+    }
+    let mut columns = Vec::new();
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(run)")?;
+        let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for name in names {
+            columns.push(name?);
+        }
+    }
+    if columns.is_empty() {
+        return Err(OpenError::Unusable);
+    }
+    if !columns.iter().any(|c| c == "source") {
+        conn.execute_batch("ALTER TABLE run ADD COLUMN source TEXT NOT NULL DEFAULT 'app'")?;
+    }
+    if !columns.iter().any(|c| c == "client") {
+        conn.execute_batch("ALTER TABLE run ADD COLUMN client TEXT")?;
+    }
+    Ok(())
 }
 
 fn remove_files(path: &Path) {
@@ -188,17 +283,98 @@ fn cap_sql(sql: &str) -> (&str, bool) {
     (&sql[..end], true)
 }
 
+/// Writes one run, cutting its text and client name to their caps.
+fn insert_run(conn: &Connection, run: &NewRun) -> Result<RunLogEntry, String> {
+    let (sql, sql_truncated) = cap_sql(&run.sql);
+    let client: Option<String> = run
+        .client
+        .as_ref()
+        .map(|c| c.chars().take(MAX_CLIENT_CHARS).collect());
+    conn.execute(
+        "INSERT INTO run (at_ms, connection_id, connection_name, color, database, sql,
+                          sql_truncated, outcome, rows, elapsed_ms, source, client)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            run.at_ms,
+            run.connection_id,
+            run.connection_name,
+            run.color,
+            run.database,
+            sql,
+            sql_truncated,
+            run.outcome.as_str(),
+            run.rows.map(|n| n as i64),
+            run.elapsed_ms.map(|n| n as i64),
+            run.source.as_str(),
+            client,
+        ],
+    )
+    .map_err(|e| format!("could not record the run: {e}"))?;
+    Ok(RunLogEntry {
+        id: conn.last_insert_rowid(),
+        at_ms: run.at_ms,
+        connection_id: run.connection_id.clone(),
+        connection_name: run.connection_name.clone(),
+        color: run.color.clone(),
+        database: run.database.clone(),
+        sql: sql.to_string(),
+        sql_truncated,
+        outcome: run.outcome,
+        rows: run.rows,
+        elapsed_ms: run.elapsed_ms,
+        source: run.source,
+        client,
+    })
+}
+
+/// Reads a row selected with `COLUMNS`.
+fn entry_from_row(r: &Row) -> rusqlite::Result<RunLogEntry> {
+    let outcome: String = r.get(8)?;
+    let source: String = r.get(11)?;
+    Ok(RunLogEntry {
+        id: r.get(0)?,
+        at_ms: r.get(1)?,
+        connection_id: r.get(2)?,
+        connection_name: r.get(3)?,
+        color: r.get(4)?,
+        database: r.get(5)?,
+        sql: r.get(6)?,
+        sql_truncated: r.get(7)?,
+        outcome: RunLogOutcome::parse(&outcome).unwrap_or(RunLogOutcome::Error),
+        rows: r.get::<_, Option<i64>>(9)?.map(|n| n as u64),
+        elapsed_ms: r.get::<_, Option<i64>>(10)?.map(|n| n as u64),
+        source: RunSource::parse(&source),
+        client: r.get(12)?,
+    })
+}
+
+/// Newest first; a read error yields an empty or shorter list by design.
+fn list_entries(conn: &Connection, before: Option<i64>, limit: u32) -> Vec<RunLogEntry> {
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM run WHERE id < ?1 ORDER BY id DESC LIMIT ?2"
+    )) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map(params![before.unwrap_or(i64::MAX), limit], entry_from_row);
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 impl RunLogStore {
     /// Never fails. A file that is not a valid database or has another
     /// `user_version` is deleted (with its `-wal`/`-shm` sidecars) and starts
     /// empty. A file that cannot be opened right now (locked by another
-    /// instance, unreadable, an I/O error) is kept untouched and the log
+    /// process, unreadable, an I/O error) is kept untouched and the log
     /// lives in memory. The file is private to its owner on Unix.
     pub fn open(path: &Path) -> RunLogStore {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         let conn = match try_open(path) {
+            // Only a file known to be unusable is replaced; a busy or
+            // locked one belongs to another process and stays.
             Err(OpenError::Unusable) => {
                 remove_files(path);
                 try_open(path)
@@ -215,10 +391,12 @@ impl RunLogStore {
 
     /// `<data dir>/runlog.db`; in memory when there is no data dir.
     pub fn open_default() -> RunLogStore {
-        match directories::ProjectDirs::from("dev", "tulkabd", "tulkabd") {
-            Some(dirs) => {
-                private_file::ensure_private_dir(dirs.data_dir());
-                Self::open(&dirs.data_dir().join("runlog.db"))
+        match default_path() {
+            Some(path) => {
+                if let Some(dir) = path.parent() {
+                    private_file::ensure_private_dir(dir);
+                }
+                Self::open(&path)
             }
             None => Self::in_memory(),
         }
@@ -226,7 +404,9 @@ impl RunLogStore {
 
     pub fn in_memory() -> RunLogStore {
         let conn = Connection::open_in_memory().expect("in-memory SQLite is always available");
-        init(&conn).expect("schema is valid");
+        if ensure_schema(&conn).is_err() {
+            panic!("schema is valid");
+        }
         let _ = conn.pragma_update(None, "secure_delete", "ON");
         RunLogStore {
             conn: Mutex::new(conn),
@@ -239,73 +419,43 @@ impl RunLogStore {
 
     /// Records a run, cutting its text to `MAX_LOGGED_SQL_BYTES`.
     pub fn insert(&self, run: &NewRun) -> Result<RunLogEntry, String> {
-        let (sql, sql_truncated) = cap_sql(&run.sql);
-        let conn = self.lock();
-        conn.execute(
-            "INSERT INTO run (at_ms, connection_id, connection_name, color, database, sql,
-                              sql_truncated, outcome, rows, elapsed_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                run.at_ms,
-                run.connection_id,
-                run.connection_name,
-                run.color,
-                run.database,
-                sql,
-                sql_truncated,
-                run.outcome.as_str(),
-                run.rows.map(|n| n as i64),
-                run.elapsed_ms.map(|n| n as i64),
-            ],
-        )
-        .map_err(|e| format!("could not record the run: {e}"))?;
-        Ok(RunLogEntry {
-            id: conn.last_insert_rowid(),
-            at_ms: run.at_ms,
-            connection_id: run.connection_id.clone(),
-            connection_name: run.connection_name.clone(),
-            color: run.color.clone(),
-            database: run.database.clone(),
-            sql: sql.to_string(),
-            sql_truncated,
-            outcome: run.outcome,
-            rows: run.rows,
-            elapsed_ms: run.elapsed_ms,
-        })
+        insert_run(&self.lock(), run)
     }
 
     /// Newest first; `before` is an id to page backwards. A read error yields
     /// an empty or shorter list by design: the log is a convenience and must
     /// never get in the way of running a query.
     pub fn list(&self, before: Option<i64>, limit: u32) -> Vec<RunLogEntry> {
+        list_entries(&self.lock(), before, limit)
+    }
+
+    /// Entries with `id > after`, oldest first, optionally of one source.
+    pub fn list_after(
+        &self,
+        after: i64,
+        source: Option<RunSource>,
+        limit: u32,
+    ) -> Vec<RunLogEntry> {
         let conn = self.lock();
-        let Ok(mut stmt) = conn.prepare(
-            "SELECT id, at_ms, connection_id, connection_name, color, database, sql,
-                    sql_truncated, outcome, rows, elapsed_ms
-             FROM run WHERE id < ?1 ORDER BY id DESC LIMIT ?2",
-        ) else {
+        let Ok(mut stmt) = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM run
+             WHERE id > ?1 AND (?2 IS NULL OR source = ?2) ORDER BY id LIMIT ?3"
+        )) else {
             return Vec::new();
         };
-        let rows = stmt.query_map(params![before.unwrap_or(i64::MAX), limit], |r| {
-            let outcome: String = r.get(8)?;
-            Ok(RunLogEntry {
-                id: r.get(0)?,
-                at_ms: r.get(1)?,
-                connection_id: r.get(2)?,
-                connection_name: r.get(3)?,
-                color: r.get(4)?,
-                database: r.get(5)?,
-                sql: r.get(6)?,
-                sql_truncated: r.get(7)?,
-                outcome: RunLogOutcome::parse(&outcome).unwrap_or(RunLogOutcome::Error),
-                rows: r.get::<_, Option<i64>>(9)?.map(|n| n as u64),
-                elapsed_ms: r.get::<_, Option<i64>>(10)?.map(|n| n as u64),
-            })
-        });
+        let source = source.map(RunSource::as_str);
+        let rows = stmt.query_map(params![after, source, limit], entry_from_row);
         match rows {
             Ok(rows) => rows.filter_map(Result::ok).collect(),
             Err(_) => Vec::new(),
         }
+    }
+
+    /// Highest id ever stored and still present; 0 when the log is empty.
+    pub fn max_id(&self) -> i64 {
+        self.lock()
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM run", [], |r| r.get(0))
+            .unwrap_or(0)
     }
 
     /// Deletes entries recorded before `older_than_ms`; returns how many.
@@ -331,6 +481,86 @@ impl RunLogStore {
     }
 }
 
+/// The run log as written by a process other than the app (the MCP server).
+/// It opens lazily, waits up to 2 s on a busy file, creates the file only if
+/// it is missing, adds missing columns, and never deletes or replaces it: a
+/// file with an unknown layout is reported and left as it is.
+pub struct SharedRunLog {
+    /// `None` for an in-memory log.
+    path: Option<PathBuf>,
+    conn: Mutex<Option<Connection>>,
+}
+
+impl SharedRunLog {
+    pub fn open(path: &Path) -> SharedRunLog {
+        SharedRunLog {
+            path: Some(path.to_path_buf()),
+            conn: Mutex::new(None),
+        }
+    }
+
+    /// `<data dir>/runlog.db`, like [`RunLogStore::open_default`]; in memory
+    /// when there is no data dir.
+    pub fn open_default() -> SharedRunLog {
+        match default_path() {
+            Some(path) => {
+                if let Some(dir) = path.parent() {
+                    private_file::ensure_private_dir(dir);
+                }
+                Self::open(&path)
+            }
+            None => Self::in_memory(),
+        }
+    }
+
+    pub fn in_memory() -> SharedRunLog {
+        let conn = Connection::open_in_memory().expect("in-memory SQLite is always available");
+        if ensure_schema(&conn).is_err() {
+            panic!("schema is valid");
+        }
+        SharedRunLog {
+            path: None,
+            conn: Mutex::new(Some(conn)),
+        }
+    }
+
+    /// Runs `f` on the connection, opening it first when needed. An open that
+    /// fails is retried by the next call.
+    fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
+        let mut guard = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            let path = self.path.as_deref().ok_or("the run log is not available")?;
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match open_connection(path, SHARED_BUSY_TIMEOUT) {
+                Ok(conn) => *guard = Some(conn),
+                Err(OpenError::Unusable) => {
+                    return Err("the run log file has an unknown layout".to_string())
+                }
+                Err(OpenError::Unavailable) => {
+                    return Err("could not open the run log file".to_string())
+                }
+            }
+        }
+        match guard.as_ref() {
+            Some(conn) => f(conn),
+            None => Err("the run log is not available".to_string()),
+        }
+    }
+
+    /// Records a run, cutting its text to `MAX_LOGGED_SQL_BYTES`.
+    pub fn insert(&self, run: &NewRun) -> Result<RunLogEntry, String> {
+        self.with_conn(|conn| insert_run(conn, run))
+    }
+
+    /// Newest first; empty when the file cannot be read. For tests.
+    pub fn list(&self, before: Option<i64>, limit: u32) -> Vec<RunLogEntry> {
+        self.with_conn(|conn| Ok(list_entries(conn, before, limit)))
+            .unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +576,8 @@ mod tests {
             outcome: RunLogOutcome::Ok,
             rows: Some(3),
             elapsed_ms: Some(12),
+            source: RunSource::App,
+            client: None,
         }
     }
 
@@ -648,5 +880,242 @@ mod tests {
             serde_json::to_string(&RunLogOutcome::Cancelled).unwrap(),
             "\"cancelled\""
         );
+    }
+
+    /// The layout written before `source` and `client` existed.
+    const OLD_SCHEMA: &str = "
+        CREATE TABLE run (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            at_ms INTEGER NOT NULL,
+            connection_id TEXT NOT NULL,
+            connection_name TEXT NOT NULL,
+            color TEXT NOT NULL,
+            database TEXT NOT NULL,
+            sql TEXT NOT NULL,
+            sql_truncated INTEGER NOT NULL,
+            outcome TEXT NOT NULL,
+            rows INTEGER,
+            elapsed_ms INTEGER
+        );
+        CREATE INDEX run_at_ms ON run (at_ms);
+        PRAGMA user_version = 1;";
+
+    const OLD_INSERT: &str = "INSERT INTO run (at_ms, connection_id, connection_name, color,
+        database, sql, sql_truncated, outcome, rows, elapsed_ms)
+        VALUES (1, 'c', 'C', '#000', 'd', ?1, 0, 'ok', NULL, NULL)";
+
+    fn old_file(path: &Path) {
+        let raw = Connection::open(path).unwrap();
+        raw.execute_batch(OLD_SCHEMA).unwrap();
+        raw.execute(OLD_INSERT, ["old row"]).unwrap();
+    }
+
+    #[test]
+    fn plan4_file_gets_the_new_columns_and_keeps_its_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        old_file(&path);
+        let store = RunLogStore::open(&path);
+        let list = store.list(None, 10);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].sql, "old row");
+        assert_eq!(list[0].source, RunSource::App);
+        assert_eq!(list[0].client, None);
+    }
+
+    #[test]
+    fn old_layout_insert_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        old_file(&path);
+        drop(RunLogStore::open(&path));
+        // What an older tulkabd does after the migration.
+        let raw = Connection::open(&path).unwrap();
+        raw.execute(OLD_INSERT, ["from old"]).unwrap();
+        drop(raw);
+        let list = RunLogStore::open(&path).list(None, 10);
+        assert_eq!(list[0].sql, "from old");
+        assert_eq!(list[0].source, RunSource::App);
+    }
+
+    #[test]
+    fn source_and_client_round_trip() {
+        let store = RunLogStore::in_memory();
+        let mut r = run("select 1", 1);
+        r.source = RunSource::Ai;
+        r.client = Some("claude-code".into());
+        let e = store.insert(&r).unwrap();
+        assert_eq!(
+            (e.source, e.client.as_deref()),
+            (RunSource::Ai, Some("claude-code"))
+        );
+        assert_eq!(store.list(None, 1)[0], e);
+        let mut long = run("select 2", 2);
+        long.client = Some("ñ".repeat(150));
+        let e = store.insert(&long).unwrap();
+        assert_eq!(e.client.unwrap().chars().count(), 100);
+        assert_eq!(serde_json::to_string(&RunSource::Ai).unwrap(), "\"ai\"");
+    }
+
+    #[test]
+    fn list_after_filters_by_source_oldest_first() {
+        let store = RunLogStore::in_memory();
+        let a = store.insert(&run("app1", 1)).unwrap();
+        let mut ai = run("ai1", 2);
+        ai.source = RunSource::Ai;
+        let b = store.insert(&ai).unwrap();
+        store.insert(&run("app2", 3)).unwrap();
+        ai.sql = "ai2".into();
+        let d = store.insert(&ai).unwrap();
+        let sqls = |v: Vec<RunLogEntry>| v.into_iter().map(|e| e.sql).collect::<Vec<_>>();
+        assert_eq!(
+            sqls(store.list_after(0, Some(RunSource::Ai), 10)),
+            ["ai1", "ai2"]
+        );
+        assert_eq!(
+            sqls(store.list_after(b.id, Some(RunSource::Ai), 10)),
+            ["ai2"]
+        );
+        assert_eq!(
+            sqls(store.list_after(a.id, None, 10)),
+            ["ai1", "app2", "ai2"]
+        );
+        assert_eq!(sqls(store.list_after(0, None, 2)), ["app1", "ai1"]);
+        assert!(store.list_after(d.id, None, 10).is_empty());
+    }
+
+    #[test]
+    fn max_id_of_empty_is_zero() {
+        let store = RunLogStore::in_memory();
+        assert_eq!(store.max_id(), 0);
+        let e = store.insert(&run("x", 1)).unwrap();
+        assert_eq!(store.max_id(), e.id);
+    }
+
+    #[test]
+    fn in_memory_and_file_stores_share_the_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let columns = |store: &RunLogStore| -> Vec<String> {
+            let conn = store.lock();
+            let mut st = conn.prepare("PRAGMA table_info(run)").unwrap();
+            let rows = st.query_map([], |r| r.get(1)).unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        let file = RunLogStore::open(&dir.path().join("r.db"));
+        assert_eq!(columns(&file), columns(&RunLogStore::in_memory()));
+    }
+
+    #[test]
+    fn shared_never_deletes_an_unknown_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        {
+            let raw = Connection::open(&path).unwrap();
+            raw.execute_batch(
+                "CREATE TABLE other (x TEXT); INSERT INTO other VALUES ('keep me');
+                 PRAGMA user_version = 7;",
+            )
+            .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let shared = SharedRunLog::open(&path);
+        let err = shared.insert(&run("x", 1)).unwrap_err();
+        assert_eq!(err, "the run log file has an unknown layout");
+        assert!(shared.list(None, 10).is_empty());
+        drop(shared);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn shared_never_deletes_a_garbage_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        std::fs::write(&path, vec![0x42u8; 4096]).unwrap();
+        let shared = SharedRunLog::open(&path);
+        assert!(shared.insert(&run("x", 1)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), vec![0x42u8; 4096]);
+    }
+
+    #[test]
+    fn shared_creates_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("r.db");
+        let shared = SharedRunLog::open(&path);
+        let mut r = run("select 1", 1);
+        r.source = RunSource::Ai;
+        shared.insert(&r).unwrap();
+        assert!(path.exists());
+        // The app reads what the other process wrote.
+        let seen = RunLogStore::open(&path).list(None, 10);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].source, RunSource::Ai);
+    }
+
+    #[test]
+    fn shared_adds_the_columns_to_an_old_file_and_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        old_file(&path);
+        let shared = SharedRunLog::open(&path);
+        shared.insert(&run("new", 2)).unwrap();
+        let sqls: Vec<_> = shared.list(None, 10).into_iter().map(|e| e.sql).collect();
+        assert_eq!(sqls, ["new", "old row"]);
+    }
+
+    #[test]
+    fn shared_retries_after_a_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        RunLogStore::open(&path).insert(&run("text", 1)).unwrap();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let other = Connection::open(&path).unwrap();
+                other
+                    .pragma_update(None, "locking_mode", "EXCLUSIVE")
+                    .unwrap();
+                other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+                locked_tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_secs(3));
+                other.execute_batch("ROLLBACK").unwrap();
+            })
+        };
+        locked_rx.recv().unwrap();
+        let shared = SharedRunLog::open(&path);
+        let start = std::time::Instant::now();
+        assert!(shared.insert(&run("during", 2)).is_err());
+        assert!(start.elapsed() >= SHARED_BUSY_TIMEOUT - Duration::from_millis(200));
+        holder.join().unwrap();
+        shared.insert(&run("after", 3)).unwrap();
+        let sqls: Vec<_> = shared.list(None, 10).into_iter().map(|e| e.sql).collect();
+        assert_eq!(sqls, ["after", "text"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        let shared = SharedRunLog::open(&path);
+        shared.insert(&run("x", 1)).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        for suffix in ["-wal", "-shm"] {
+            let mut s = path.as_os_str().to_owned();
+            s.push(suffix);
+            let side = PathBuf::from(s);
+            if side.exists() {
+                assert_eq!(mode(&side), 0o600, "{suffix}");
+            }
+        }
+    }
+
+    #[test]
+    fn shared_in_memory_works() {
+        let shared = SharedRunLog::in_memory();
+        shared.insert(&run("x", 1)).unwrap();
+        assert_eq!(shared.list(None, 10).len(), 1);
     }
 }

@@ -4,7 +4,7 @@
 //! the log never fails the run it describes.
 
 use chrono::Utc;
-use tulka_store::{NewRun, RunLogEntry, RunLogOutcome};
+use tulka_store::{NewRun, RunLogEntry, RunLogOutcome, RunSource};
 
 use crate::connections::blocking;
 use crate::query::no_session;
@@ -61,6 +61,8 @@ pub(crate) async fn record(
         outcome,
         rows,
         elapsed_ms,
+        source: RunSource::App,
+        client: None,
     };
     let store = state.runlog.clone();
     if let Ok(Ok(entry)) = blocking(move || store.insert(&run)).await {
