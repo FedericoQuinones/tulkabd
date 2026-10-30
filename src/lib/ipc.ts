@@ -81,10 +81,22 @@ export interface SessionInfo {
   databases: string[];
   currentDatabase: string;
 }
+export type GuardKind = "updateWithoutWhere" | "deleteWithoutWhere" | "drop" | "truncate" | "unparsed";
+export interface GuardFinding {
+  kind: GuardKind;
+  /** The target as written, e.g. `dbo.Pedidos`; `null` when unknown. */
+  object: string | null;
+  /** The statement text, trimmed, at most 400 chars plus an ellipsis. */
+  statement: string;
+  /** 0-based line of the statement start, relative to the text sent (the selection, if one was run). */
+  line: number;
+}
 export interface RunSummary {
   elapsedMs: number;
   finishedAt: string;
-  outcome: "ok" | "error" | "cancelled" | "disconnected";
+  outcome: "ok" | "error" | "cancelled" | "disconnected" | "blocked" | "needsConfirmation";
+  /** The dangerous statements found; empty unless the outcome is `blocked` or `needsConfirmation`. */
+  findings: GuardFinding[];
 }
 export type Selection =
   | { kind: "all" }
@@ -224,7 +236,28 @@ export type ExplorerStatus = "connecting" | "connected" | "disconnected" | "erro
 export type AppEvent =
   | { kind: "explorerStatus"; connectionId: string; status: ExplorerStatus; message: string | null }
   | { kind: "indexProgress"; connectionId: string; database: string; done: boolean; noAccess: boolean }
-  | { kind: "indexIdle"; connectionId: string };
+  | { kind: "indexIdle"; connectionId: string }
+  | { kind: "runLogged"; entry: RunLogEntry };
+
+export type RunLogOutcome = "ok" | "error" | "cancelled" | "blocked" | "disconnected";
+/** One statement run, with where it ran when it ran. Text only: never passwords or rows. */
+export interface RunLogEntry {
+  id: number;
+  /** Unix milliseconds, UTC. */
+  atMs: number;
+  connectionId: string;
+  connectionName: string;
+  color: string;
+  database: string;
+  /** At most 100 KB. */
+  sql: string;
+  sqlTruncated: boolean;
+  outcome: RunLogOutcome;
+  /** Rows received, else rows affected; null when neither applies. */
+  rows: number | null;
+  /** Null for a blocked statement and for a cancelled confirmation. */
+  elapsedMs: number | null;
+}
 
 /**
  * Command errors arrive as plain strings. Sentinels: `"password_required"`, `"disconnected"`,
@@ -255,11 +288,43 @@ export const openSession = (tabId: string, connectionId: string, database?: stri
 export const useDatabase = (tabId: string, database: string) =>
   invoke<void>("use_database", { tabId, database });
 
-export const runQuery = (tabId: string, sql: string, onEvent: (e: UiEvent) => void) => {
+/**
+ * Runs a script. The backend applies the connection's guard before anything is sent:
+ * a `blocked` or `needsConfirmation` outcome still resolves with a `RunSummary`
+ * (its `findings` list the flagged statements, `elapsedMs` is 0) and nothing ran.
+ * Send the same script again with `confirmed = true` to go ahead after
+ * `needsConfirmation`; `confirmed` never overrides `blocked`.
+ */
+export const runQuery = (tabId: string, sql: string, confirmed: boolean, onEvent: (e: UiEvent) => void) => {
   const channel = new Channel<UiEvent>();
   channel.onmessage = onEvent;
-  return invoke<RunSummary>("run_query", { tabId, sql, onEvent: channel });
+  return invoke<RunSummary>("run_query", { tabId, sql, confirmed, onEvent: channel });
 };
+
+/** Switches a connection's guard off (or back on) until the app closes. */
+export const setGuardOffForSession = (connectionId: string, off: boolean) =>
+  invoke<void>("set_guard_off_for_session", { connectionId, off });
+
+/**
+ * Saves a connection's guard level; resolves with the previous level (for undo).
+ * Rejects with `not_found` for an unknown connection, or with the read-only config
+ * error when the connections file could not be read at startup.
+ */
+export const setConnectionGuard = (connectionId: string, level: GuardLevel) =>
+  invoke<GuardLevel>("set_connection_guard", { connectionId, level });
+
+/** Ids of the connections whose guard is off until the app closes. */
+export const guardOffForSession = () => invoke<string[]>("guard_off_for_session");
+
+/** Run log entries, newest first. `before` is an entry id to page backwards; `limit` is capped at 500. */
+export const listRunLog = (before: number | null, limit: number) =>
+  invoke<RunLogEntry[]>("list_run_log", { before, limit });
+
+export const clearRunLog = () => invoke<void>("clear_run_log");
+
+/** Records that the user cancelled the confirmation of `sql` on the tab. */
+export const logCancelledRun = (tabId: string, sql: string) =>
+  invoke<void>("log_cancelled_run", { tabId, sql });
 
 export const cancelQuery = (tabId: string) => invoke<void>("cancel_query", { tabId });
 
@@ -288,6 +353,12 @@ export const copyResults = (
 
 export const closeSession = (tabId: string) => invoke<void>("close_session", { tabId });
 
+/** Open transactions on the tab's session; 0 without one. Rejects with "busy" while it runs, "disconnected" when lost. */
+export const transactionCount = (tabId: string) => invoke<number>("transaction_count", { tabId });
+
+/** Commits or rolls back every open transaction of the tab's session. */
+export const endTransactions = (tabId: string, commit: boolean) => invoke<void>("end_transactions", { tabId, commit });
+
 /** Why the connections file could not be read at startup (the app is then read-only for connections), if it could not. */
 export const startupError = () => invoke<string | null>("startup_error");
 
@@ -304,12 +375,35 @@ export const moveFolder = (id: string, parentId: string | null) =>
 export const listExpanded = () => invoke<string[]>("list_expanded");
 /** Replaces the set of expanded folder and connection ids. */
 export const setExpanded = (ids: string[]) => invoke<void>("set_expanded", { ids });
-/** Interface preferences kept in `config.json`. */
+/** How "Copy" writes numbers: with the system's decimal separator or always with a dot. */
+export type NumberFormat = "system" | "invariant";
+/** What a new connection of an environment starts with. */
+export interface EnvironmentStyle {
+  /** `#rrggbb`. */
+  color: string;
+  guard: GuardLevel;
+}
+/** Preferences kept in `config.json`; the backend brings every value into its range. */
 export interface Preferences {
   /** Zoom of the editor and the result grid, in percent (70 to 200). */
   zoom: number;
+  /** Editor and grid font size at 100 % zoom, in pixels (10 to 24). */
+  fontSize: number;
+  /** Whether the tabs of the last session are reopened at startup. */
+  restoreSession: boolean;
+  /** Rows kept per result set (1,000 to 1,000,000). */
+  maxRows: number;
+  /** Seconds after which a running query is cancelled; 0 is no limit (max 86,400). */
+  queryTimeoutS: number;
+  copyNumbers: NumberFormat;
+  /** Days the run log keeps its entries (1 to 365). */
+  runLogDays: number;
+  /** Color and guard level new connections start with. */
+  environments: Record<Environment, EnvironmentStyle>;
 }
 export const getPreferences = () => invoke<Preferences>("get_preferences");
+/** Stores all preferences; resolves to what was kept, brought into range. */
+export const setPreferences = (prefs: Preferences) => invoke<Preferences>("set_preferences", { prefs });
 /** Stores the zoom (percent); resolves to the value kept, brought into 70 to 200. */
 export const setZoom = (zoom: number) => invoke<number>("set_zoom", { zoom });
 /**
@@ -390,11 +484,6 @@ export interface OpenedFile {
  */
 export const pickSqlFiles = (filterName: string) => invoke<string[]>("pick_sql_files", { filterName });
 /**
- * Lets the backend read and write `.sql` paths dropped on the window or restored with the session.
- * It accepts any absolute `.sql` path: the allowed list is advisory, not a security boundary.
- */
-export const allowDroppedPaths = (paths: string[]) => invoke<void>("allow_dropped_paths", { paths });
-/**
  * For each path, whether the backend allows it and its file still exists: `false` when it is not
  * allowed or not there, `null` when it could not be checked (no permission, an I/O error). Rejects
  * only when the check could not run at all.
@@ -409,6 +498,13 @@ export const readSqlFile = (path: string) => invoke<OpenedFile>("read_sql_file",
 export const writeSqlFile = (path: string, text: string, encoding: FileEncoding, lineEnding: LineEnding) =>
   invoke<void>("write_sql_file", { path, text, encoding, lineEnding });
 
+/**
+ * `.sql` files the user dropped on the window. The backend has already allowed them (it reads the
+ * native drop itself); the UI cannot allow a path, only open what arrives here.
+ */
+export const onSqlFilesDropped = (cb: (paths: string[]) => void): Promise<UnlistenFn> =>
+  listen<string[]>("sql-files-dropped", (ev) => cb(ev.payload));
+
 /** Subscribes to the explorer and indexing events. Call the returned function to stop. */
 export const onAppEvent = (cb: (e: AppEvent) => void): Promise<UnlistenFn> =>
   listen<AppEvent>("app-event", (ev) => cb(ev.payload));
@@ -418,3 +514,19 @@ export const loadSession = () => invoke<string | null>("load_session");
 
 /** Replaces the saved workspace session. Works even when the connections file is read-only. */
 export const saveSession = (json: string) => invoke<void>("save_session", { json });
+
+/** Where tulkabd keeps its files (full paths; empty when the platform has no such folder). */
+export interface DataLocations {
+  configFile: string;
+  dataDir: string;
+  queriesDir: string;
+  cacheFile: string;
+  runLogFile: string;
+  sessionFile: string;
+}
+export const dataLocations = () => invoke<DataLocations>("data_locations");
+/** Shows the config file, the saved queries folder or the data folder in the system file manager. */
+export type DataLocationKey = "config" | "queries" | "data";
+export const revealDataLocation = (which: DataLocationKey) => invoke<void>("reveal_data_location", { which });
+/** Empties the metadata cache and the search index; connected servers are indexed again. */
+export const clearMetadataCache = () => invoke<void>("clear_metadata_cache");

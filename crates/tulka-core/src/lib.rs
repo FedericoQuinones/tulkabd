@@ -7,6 +7,7 @@ pub mod connstr;
 pub mod driver;
 pub mod error;
 pub mod export;
+pub mod guard;
 pub mod locale;
 pub mod meta;
 pub mod secrets;
@@ -14,7 +15,8 @@ pub mod value;
 
 pub use config::{
     clamp_zoom, AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope, Environment,
-    Folder, GuardLevel, Preferences,
+    EnvironmentDefaults, EnvironmentStyle, Folder, GuardLevel, NumberFormat, Preferences,
+    MAX_ROWS_DEFAULT,
 };
 pub use connstr::{
     format_connection_string, parse_connection_string, ConnStrError, ParsedConnection,
@@ -25,6 +27,7 @@ pub use driver::{
 };
 pub use error::DriverError;
 pub use export::{estimate_tokens, to_ai, to_excel_tsv};
+pub use guard::{GuardFinding, GuardKind};
 pub use locale::{decimal_separator_for, system_decimal_separator};
 pub use meta::{
     qualified, quote_ident, ColumnInfo, DatabaseSnapshot, DbObject, ForeignKey, IndexInfo,

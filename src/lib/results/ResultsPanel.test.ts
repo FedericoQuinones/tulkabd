@@ -13,6 +13,7 @@ import * as ipc from "../ipc";
 import type { Value } from "../ipc";
 import { PaneState } from "../pane/pane.svelte";
 import ResultsPanel from "./ResultsPanel.svelte";
+import { prefs } from "../settings/prefs.svelte";
 
 const int = (n: number): Value => ({ kind: "int", value: String(n) });
 const rows: Value[][] = [
@@ -325,4 +326,13 @@ test("the row counter is one live region that stays and only changes its text", 
   await settle();
   expect(document.querySelector('[aria-live="polite"]')).toBe(live);
   expect(live.textContent).toBe("");
+});
+
+test("the truncation notice names the limit the run used, not the current preference", () => {
+  prefs.value.maxRows = 500;
+  pane.runMaxRows = 1_000;
+  pane.results[0].truncated = true;
+  open();
+  expect(document.querySelector(".warn")?.textContent).toBe("Showing first 1,000 rows");
+  prefs.value.maxRows = 100_000;
 });

@@ -6,18 +6,17 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (cmd: string) => (cmd.startsWith("list_") ? [] : null)),
   Channel: class {},
 }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ onCloseRequested: vi.fn(async () => () => {}) }),
 }));
-type DropHandler = (e: { payload: { type: string; paths?: string[] } }) => void;
+type DropHandler = (e: { payload: string[] }) => void;
 const drop = vi.hoisted(() => ({ handler: null as DropHandler | null }));
-vi.mock("@tauri-apps/api/webview", () => ({
-  getCurrentWebview: () => ({
-    onDragDropEvent: vi.fn(async (h: DropHandler) => {
-      drop.handler = h;
-      return () => (drop.handler = null);
-    }),
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (name: string, h: DropHandler) => {
+    if (name === "sql-files-dropped") drop.handler = h;
+    return () => {
+      if (name === "sql-files-dropped") drop.handler = null;
+    };
   }),
 }));
 
@@ -25,7 +24,9 @@ import { invoke } from "@tauri-apps/api/core";
 import App from "./App.svelte";
 import type { ConnectionConfig } from "./lib/ipc";
 import { connections } from "./lib/connections/store.svelte";
-import { tabs } from "./lib/tabs/tabs.svelte";
+import { AUTOSAVE_MS, tabs } from "./lib/tabs/tabs.svelte";
+import { palette } from "./lib/palette/palette.svelte";
+import { DEFAULT_PREFERENCES, prefs } from "./lib/settings/prefs.svelte";
 
 let cmp: ReturnType<typeof mount> | undefined;
 beforeEach(() => {
@@ -60,6 +61,63 @@ test("the rail button hides the explorer and the workspace takes its column", ()
   flushSync();
   expect(document.querySelector("aside.explorer")).not.toBeNull();
   expect(cols.classList.contains("no-explorer")).toBe(false);
+});
+
+const gear = () => document.querySelector<HTMLButtonElement>('nav button[aria-label="Settings"]')!;
+
+test("the gear opens Settings in place of the workspace, and Escape returns with the focus on the gear", async () => {
+  await new Promise((r) => setTimeout(r, 0));
+  flushSync();
+  expect(gear().getAttribute("aria-pressed")).toBe("false");
+  expect(document.querySelector("h1")).toBeNull();
+
+  gear().click();
+  flushSync();
+  expect(document.querySelector("h1")?.textContent).toBe("Settings");
+  expect(gear().getAttribute("aria-pressed")).toBe("true");
+  // The rail stays, the tabs are kept (hidden), and nothing else changes.
+  expect(document.querySelector("nav.rail")).not.toBeNull();
+  expect(document.querySelector<HTMLElement>(".ws")!.hidden).toBe(true);
+
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  flushSync();
+  await new Promise((r) => setTimeout(r, 0));
+  expect(document.querySelector("h1")).toBeNull();
+  expect(document.querySelector<HTMLElement>(".ws")!.hidden).toBe(false);
+  expect(gear().getAttribute("aria-pressed")).toBe("false");
+  expect(document.activeElement).toBe(gear());
+
+  // The gear also closes it.
+  gear().click();
+  flushSync();
+  gear().click();
+  flushSync();
+  expect(document.querySelector("h1")).toBeNull();
+});
+
+test("with Settings open, the search icon closes it and opens the palette", async () => {
+  await new Promise((r) => setTimeout(r, 0));
+  gear().click();
+  flushSync();
+  document.querySelector<HTMLButtonElement>('nav button[aria-label="Search objects"]')!.click();
+  flushSync();
+  await new Promise((r) => setTimeout(r, 0));
+  expect(document.querySelector("h1")).toBeNull();
+  expect(document.querySelector<HTMLElement>(".ws")!.hidden).toBe(false);
+  expect(palette.isOpen).toBe(true);
+  palette.hide();
+});
+
+test("with Settings open, opening a tab from anywhere closes it", async () => {
+  await new Promise((r) => setTimeout(r, 0));
+  gear().click();
+  flushSync();
+  expect(document.querySelector("h1")).not.toBeNull();
+  tabs.open({ kind: "structure", connectionId: "c1", database: "Sales", schema: "dbo", name: "Orders" });
+  flushSync();
+  await new Promise((r) => setTimeout(r, 0));
+  flushSync();
+  expect(document.querySelector("h1")).toBeNull();
 });
 
 test("a failed tab connect is shown in the workspace while the explorer is hidden", async () => {
@@ -173,6 +231,77 @@ test("a saved session that cannot be restored is kept until the user edits somet
   }
 });
 
+test("with restore off the saved session is neither restored nor replaced until the user edits", async () => {
+  unmount(cmp!);
+  await tabs.reset();
+  const session = {
+    version: 1,
+    layout: { kind: "group", id: "g1" },
+    activeGroupId: "g1",
+    groups: { g1: { tabIds: ["t1"], activeId: "t1" } },
+    tabs: [{ id: "t1", kind: "query", title: "untitled-9", connectionId: null, database: null, text: "SELECT kept", dirty: false }],
+  };
+  const defaultInvoke = vi.mocked(invoke).getMockImplementation()!;
+  const autosave = vi.spyOn(tabs, "startAutosave");
+  const start = async (restoreSession: boolean) => {
+    autosave.mockClear();
+    vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === "get_preferences") return { ...DEFAULT_PREFERENCES, restoreSession };
+      if (cmd === "load_session") return JSON.stringify(session);
+      return defaultInvoke(cmd, args as never);
+    });
+    cmp = mount(App, { target: document.body });
+    flushSync();
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    const titles = [...document.querySelectorAll('.group [role="tab"]')].map((x) => x.textContent!.trim());
+    const hold = autosave.mock.calls[0][1]?.holdUntilEdit === true;
+    unmount(cmp);
+    cmp = undefined;
+    await tabs.reset();
+    return { titles, hold };
+  };
+  try {
+    expect(await start(false)).toEqual({ titles: [], hold: true });
+    expect(await start(true)).toEqual({ titles: ["untitled-9"], hold: false });
+  } finally {
+    autosave.mockRestore();
+    prefs.value = structuredClone(DEFAULT_PREFERENCES);
+    vi.mocked(invoke).mockImplementation(defaultInvoke);
+  }
+});
+
+test("with restore off, only a real edit lets the autosave replace the saved session", async () => {
+  unmount(cmp!);
+  await tabs.reset();
+  const defaultInvoke = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+    if (cmd === "get_preferences") return { ...DEFAULT_PREFERENCES, restoreSession: false };
+    if (cmd === "load_session") return JSON.stringify({ version: 1, layout: { kind: "group", id: "g1" }, activeGroupId: "g1", groups: { g1: { tabIds: [], activeId: null } }, tabs: [] });
+    return defaultInvoke(cmd, args as never);
+  });
+  const saves = () => vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_session").length;
+  try {
+    cmp = mount(App, { target: document.body });
+    flushSync();
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    vi.mocked(invoke).mockClear();
+    // Opening an empty tab is not an edit.
+    tabs.newTab();
+    flushSync();
+    await new Promise((r) => setTimeout(r, AUTOSAVE_MS + 200));
+    expect(saves()).toBe(0);
+    tabs.active!.pane!.edited();
+    flushSync();
+    await new Promise((r) => setTimeout(r, AUTOSAVE_MS + 200));
+    expect(saves()).toBe(1);
+  } finally {
+    prefs.value = structuredClone(DEFAULT_PREFERENCES);
+    vi.mocked(invoke).mockImplementation(defaultInvoke);
+  }
+});
+
 test("the startup probe fires only once the restored workspace is painted", async () => {
   unmount(cmp!);
   await tabs.reset();
@@ -197,7 +326,7 @@ test("the startup probe fires only once the restored workspace is painted", asyn
   }
 });
 
-test("files dropped on the window open in tabs; other files are ignored", async () => {
+test("drop event opens the accepted files", async () => {
   const defaultInvoke = vi.mocked(invoke).getMockImplementation()!;
   vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
     if (cmd === "read_sql_file") {
@@ -210,15 +339,12 @@ test("files dropped on the window open in tabs; other files are ignored", async 
     await new Promise((r) => setTimeout(r, 0));
     flushSync();
     vi.mocked(invoke).mockClear();
-    drop.handler!({ payload: { type: "over" } });
-    drop.handler!({ payload: { type: "drop", paths: ["/a.sql", "/notes.txt"] } });
+    // The backend already allowed these paths; the UI only opens them.
+    drop.handler!({ payload: ["/a.sql"] });
     await new Promise((r) => setTimeout(r, 0));
     flushSync();
     const calls = vi.mocked(invoke).mock.calls.map(([cmd, args]) => [cmd, args]);
-    expect(calls.slice(0, 2)).toEqual([
-      ["allow_dropped_paths", { paths: ["/a.sql"] }],
-      ["read_sql_file", { path: "/a.sql" }],
-    ]);
+    expect(calls).toEqual([["read_sql_file", { path: "/a.sql" }]]);
     const titles = [...document.querySelectorAll('.group [role="tab"]')].map((x) => x.textContent!.trim());
     expect(titles).toEqual(["a.sql"]);
   } finally {

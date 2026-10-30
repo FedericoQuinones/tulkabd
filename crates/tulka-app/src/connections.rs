@@ -82,12 +82,18 @@ pub async fn save_connection(
         None => conn.folder_id.take().filter(|f| has_folder(&current, f)),
     };
 
+    // Choosing another level ends an "off until the app closes" override, as
+    // `set_connection_guard` does; saving other edits leaves it alone.
+    let guard_changed = existing.is_some_and(|i| current.connections[i].guard != conn.guard);
     let mut next = current.clone();
     match existing {
         Some(i) => next.connections[i] = conn.clone(),
         None => next.connections.push(conn.clone()),
     }
     *current = persist(state, next).await?;
+    if guard_changed {
+        crate::guard::set_guard_off_for_session(state, &conn.id, false);
+    }
     Ok(SaveConnectionResult {
         connection: conn,
         keyring_unavailable,
@@ -226,7 +232,7 @@ pub fn parse_connection_string(text: String) -> Result<ParsedConnection, String>
 
 /// Applies `f` to a copy of the config and persists it; the in-memory config
 /// is replaced only when both succeed.
-async fn mutate<T>(
+pub(crate) async fn mutate<T>(
     state: &AppState,
     f: impl FnOnce(&mut AppConfig) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -412,8 +418,19 @@ pub async fn get_preferences(state: &AppState) -> Preferences {
     state.connections.lock().await.preferences.clone()
 }
 
+/// Stores the preferences, with every value brought into its range, and
+/// returns what was stored.
+pub async fn set_preferences(state: &AppState, prefs: Preferences) -> Result<Preferences, String> {
+    let prefs = prefs.clamped();
+    mutate(state, |config| {
+        config.preferences = prefs.clone();
+        Ok(prefs)
+    })
+    .await
+}
+
 /// Stores the zoom of the editor and the grid, brought into 70 to 200, and
-/// returns the stored value.
+/// returns the stored value. The other preferences stay as they are.
 pub async fn set_zoom(state: &AppState, zoom: u16) -> Result<u16, String> {
     let zoom = clamp_zoom(zoom);
     mutate(state, |config| {

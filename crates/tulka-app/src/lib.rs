@@ -15,10 +15,13 @@
 pub mod connections;
 pub mod explorer;
 pub mod files;
+pub mod guard;
 pub mod queries;
 pub mod query;
 pub mod results;
+pub mod runlog;
 pub mod session;
+pub mod settings;
 pub mod state;
 pub mod types;
 
@@ -26,31 +29,39 @@ pub use connections::{
     copy_connection_string, create_folder, delete_connection, delete_folder, duplicate_connection,
     get_preferences, list_connections, list_expanded, list_folders, list_server_databases,
     move_connection, move_folder, parse_connection_string, rename_folder, save_connection,
-    set_expanded, set_zoom, test_connection,
+    set_expanded, set_preferences, set_zoom, test_connection,
 };
 pub use explorer::{
-    completion_metadata, connect_explorer, disconnect_explorer, explorer_columns,
-    explorer_databases, explorer_objects, object_definition, refresh_metadata, search_objects,
-    table_structure,
+    clear_metadata_cache, completion_metadata, connect_explorer, disconnect_explorer,
+    explorer_columns, explorer_databases, explorer_objects, object_definition, refresh_metadata,
+    search_objects, table_structure,
 };
 pub use files::{
-    allow_paths, decode_text, encode_text, read_sql_file, sql_files_exist, write_sql_file,
-    FileEncoding, LineEnding, OpenedFile, TextFile, MAX_SQL_FILE_BYTES,
+    accept_dropped_files, allow_paths, decode_text, encode_text, read_sql_file,
+    remember_allowed_files, sql_files_exist, write_sql_file, FileEncoding, LineEnding, OpenedFile,
+    TextFile, MAX_SQL_FILE_BYTES,
+};
+pub use guard::{
+    effective_guard, guard_off_for_session, set_connection_guard, set_guard_off_for_session,
 };
 pub use queries::{
     decode_component, delete_saved_query, encode_component, list_saved_queries, read_saved_query,
     rename_saved_query, save_query, saved_query_path, QueriesStore,
 };
 pub use query::{
-    cancel_query, close_session, copy_results, fetch_rows, open_session, run_query,
-    set_result_view, use_database, MAX_FETCH_ROWS,
+    cancel_query, close_session, copy_results, end_transactions, fetch_rows, open_session,
+    run_query, set_result_view, transaction_count, use_database, MAX_FETCH_ROWS,
 };
 pub use results::{
     cap_cell, cell_matches, compare_values, display_cell, ColumnFilter, ResultBuffer, Selection,
     SortSpec, ViewSpec, CELLS_CAPPED_WARNING, DISPLAY_BYTES, DISPLAY_TEXT_CHARS, MAX_CELL_BYTES,
     MAX_ROWS,
 };
+pub use runlog::{clear_run_log, list_run_log, log_cancelled_run, prune_run_log};
 pub use session::{load_session, save_session};
+pub use settings::{
+    data_locations, data_locations_in, reveal_target, reveal_target_in, DataLocations,
+};
 pub use state::{AppState, SharedBuffer, TabState};
 pub use types::{
     AppEvent, AppEvents, Clipboard, CompletionMetadata, ConnectionStatus, CopyMode, CopyOutcome,

@@ -34,10 +34,11 @@ pub async fn run_query(
     state: State<'_, AppState>,
     tab_id: String,
     sql: String,
+    confirmed: bool,
     on_event: Channel<UiEvent>,
 ) -> Result<RunSummary, String> {
     // A send fails only when the window is gone; there is nobody to tell.
-    tulka_app::run_query(&state, tab_id, sql, move |ev| {
+    tulka_app::run_query(&state, tab_id, sql, confirmed, move |ev| {
         let _ = on_event.send(ev);
     })
     .await
@@ -85,4 +86,18 @@ pub async fn copy_results(
 #[tauri::command]
 pub async fn close_session(state: State<'_, AppState>, tab_id: String) -> Result<(), String> {
     tulka_app::close_session(&state, tab_id).await
+}
+
+#[tauri::command]
+pub async fn transaction_count(state: State<'_, AppState>, tab_id: String) -> Result<u32, String> {
+    tulka_app::transaction_count(&state, tab_id).await
+}
+
+#[tauri::command]
+pub async fn end_transactions(
+    state: State<'_, AppState>,
+    tab_id: String,
+    commit: bool,
+) -> Result<(), String> {
+    tulka_app::end_transactions(&state, tab_id, commit).await
 }

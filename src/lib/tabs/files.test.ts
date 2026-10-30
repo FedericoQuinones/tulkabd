@@ -12,7 +12,6 @@ vi.mock("../ipc", () => ({
   listSavedQueries: vi.fn(),
   saveQuery: vi.fn(),
   pickSqlFiles: vi.fn(),
-  allowDroppedPaths: vi.fn(),
   readSqlFile: vi.fn(),
   writeSqlFile: vi.fn(),
 }));
@@ -49,7 +48,6 @@ beforeEach(async () => {
   vi.mocked(ipc.openSession).mockImplementation(async (_tab, _conn, database) => session(database ?? "master"));
   vi.mocked(ipc.listSavedQueries).mockResolvedValue([]);
   vi.mocked(ipc.saveQuery).mockResolvedValue();
-  vi.mocked(ipc.allowDroppedPaths).mockResolvedValue();
   vi.mocked(ipc.writeSqlFile).mockResolvedValue();
   vi.mocked(ipc.readSqlFile).mockImplementation(async (path) => opened(path));
   connections.list = [conn];
@@ -174,32 +172,15 @@ test("a failed write keeps the tab unsaved and says why above the editor", async
   expect(tab.pane!.notice).toBeNull();
 });
 
-test("Ctrl+S on a file the backend does not allow yet allows it again and writes it", async () => {
+test("not_allowed on save shows files.errors.notAllowed and does not retry", async () => {
   await tabs.openFiles(["/q.sql"]);
   const tab = tabs.active!;
   tab.dirty = true;
-  vi.mocked(ipc.writeSqlFile).mockRejectedValueOnce("not_allowed");
+  vi.mocked(ipc.writeSqlFile).mockRejectedValue("not_allowed");
   await tabs.saveActive();
-  expect(ipc.allowDroppedPaths).toHaveBeenCalledWith(["/q.sql"]);
-  expect(ipc.writeSqlFile).toHaveBeenCalledTimes(2);
-  expect(tab.dirty).toBe(false);
-  expect(tab.pane!.notice).toBeNull();
-});
-
-test("dropped files: only .sql paths are allowed, then opened", async () => {
-  const order: string[] = [];
-  vi.mocked(ipc.allowDroppedPaths).mockImplementation(async () => void order.push("allow"));
-  vi.mocked(ipc.readSqlFile).mockImplementation(async (path) => {
-    order.push("read");
-    return opened(path);
-  });
-  await tabs.dropFiles(["/a.sql", "/notes.txt", "/B.SQL", "/dir"]);
-  expect(ipc.allowDroppedPaths).toHaveBeenCalledWith(["/a.sql", "/B.SQL"]);
-  expect(order).toEqual(["allow", "read", "read"]);
-  expect(tabs.list.map((x) => x.title)).toEqual(["a.sql", "B.SQL"]);
-  vi.mocked(ipc.allowDroppedPaths).mockClear();
-  await tabs.dropFiles(["/notes.txt"]);
-  expect(ipc.allowDroppedPaths).not.toHaveBeenCalled();
+  expect(ipc.writeSqlFile).toHaveBeenCalledTimes(1);
+  expect(tab.dirty).toBe(true);
+  expect(tab.pane!.notice).toContain(t("files.errors.notAllowed"));
 });
 
 test("pickFiles opens the files picked in the dialog; a cancelled dialog opens nothing", async () => {

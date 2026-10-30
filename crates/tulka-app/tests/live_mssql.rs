@@ -63,7 +63,7 @@ async fn live() -> Option<Live> {
 async fn run(state: &AppState, tab: &str, sql: &str) -> (RunSummary, Vec<UiEvent>) {
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
-    let summary = run_query(state, tab.into(), sql.into(), move |e| {
+    let summary = run_query(state, tab.into(), sql.into(), false, move |e| {
         sink.lock().unwrap().push(e)
     })
     .await
@@ -146,6 +146,7 @@ async fn cancel_of_waitfor_is_fast_and_the_session_survives() {
             &state,
             "t1".into(),
             "WAITFOR DELAY '00:00:20'".into(),
+            false,
             |_| {},
         )
         .await

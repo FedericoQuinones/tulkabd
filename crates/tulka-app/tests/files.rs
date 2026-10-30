@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tulka_app::*;
 use tulka_core::{ConfigStore, MemoryStore};
+use tulka_store::SessionStore;
 
 /// `s` as UTF-16 LE with a BOM, the way SSMS saves.
 fn utf16le_bom(s: &str) -> Vec<u8> {
@@ -231,6 +232,126 @@ async fn paths_that_were_not_allowed_are_neither_read_nor_written() {
     .await;
     assert_eq!(err.unwrap_err(), NOT_ALLOWED);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 1");
+}
+
+#[tokio::test]
+async fn paths_allowed_in_a_previous_run_are_allowed_after_restart() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("session.db");
+    let file = dir.path().join("kept.sql");
+    std::fs::write(&file, "SELECT 1").unwrap();
+    let path = path_string(&file);
+    {
+        let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
+        let accepted = allow_paths(&st, vec![path.clone()]);
+        assert_eq!(accepted, std::slice::from_ref(&path));
+    }
+    let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
+    assert_eq!(
+        read_sql_file(&st, path.clone()).await.unwrap().text,
+        "SELECT 1"
+    );
+    assert_eq!(
+        sql_files_exist(&st, vec![path]).await.unwrap(),
+        [Some(true)]
+    );
+}
+
+#[tokio::test]
+async fn a_path_never_allowed_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("session.db");
+    let allowed = dir.path().join("a.sql");
+    let other = dir.path().join("b.sql");
+    std::fs::write(&allowed, "SELECT 1").unwrap();
+    std::fs::write(&other, "SELECT 2").unwrap();
+    {
+        let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
+        allow_paths(&st, vec![path_string(&allowed)]);
+    }
+    let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
+    let other = path_string(&other);
+    assert_eq!(
+        read_sql_file(&st, other.clone()).await.unwrap_err(),
+        NOT_ALLOWED
+    );
+    assert_eq!(
+        sql_files_exist(&st, vec![other]).await.unwrap(),
+        [Some(false)]
+    );
+}
+
+#[tokio::test]
+async fn a_file_tab_in_the_saved_session_does_not_allow_its_path() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("session.db");
+    let file = dir.path().join("x.sql");
+    std::fs::write(&file, "SELECT 1").unwrap();
+    let path = path_string(&file);
+    {
+        let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
+        let json = serde_json::json!({
+            "version": 1,
+            "tabs": [{ "id": "t1", "file": { "path": path, "encoding": "utf8", "lineEnding": "lf" } }],
+        });
+        save_session(&st, json.to_string()).await.unwrap();
+    }
+    let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
+    assert!(load_session(&st).await.unwrap().contains(&path));
+    assert_eq!(read_sql_file(&st, path).await.unwrap_err(), NOT_ALLOWED);
+}
+
+#[test]
+fn a_dropped_folder_named_like_a_sql_file_is_not_accepted() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    let folder = dir.path().join("looks.sql");
+    std::fs::create_dir(&folder).unwrap();
+    let file = dir.path().join("real.sql");
+    std::fs::write(&file, "SELECT 1").unwrap();
+    let missing = dir.path().join("missing.sql");
+    let accepted = accept_dropped_files(
+        &st,
+        vec![
+            path_string(&folder),
+            path_string(&file),
+            path_string(&missing),
+        ],
+    );
+    assert_eq!(accepted, [path_string(&file)]);
+}
+
+#[tokio::test]
+async fn a_path_that_is_read_or_written_becomes_the_newest_remembered() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(SessionStore::open(&dir.path().join("session.db")));
+    let st = state(&dir).with_session(store.clone());
+    let read = dir.path().join("read.sql");
+    let written = dir.path().join("written.sql");
+    std::fs::write(&read, "SELECT 1").unwrap();
+    std::fs::write(&written, "SELECT 2").unwrap();
+    let (read, written) = (path_string(&read), path_string(&written));
+    allow_paths(&st, vec![read.clone(), written.clone()]);
+    let others: Vec<std::path::PathBuf> =
+        (0..498).map(|i| format!("/other/{i}.sql").into()).collect();
+    store.remember_allowed(&others);
+    assert_eq!(store.allowed_files().len(), 500);
+
+    read_sql_file(&st, read.clone()).await.unwrap();
+    write_sql_file(
+        &st,
+        written.clone(),
+        "SELECT 3".into(),
+        FileEncoding::Utf8,
+        LineEnding::Lf,
+    )
+    .await
+    .unwrap();
+    // Two more paths push out the two oldest ones, which are not these.
+    store.remember_allowed(&["/new/1.sql".into(), "/new/2.sql".into()]);
+    let kept = store.allowed_files();
+    assert!(kept.contains(&read.into()));
+    assert!(kept.contains(&written.into()));
 }
 
 #[tokio::test]
@@ -501,4 +622,16 @@ async fn a_file_over_20_mb_is_not_read() {
     assert_eq!(read_sql_file(&st, big).await.unwrap_err(), TOO_LARGE);
     // Read, then refused for its NUL bytes: the size itself is accepted.
     assert_eq!(read_sql_file(&st, limit).await.unwrap_err(), NOT_TEXT);
+}
+
+#[tokio::test]
+async fn stored_paths_that_are_not_sql_files_are_not_allowed() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("session.db");
+    let secret = dir.path().join("notes.txt");
+    std::fs::write(&secret, "private").unwrap();
+    let path = path_string(&secret);
+    SessionStore::open(&db).remember_allowed(&[secret.clone(), "relative.sql".into()]);
+    let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
+    assert_eq!(read_sql_file(&st, path).await.unwrap_err(), NOT_ALLOWED);
 }

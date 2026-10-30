@@ -496,6 +496,29 @@ impl Session for MssqlSession {
         Err(self.fail(e))
     }
 
+    async fn transaction_count(&mut self) -> Result<u32, DriverError> {
+        let rows = self.query_rows("SELECT @@TRANCOUNT").await?;
+        // No answer is not "no transaction": report it rather than let a close go ahead.
+        let count = rows
+            .first()
+            .and_then(|r| r.get::<i32, _>(0))
+            .ok_or_else(|| {
+                DriverError::Other("no value returned by `SELECT @@TRANCOUNT`".into())
+            })?;
+        Ok(u32::try_from(count).unwrap_or(0))
+    }
+
+    async fn end_transactions(&mut self, commit: bool) -> Result<(), DriverError> {
+        // A commit has to be repeated for nested transactions; a rollback
+        // ends all of them at once and fails if none is open.
+        let sql = if commit {
+            "WHILE @@TRANCOUNT > 0 COMMIT TRANSACTION"
+        } else {
+            "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION"
+        };
+        self.query_rows(sql).await.map(|_| ())
+    }
+
     fn cancel_handle(&self) -> Box<dyn CancelHandle> {
         Box::new(MssqlCancel {
             inner: self.cancel.clone(),

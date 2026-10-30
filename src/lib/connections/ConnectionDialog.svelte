@@ -6,6 +6,7 @@
   import { connStrErrorText, fillFrom, ignoredText, proposeName } from "./connstr";
   import { applyEnvironment, ENVIRONMENTS, initialEnvState, type EnvState } from "./env";
   import { explorer } from "../explorer/tree.svelte";
+  import { prefs } from "../settings/prefs.svelte";
   import DatabasePicker from "./DatabasePicker.svelte";
   import { connections } from "./store.svelte";
   import { isNamedInstance, validateConnection } from "./validate";
@@ -29,7 +30,9 @@
     onclose,
   }: Props = $props();
   // The dialog is keyed by connection in App, so the initial value is read once.
-  const initial = untrack(() => initialProp);
+  // A saved connection is read from the store, not from the copy the caller kept, which can be
+  // stale (e.g. the guard level was changed from the toolbar after that copy was taken).
+  const initial = untrack(() => (initialProp ? (connections.list.find((c) => c.id === initialProp.id) ?? initialProp) : undefined));
 
   const startsEdit = initial !== undefined && connections.list.some((c) => c.id === initial.id);
 
@@ -48,7 +51,7 @@
   // `null` while the number field is empty.
   let timeout = $state<number | null>(initial?.connectTimeoutS ?? 15);
   let advancedOpen = $state(false);
-  let env = $state<EnvState>(initialEnvState(initial));
+  let env = $state<EnvState>(initialEnvState(initial, prefs.environments));
   let dbKind = $state<"all" | "selected">(initial?.databases.kind ?? "all");
   let dbNames = $state<string[]>(initial?.databases.kind === "selected" ? [...new Set(initial.databases.names)] : []);
   // The backend keeps the stored folder on edit, so the selector only exists when creating.
@@ -333,7 +336,7 @@
                 role="radio"
                 aria-checked={env.environment === e.id}
                 class:on={env.environment === e.id}
-                onclick={() => (env = applyEnvironment(env, e.id))}
+                onclick={() => (env = applyEnvironment(env, e.id, prefs.environments))}
               >
                 <span class="dot" style:background={`var(${e.token})`}></span>{t(e.label)}
               </button>

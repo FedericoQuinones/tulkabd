@@ -1,22 +1,23 @@
 //! Sessions per query tab: opening, running scripts, cancelling, reading and
 //! copying results. See [`crate::state`] for the locking scheme.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
 use tokio::sync::mpsc::{self, Receiver};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio::time::Instant;
 use tulka_core::{
     estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, Column, DatabaseScope,
-    DriverError, ExecEvent, MessageKind, Session, Value,
+    DriverError, ExecEvent, MessageKind, NumberFormat, Session, Value,
 };
+use tulka_store::RunLogOutcome;
 
 use crate::connections::{blocking, connect_params, resolve_password};
-use crate::results::{
-    display_cell, ResultBuffer, Selection, ViewSpec, CELLS_CAPPED_WARNING, MAX_ROWS,
-};
+use crate::results::{display_cell, ResultBuffer, Selection, ViewSpec, CELLS_CAPPED_WARNING};
+use crate::runlog;
 use crate::state::{AppState, SharedBuffer, TabState, Tabs};
 use crate::types::{
     Clipboard, CopyMode, CopyOutcome, RunOutcome, RunSummary, SessionInfo, UiEvent, BUSY, CLOSED,
@@ -32,7 +33,7 @@ const ROW_COUNT_INTERVAL: Duration = Duration::from_millis(50);
 /// Events buffered between the driver and the forwarder.
 const EVENT_QUEUE: usize = 32;
 
-fn no_session() -> String {
+pub(crate) fn no_session() -> String {
     "no session is open on this tab".into()
 }
 
@@ -130,7 +131,9 @@ pub async fn use_database(
     tab_id: String,
     database: String,
 ) -> Result<(), String> {
-    let (checkout, mut session) = Checkout::take(state, &tab_id, false)?;
+    // No generation to match: switching database runs no user script, so
+    // there is no guard analysis it could outdate.
+    let (checkout, mut session) = Checkout::take(state, &tab_id, false, None)?;
     let generation = checkout.generation;
     let result = session.use_database(&database).await;
     let lost = matches!(result, Err(DriverError::Disconnected(_)));
@@ -157,16 +160,39 @@ pub async fn use_database(
 /// summary is returned once the script ended. Fails with `"disconnected"`
 /// after a lost connection, until `open_session` is called again, and with
 /// `"busy"` while another command uses the session.
+///
+/// Before the session is touched, the script is analyzed with the driver's
+/// guard, according to the connection's effective level (see
+/// [`crate::guard::effective_guard`]). If dangerous statements are found,
+/// nothing is sent to the server: with `block` the summary is `Blocked`,
+/// with `confirm` and `confirmed == false` it is `NeedsConfirmation`; both
+/// carry the `findings`. This happens here, in the backend, so no caller can
+/// skip it; `confirmed` never overrides `block`.
 pub async fn run_query<F>(
     state: &AppState,
     tab_id: String,
     sql: String,
+    confirmed: bool,
     on_event: F,
 ) -> Result<RunSummary, String>
 where
     F: Fn(UiEvent) + Send + Sync,
 {
-    let (checkout, mut session) = Checkout::take(state, &tab_id, true)?;
+    let generation = match crate::guard::check(state, &tab_id, &sql, confirmed).await? {
+        crate::guard::Verdict::Hold(held) => {
+            // A refused script is logged; one waiting for confirmation is not
+            // (the confirmation dialog logs its own cancel).
+            if held.outcome == RunOutcome::Blocked {
+                let snap = runlog::snapshot(state, &tab_id).await;
+                runlog::record(state, snap, &sql, RunLogOutcome::Blocked, None, None).await;
+            }
+            return Ok(held);
+        }
+        crate::guard::Verdict::Run { generation } => generation,
+    };
+    let snap = runlog::snapshot(state, &tab_id).await;
+    let prefs = crate::connections::get_preferences(state).await;
+    let (checkout, mut session) = Checkout::take(state, &tab_id, true, Some(generation))?;
     let started = Instant::now();
     let (tx, rx) = mpsc::channel(EVENT_QUEUE);
     let forwarder = Forwarder {
@@ -174,10 +200,49 @@ where
         tab_id: &tab_id,
         generation: checkout.generation,
         emit: &on_event,
+        max_rows: prefs.max_rows as usize,
     };
     // The driver must be polled until `execute` returns, also after a
-    // cancel, so both run to completion here.
-    let (result, saw_disconnect) = tokio::join!(session.execute(&sql, tx), forwarder.run(rx));
+    // cancel, so all of these run to completion here. The timer ends as soon
+    // as the script does; if it fires first it cancels the script the same
+    // way Stop does.
+    let cancel = session.cancel_handle();
+    let finished = Notify::new();
+    let done = AtomicBool::new(false);
+    let timer = async {
+        let limit = Duration::from_secs(u64::from(prefs.query_timeout_s));
+        if limit.is_zero() {
+            return;
+        }
+        // `biased`: if the script ended at the same moment the limit was
+        // reached, it counts as finished and nothing is cancelled or reported.
+        tokio::select! {
+            biased;
+            () = finished.notified() => {}
+            () = tokio::time::sleep(limit) => {
+                if done.load(Ordering::SeqCst) {
+                    return;
+                }
+                on_event(UiEvent::Message {
+                    kind: MessageKind::Warning,
+                    text: format!(
+                        "Query timeout ({} s) reached; the query was cancelled.",
+                        prefs.query_timeout_s
+                    ),
+                    line: None,
+                });
+                let _ = cancel.cancel().await;
+            }
+        }
+    };
+    let execute = async {
+        let result = session.execute(&sql, tx).await;
+        done.store(true, Ordering::SeqCst);
+        finished.notify_one();
+        result
+    };
+    let (result, tally, ()) = tokio::join!(execute, forwarder.run(rx), timer);
+    let saw_disconnect = tally.disconnected;
     let elapsed = started.elapsed();
 
     let outcome = match &result {
@@ -207,11 +272,77 @@ where
     }
 
     checkout.checkin(session, outcome == RunOutcome::Disconnected);
+    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let logged = match outcome {
+        RunOutcome::Ok => RunLogOutcome::Ok,
+        RunOutcome::Cancelled => RunLogOutcome::Cancelled,
+        RunOutcome::Disconnected => RunLogOutcome::Disconnected,
+        _ => RunLogOutcome::Error,
+    };
+    runlog::record(state, snap, &sql, logged, tally.rows(), Some(elapsed_ms)).await;
     Ok(RunSummary {
-        elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        elapsed_ms,
         finished_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         outcome,
+        findings: Vec::new(),
     })
+}
+
+/// How many transactions are open on the tab's session. `0` when the tab has
+/// no session; fails with `"busy"` while a command uses the session and with
+/// `"disconnected"` after a lost connection (the server rolled back by then).
+pub async fn transaction_count(state: &AppState, tab_id: String) -> Result<u32, String> {
+    let (checkout, mut session) = match Checkout::take(state, &tab_id, false, None) {
+        Ok(taken) => taken,
+        Err(e) if e == no_session() => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let result = session.transaction_count().await;
+    let lost = matches!(result, Err(DriverError::Disconnected(_)));
+    checkout.checkin(session, lost);
+    match result {
+        Ok(count) => Ok(count),
+        Err(DriverError::Disconnected(_)) => Err(DISCONNECTED.into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Commits or rolls back every transaction open on the tab's session, and
+/// records it in the run log. Does nothing for a tab without a session. Fails
+/// with `"busy"` while a command uses the session and with `"disconnected"`
+/// after a lost connection.
+pub async fn end_transactions(
+    state: &AppState,
+    tab_id: String,
+    commit: bool,
+) -> Result<(), String> {
+    let (checkout, mut session) = match Checkout::take(state, &tab_id, false, None) {
+        Ok(taken) => taken,
+        Err(e) if e == no_session() => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let snap = runlog::snapshot(state, &tab_id).await;
+    let started = Instant::now();
+    let result = session.end_transactions(commit).await;
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let lost = matches!(result, Err(DriverError::Disconnected(_)));
+    checkout.checkin(session, lost);
+    let sql = if commit {
+        "COMMIT TRANSACTION"
+    } else {
+        "ROLLBACK TRANSACTION"
+    };
+    let outcome = if result.is_ok() {
+        RunLogOutcome::Ok
+    } else {
+        RunLogOutcome::Error
+    };
+    runlog::record(state, snap, sql, outcome, None, Some(elapsed_ms)).await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(DriverError::Disconnected(_)) => Err(DISCONNECTED.into()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Cancels the query running on the tab; does nothing if none is running.
@@ -291,12 +422,19 @@ pub async fn copy_results(
     clipboard: Arc<dyn Clipboard>,
 ) -> Result<CopyOutcome, String> {
     let buffer = result_of(state, &tab_id, result_index)?;
+    let separator = match crate::connections::get_preferences(state)
+        .await
+        .copy_numbers
+    {
+        NumberFormat::System => system_decimal_separator(),
+        NumberFormat::Invariant => '.',
+    };
     blocking(move || {
         let (text, outcome) = buffer
             .blocking_read()
             .with_selection(&selection, |columns, rows| match mode {
                 CopyMode::Excel => {
-                    let text = to_excel_tsv(columns, rows, system_decimal_separator());
+                    let text = to_excel_tsv(columns, rows, separator);
                     let outcome = CopyOutcome {
                         rows: rows.len(),
                         tokens: 0,
@@ -378,13 +516,20 @@ struct Checkout<'a> {
 impl<'a> Checkout<'a> {
     /// Takes the session out of the tab. For a run, also publishes its cancel
     /// handle and clears the previous results, in the same critical section.
+    /// With `expected_generation`, fails with `"busy"` if the tab is not that
+    /// generation any more (it was replaced after the guard looked at it), so
+    /// a script is never run on a session the guard did not analyze it for.
     fn take(
         state: &'a AppState,
         tab_id: &'a str,
         run: bool,
+        expected_generation: Option<u64>,
     ) -> Result<(Self, Box<dyn Session>), String> {
         let mut tabs = state.tabs();
         let tab = tabs.open.get_mut(tab_id).ok_or_else(no_session)?;
+        if expected_generation.is_some_and(|g| g != tab.generation) {
+            return Err(BUSY.into());
+        }
         if tab.disconnected {
             return Err(DISCONNECTED.into());
         }
@@ -447,8 +592,35 @@ impl Drop for Checkout<'_> {
     }
 }
 
-fn new_buffer(columns: Vec<Column>) -> SharedBuffer {
-    Arc::new(RwLock::new(ResultBuffer::new(columns, MAX_ROWS)))
+fn new_buffer(columns: Vec<Column>, max_rows: usize) -> SharedBuffer {
+    Arc::new(RwLock::new(ResultBuffer::new(columns, max_rows)))
+}
+
+/// What a run produced, for the run log.
+#[derive(Default)]
+struct RunTally {
+    /// A `Disconnected` event was seen.
+    disconnected: bool,
+    /// Every row that arrived, also those the buffer dropped for its limit.
+    rows_received: u64,
+    /// The sum of the `RowsAffected` counts.
+    rows_affected: u64,
+    saw_result: bool,
+    saw_affected: bool,
+}
+
+impl RunTally {
+    /// Rows received if any result set came, else rows affected if any
+    /// statement reported them, else nothing.
+    fn rows(&self) -> Option<u64> {
+        if self.saw_result {
+            Some(self.rows_received)
+        } else if self.saw_affected {
+            Some(self.rows_affected)
+        } else {
+            None
+        }
+    }
 }
 
 /// Moves the driver's events to the UI sink and the rows to the buffers.
@@ -457,14 +629,15 @@ struct Forwarder<'a, F> {
     tab_id: &'a str,
     generation: u64,
     emit: &'a F,
+    /// Rows kept per result; later ones are counted but dropped.
+    max_rows: usize,
 }
 
 impl<F: Fn(UiEvent)> Forwarder<'_, F> {
-    /// Forwards until the driver closes the channel. Returns whether a
-    /// `Disconnected` event was seen.
-    async fn run(&self, mut rx: Receiver<ExecEvent>) -> bool {
+    /// Forwards until the driver closes the channel and tallies what came.
+    async fn run(&self, mut rx: Receiver<ExecEvent>) -> RunTally {
         let mut counter = RowCounter::default();
-        let mut disconnected = false;
+        let mut tally = RunTally::default();
         // The capped-cell warning is shown once per run.
         let mut warned_capped = false;
         loop {
@@ -482,6 +655,8 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
             match ev {
                 ExecEvent::Rows { index, rows } => {
                     let received = rows.len();
+                    tally.saw_result = true;
+                    tally.rows_received += received as u64;
                     if let Some((total, truncated, capped)) = self.push_rows(index, rows).await {
                         counter.rows(index, received, total, truncated, self.emit);
                         if capped && !warned_capped {
@@ -495,6 +670,7 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
                     }
                 }
                 ExecEvent::ResultStart { index, columns } => {
+                    tally.saw_result = true;
                     counter.finish(self.emit);
                     // The buffer exists before the UI hears of the result.
                     self.start_result(index, columns.clone());
@@ -503,7 +679,11 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
                 }
                 other => {
                     counter.flush(self.emit);
-                    disconnected |= matches!(other, ExecEvent::Disconnected { .. });
+                    tally.disconnected |= matches!(other, ExecEvent::Disconnected { .. });
+                    if let ExecEvent::RowsAffected { count } = other {
+                        tally.saw_affected = true;
+                        tally.rows_affected += count;
+                    }
                     if let Some(ev) = UiEvent::from_exec(other) {
                         (self.emit)(ev);
                     }
@@ -511,7 +691,7 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
             }
         }
         counter.finish(self.emit);
-        disconnected
+        tally
     }
 
     /// The buffer of result `index` in this run's tab, created (empty) if
@@ -525,10 +705,10 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
         let index = index as usize;
         if tab.results.len() <= index {
             tab.results
-                .resize_with(index + 1, || new_buffer(Vec::new()));
+                .resize_with(index + 1, || new_buffer(Vec::new(), self.max_rows));
         }
         if let Some(columns) = columns {
-            tab.results[index] = new_buffer(columns);
+            tab.results[index] = new_buffer(columns, self.max_rows);
         }
         Some(tab.results[index].clone())
     }
@@ -630,5 +810,101 @@ impl RowCounter {
             });
         }
         *self = RowCounter::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use tokio::sync::mpsc::Sender;
+    use tulka_core::{ConfigStore, DatabaseSnapshot, MemoryStore, ServerInfo, TableStructure};
+
+    struct NoCancel;
+
+    #[async_trait]
+    impl tulka_core::CancelHandle for NoCancel {
+        async fn cancel(&self) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    /// A session that is only ever checked out and in.
+    struct Inert;
+
+    #[async_trait]
+    impl Session for Inert {
+        async fn server_info(&mut self) -> Result<ServerInfo, DriverError> {
+            unimplemented!()
+        }
+        async fn list_databases(&mut self) -> Result<Vec<String>, DriverError> {
+            unimplemented!()
+        }
+        async fn use_database(&mut self, _: &str) -> Result<(), DriverError> {
+            unimplemented!()
+        }
+        async fn current_database(&mut self) -> Result<String, DriverError> {
+            unimplemented!()
+        }
+        async fn snapshot(&mut self, _: &str) -> Result<DatabaseSnapshot, DriverError> {
+            unimplemented!()
+        }
+        async fn structure(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<TableStructure, DriverError> {
+            unimplemented!()
+        }
+        async fn definition(&mut self, _: &str, _: &str, _: &str) -> Result<String, DriverError> {
+            unimplemented!()
+        }
+        async fn execute(&mut self, _: &str, _: Sender<ExecEvent>) -> Result<(), DriverError> {
+            unimplemented!()
+        }
+        fn cancel_handle(&self) -> Box<dyn tulka_core::CancelHandle> {
+            Box::new(NoCancel)
+        }
+    }
+
+    fn state_with_tab(generation: u64) -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            ConfigStore::at(dir.path().join("config.json")),
+            Arc::new(MemoryStore::default()),
+            vec![],
+        )
+        .unwrap();
+        state.tabs().open.insert(
+            "t1".into(),
+            TabState {
+                generation,
+                connection_id: "c".into(),
+                database: "master".into(),
+                session: Some(Box::new(Inert)),
+                cancel: None,
+                results: Vec::new(),
+                disconnected: false,
+            },
+        );
+        (state, dir)
+    }
+
+    #[test]
+    fn take_refuses_a_tab_replaced_since_the_guard_check() {
+        let (state, _dir) = state_with_tab(2);
+        // The guard looked at generation 1; the tab is now generation 2.
+        let err = Checkout::take(&state, "t1", true, Some(1)).err();
+        assert_eq!(err.as_deref(), Some(BUSY));
+        // Nothing was taken or cleared: the new tab keeps its session.
+        assert!(state.tabs().open["t1"].session.is_some());
+    }
+
+    #[test]
+    fn take_proceeds_when_the_generation_is_the_one_checked() {
+        let (state, _dir) = state_with_tab(2);
+        assert!(Checkout::take(&state, "t1", true, Some(2)).is_ok());
+        assert!(state.tabs().open["t1"].session.is_none());
     }
 }

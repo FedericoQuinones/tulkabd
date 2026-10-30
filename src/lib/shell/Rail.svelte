@@ -6,8 +6,10 @@
     /** The key of the open panel, if any. */
     active: string | null;
     onselect: (key: string) => void;
+    /** Whether the Settings screen is open; the gear reports it as pressed. */
+    settingsOpen?: boolean;
   }
-  let { active, onselect }: Props = $props();
+  let { active, onselect, settingsOpen = false }: Props = $props();
 
   // Icon paths are 16x16, drawn with a 1.5px stroke (see svg.i in theme.css).
   const top = [
@@ -42,10 +44,11 @@
     <button
       type="button"
       class="ri"
-      class:on={active === item.key}
+      class:on={item.key === "rail.settings" ? settingsOpen : active === item.key}
       title={t(item.key)}
       aria-label={t(item.key)}
-      aria-current={active === item.key ? "true" : undefined}
+      aria-pressed={item.key === "rail.settings" ? settingsOpen : undefined}
+      aria-current={item.key !== "rail.settings" && active === item.key ? "true" : undefined}
       onclick={() => onselect(item.key)}
     >
       <svg class="i" viewBox="0 0 16 16" aria-hidden="true">{@html item.d}</svg>

@@ -7,9 +7,12 @@ use tulka_app::Clipboard;
 pub mod connections;
 pub mod explorer;
 pub mod files;
+pub mod guard;
 pub mod queries;
 pub mod query;
+pub mod runlog;
 pub mod session;
+pub mod settings;
 
 /// Writes copied text to the system clipboard through the plugin.
 pub(crate) struct PluginClipboard(pub(crate) AppHandle);
