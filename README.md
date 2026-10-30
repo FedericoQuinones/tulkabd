@@ -35,7 +35,7 @@ Settings › **AI assistants** shows the exact path of your executable and copie
 **Claude Code**
 
 ```bash
-claude mcp add tulkabd -- /usr/bin/tulkabd mcp
+claude mcp add --scope user tulkabd -- /usr/bin/tulkabd mcp
 ```
 
 Check it with `claude mcp list`.
@@ -66,13 +66,20 @@ Use the tools from Copilot Chat in Agent mode.
 
 ### Limits
 
-Results are capped at 500 rows and queries at 30 seconds by default; both are configurable in Settings. Only `SELECT` and `WITH … SELECT` are accepted. Everything else is refused, including `INSERT`, `UPDATE`, `DELETE`, `MERGE`, DDL, `EXEC`, `SELECT … INTO`, `OPENROWSET`/`OPENQUERY`-style remote access and locking hints that write.
+Results are capped at 500 rows and queries at 30 seconds by default; both are configurable in Settings. Only `SELECT` and `WITH … SELECT` are accepted (several statements separated by `;` are fine if each one is a query). The check is lexical and refuses a query that contains any of these words anywhere:
+
+- Writes: `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `TRUNCATE`, `INTO` (so `SELECT … INTO`), `BULK`.
+- Schema and permissions: `ALTER`, `CREATE`, `DROP`, `GRANT`, `REVOKE`, `DENY`, `BACKUP`, `RESTORE`.
+- Running code: `EXEC`, `EXECUTE`, `OPENQUERY`, `OPENROWSET`, `OPENDATASOURCE`.
+- State and flow: `SET`, `USE`, `DECLARE`, transactions, cursors, `IF`, `WHILE`, `WAITFOR`, `PRINT`, `THROW`, `KILL`, `DBCC`, `NEXT VALUE FOR` and similar.
+- Table hints that lock: `UPDLOCK`, `XLOCK`, `TABLOCK`, `TABLOCKX`, `PAGLOCK`, `HOLDLOCK`, `SERIALIZABLE`, `REPEATABLEREAD`.
+- Anything it cannot read with certainty (control characters, unusual symbols, a name with three or more dots, as in `server.db.dbo.t`).
 
 The read-only check is conservative and has known limits:
 
 - Columns named like a forbidden word that is not reserved (`Send`, `Get`, `Move`, `Open`, `Close`, `Save`, `Load`) must be bracketed, for example `[Open]`.
 - Non-ASCII identifiers must be bracketed too, for example `[año]`.
-- Four-part column references such as `db.dbo.t.col` are refused.
+- Names with three or more dots are taken as linked-server names and refused, so `db.dbo.t.col` and `dbo.t.xmlcol.value(…)` fail.
 - The `MERGE` join hint is refused.
 - The check cannot see inside user functions (including CLR) with external effects, or synonyms and views that point to linked servers.
 
