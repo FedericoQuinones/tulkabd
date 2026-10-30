@@ -842,6 +842,8 @@ impl Scan<'_> {
     fn merge_end(&self, from: usize) -> (usize, bool) {
         let mut depth = 0i32;
         let mut deletes_all = false;
+        // Open CASE expressions: their WHEN, THEN, ELSE and END are not clauses.
+        let mut cases = 0u32;
         let mut j = from + 1;
         while j < self.toks.len() {
             if self.is_punct(j, '(') {
@@ -855,16 +857,29 @@ impl Scan<'_> {
                 if self.is_punct(j, ';') {
                     return (j, deletes_all);
                 }
-                if self.is_kw(j, "WHEN") {
+                if self.is_kw(j, "CASE") {
+                    cases += 1;
+                } else if cases > 0 {
+                    if self.is_kw(j, "END") {
+                        cases -= 1;
+                    }
+                } else if self.is_kw(j, "WHEN") {
                     // The clause runs to its THEN; an AND in between is its condition.
                     let mut k = j + 1;
                     let mut inner = 0i32;
+                    let mut inner_cases = 0u32;
                     let mut conditioned = false;
                     while k < self.toks.len() {
                         if self.is_punct(k, '(') {
                             inner += 1;
                         } else if self.is_punct(k, ')') {
                             inner -= 1;
+                        } else if inner == 0 && self.is_kw(k, "CASE") {
+                            inner_cases += 1;
+                        } else if inner == 0 && inner_cases > 0 {
+                            if self.is_kw(k, "END") {
+                                inner_cases -= 1;
+                            }
                         } else if inner == 0 && self.is_kw(k, "THEN") {
                             break;
                         } else if inner == 0 && self.is_kw(k, "AND") {
@@ -1750,6 +1765,23 @@ mod tests {
         ] {
             assert_eq!(kinds(sql), vec![], "{sql}");
         }
+    }
+
+    #[test]
+    fn merge_with_case_expressions_is_still_read_to_its_end() {
+        for sql in [
+            "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.a = CASE WHEN s.a IS NULL THEN 0 ELSE s.a END WHEN NOT MATCHED BY SOURCE THEN DELETE;",
+            "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.a = CASE WHEN s.a IS NULL THEN 0 END WHEN NOT MATCHED BY SOURCE THEN DELETE;",
+            "MERGE dbo.T AS t USING dbo.S AS s ON t.k = CASE WHEN s.k IS NULL THEN 0 ELSE s.k END WHEN MATCHED THEN DELETE;",
+            "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED AND CASE WHEN s.a IS NULL THEN 0 ELSE 1 END = 1 THEN UPDATE SET t.a = 1 WHEN NOT MATCHED BY SOURCE THEN DELETE;",
+            "EXEC(N'MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.a = CASE WHEN s.a IS NULL THEN 0 ELSE s.a END WHEN NOT MATCHED BY SOURCE THEN DELETE;')",
+        ] {
+            assert_eq!(kinds(sql).len(), 1, "{sql}");
+        }
+        assert_eq!(
+            kinds("MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED AND CASE WHEN s.a IS NULL THEN 0 ELSE 1 END = 1 THEN DELETE;"),
+            vec![]
+        );
     }
 
     #[test]
