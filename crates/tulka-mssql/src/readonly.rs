@@ -161,6 +161,13 @@ pub fn violation(sql: &str) -> Option<ReadOnlyViolation> {
                 return Some(found(ReadOnlyReason::Unparsed, None, base + line));
             }
         };
+        if let Some(offset) = line_break_outside_strings(&batch.text, &tokens) {
+            return Some(found(
+                ReadOnlyReason::Unparsed,
+                None,
+                base + line_of(&batch.text, offset),
+            ));
+        }
         if let Some(v) = check_batch(&batch.text, &tokens, base, &mut any) {
             return Some(v);
         }
@@ -192,6 +199,24 @@ fn suspicious_char(text: &str) -> Option<usize> {
             c => c < 0x20 || c == 0x7f,
         };
         bad.then_some(i)
+    })
+}
+
+/// Offset of the first U+0085, U+2028 or U+2029 outside a string literal.
+/// The server may treat them as line ends, which would end a `--` comment
+/// where the lexer does not. (Vertical tab and form feed are already refused
+/// as control characters.)
+fn line_break_outside_strings(text: &str, tokens: &[Token]) -> Option<usize> {
+    let b = text.as_bytes();
+    (0..b.len()).find(|&i| {
+        let hit = match b[i] {
+            0xC2 => b.get(i + 1) == Some(&0x85),
+            0xE2 => b.get(i + 1) == Some(&0x80) && matches!(b.get(i + 2), Some(0xA8 | 0xA9)),
+            _ => false,
+        };
+        hit && !tokens
+            .iter()
+            .any(|t| t.kind == Kind::Str && t.start <= i && i < t.end)
     })
 }
 
@@ -570,6 +595,21 @@ mod tests {
         ] {
             let v = violation(sql).unwrap_or_else(|| panic!("{sql:?}"));
             assert_eq!(v.reason, Unparsed, "{sql:?}");
+        }
+        // Unicode line ends hide in comments and names, not only in code.
+        for c in ['\u{85}', '\u{2028}', '\u{2029}', '\u{b}', '\u{c}'] {
+            for sql in [
+                format!("SELECT 1 -- a{c}DELETE FROM t"),
+                format!("SELECT 1 /* a{c}b */"),
+                format!("SELECT [a{c}b] FROM t"),
+                format!("SELECT 1{c}FROM t"),
+            ] {
+                let v = violation(&sql).unwrap_or_else(|| panic!("{sql:?}"));
+                assert_eq!(v.reason, Unparsed, "{sql:?}");
+            }
+        }
+        for c in ['\u{85}', '\u{2028}', '\u{2029}'] {
+            check(&format!("SELECT 'a{c}b', N'{c}'"), None);
         }
         // Bracketed and quoted names, strings and CRLF line ends stay fine.
         for sql in [
