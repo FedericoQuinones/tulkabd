@@ -25,7 +25,7 @@ import App from "./App.svelte";
 import type { ConnectionConfig } from "./lib/ipc";
 import { connections } from "./lib/connections/store.svelte";
 import { AUTOSAVE_MS, tabs } from "./lib/tabs/tabs.svelte";
-import { palette } from "./lib/palette/palette.svelte";
+import { palette } from "./lib/palette/paletteState.svelte";
 import { DEFAULT_PREFERENCES, prefs } from "./lib/settings/prefs.svelte";
 
 let cmp: ReturnType<typeof mount> | undefined;
