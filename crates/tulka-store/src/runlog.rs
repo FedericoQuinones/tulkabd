@@ -12,8 +12,10 @@ use crate::private_file;
 /// change this number.
 const RUNLOG_VERSION: i64 = 1;
 
-/// How long the app waits on a file locked by another process.
-const BUSY_TIMEOUT: Duration = Duration::from_millis(200);
+/// How long the app waits on a file locked by another process. The MCP
+/// server writes to the same file, and on Windows a commit can hold the lock
+/// for a few hundred milliseconds.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How long another process (the MCP server) waits on a busy file before it
 /// gives up on one write.
