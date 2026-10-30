@@ -32,8 +32,20 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The Windows-only code (Windows authentication) is linted and tested only here.
+      - run: cargo clippy -p tulka-core -p tulka-mssql -p tulka-app --all-targets -- -D warnings
+      - run: cargo test -p tulka-core -p tulka-mssql -p tulka-app
+
   bundle:
-    needs: test
+    needs: [test, test-windows]
     strategy:
       fail-fast: false
       matrix:
