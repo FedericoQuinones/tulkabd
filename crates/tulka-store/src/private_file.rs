@@ -1,6 +1,6 @@
 //! Files that only their owner may read.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Creates the file readable by its owner only, before SQLite opens it, so the
 /// contents are never exposed to other users even briefly.
@@ -37,7 +37,7 @@ pub(crate) fn restrict_permissions(path: &Path) {
         for suffix in ["-wal", "-shm"] {
             let mut s = path.as_os_str().to_owned();
             s.push(suffix);
-            files.push(PathBuf::from(s));
+            files.push(std::path::PathBuf::from(s));
         }
         for file in files {
             if let Ok(meta) = std::fs::metadata(&file) {
