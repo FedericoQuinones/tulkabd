@@ -785,3 +785,15 @@ test("reconnecting a live tab without a transaction goes straight through", asyn
   expect(ipc.openSession).toHaveBeenCalledTimes(1);
   expect(tabs.list.some((x) => x.id === id)).toBe(true);
 });
+
+test("reconnecting a disconnected tab opens a session without asking", async () => {
+  const id = await liveTab();
+  const pane = tabs.list.find((x) => x.id === id)!.pane!;
+  pane.status = "disconnected";
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  vi.mocked(ipc.openSession).mockClear();
+  tabs.reconnect(id);
+  await flush();
+  expect(tabs.closePrompt).toBeNull();
+  expect(ipc.openSession).toHaveBeenCalledTimes(1);
+});

@@ -542,7 +542,7 @@ export class TabsStore {
     const pane = tab?.pane;
     if (!pane || pane.status === "connecting" || pane.status === "running") return;
     // Replacing a live session ends its transaction: ask first, and carry on once it is ended.
-    if (!confirmed && pane.session && !(await this.confirmReplace(tab, () => this.connectTab(id, conn, password, database, true)))) {
+    if (!confirmed && pane.session && pane.status === "idle" && !(await this.confirmReplace(tab, () => this.connectTab(id, conn, password, database, true)))) {
       return;
     }
     tab.connectError = null;
