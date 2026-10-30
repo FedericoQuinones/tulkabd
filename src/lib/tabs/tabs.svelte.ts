@@ -90,6 +90,7 @@ export const END_RETRIES = 100;
 
 /** Longest wait for a tab to say how many transactions it holds before it counts as unknown. */
 export const CHECK_TIMEOUT_MS = 3000;
+const GUARD_LOG_WAIT_MS = 500;
 
 /** A rejection of the transaction commands as user text: sentinels become words. */
 function txErrorText(e: unknown): string {
@@ -435,6 +436,21 @@ export class TabsStore {
     });
   }
 
+  /**
+   * The window is about to go: confirmations still open are recorded as cancelled. Best effort,
+   * with a short cap so a stuck backend never keeps the window open.
+   */
+  private async logHeldGuards(): Promise<void> {
+    const logs = this.list.flatMap((x) => (x.pane?.guardPrompt ? [x.pane.discardGuard()] : []));
+    if (logs.length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cap = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, GUARD_LOG_WAIT_MS);
+    });
+    await Promise.race([Promise.all(logs), cap]);
+    clearTimeout(timer);
+  }
+
   /** The window is being closed: ask once for every tab that holds, or may hold, a transaction. */
   private async confirmWindowClose(event: { preventDefault: () => void }): Promise<void> {
     if (this.closePrompt) {
@@ -444,7 +460,10 @@ export class TabsStore {
     }
     const checks = await Promise.all(this.list.map((x) => this.checkTab(x)));
     const plan = closePlan(checks);
-    if (!plan.ask) return;
+    if (!plan.ask) {
+      await this.logHeldGuards();
+      return;
+    }
     event.preventDefault();
     this.closePrompt = { scope: "window", items: this.itemsOf(plan.tabs), busy: false, error: null };
   }
@@ -500,7 +519,10 @@ export class TabsStore {
       }
     }
     this.endPrompt();
-    if (prompt.scope === "window") await getCurrentWindow().destroy();
+    if (prompt.scope === "window") {
+      await this.logHeldGuards();
+      await getCurrentWindow().destroy();
+    }
     if (prompt.scope === "reconnect") this.reconnectNow(prompt.items[0].tabId);
   }
 
