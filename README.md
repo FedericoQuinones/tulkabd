@@ -18,11 +18,11 @@ See the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for det
 
 ## Use with AI assistants (MCP)
 
-tulkabd can act as an MCP server so Claude Code, Cursor or VS Code Copilot can list your connections, find tables and run read-only queries. The assistant only sees connections whose **AI access** is **Read only** (Production connections start at **No access**). tulkabd adds the saved password itself; it never reaches the assistant.
+tulkabd can act as an MCP server so Claude Code, Cursor or VS Code Copilot can list your connections, find tables and run read-only queries. The assistant only sees connections whose **AI access** is **Read only** (Production connections and connections saved before this version start at **No access**). tulkabd adds the saved password itself; it never reaches the assistant.
 
 ### 1. Allow a connection
 
-Edit connection › **AI access** › **Read only**. The default is **No access**.
+Edit connection › **AI access** › **Read only**. New Local, Test and Staging connections default to **Read only**; Production connections, and connections saved before this version, start at **No access**.
 
 ### 2. Register tulkabd in your assistant
 
@@ -60,13 +60,13 @@ Use the tools from Copilot Chat in Agent mode.
 | --- | --- |
 | `list_connections` | Lists the connections that allow AI access. |
 | `list_databases` | Lists the databases of a connection. |
-| `search_objects` | Finds tables, views and routines by name. |
+| `search_objects` | Finds tables, views and procedures by name. |
 | `describe_table` | Shows the columns, keys and indexes of a table or view. |
 | `run_query` | Runs a read-only query and returns the rows. |
 
 ### Limits
 
-Results are capped at 500 rows and queries at 30 seconds by default; both are configurable in Settings. Only `SELECT` and `WITH … SELECT` are accepted (several statements separated by `;` are fine if each one is a query). The check is lexical and refuses a query that contains any of these words anywhere:
+Results are capped at 500 rows and queries at 30 seconds by default; both are configurable in Settings. Each cell is cut at 2000 characters and a whole answer at 100 000 characters. Only `SELECT` and `WITH … SELECT` are accepted (several statements separated by `;` are fine if each one is a query). The check is lexical and refuses a query that contains any of these words anywhere:
 
 - Writes: `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `TRUNCATE`, `INTO` (so `SELECT … INTO`), `BULK`.
 - Schema and permissions: `ALTER`, `CREATE`, `DROP`, `GRANT`, `REVOKE`, `DENY`, `BACKUP`, `RESTORE`.
