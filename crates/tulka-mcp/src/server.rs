@@ -1,15 +1,17 @@
 //! The MCP server: five tools that forward to `tulka_app::ai`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig},
+    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
     schemars,
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
 };
 use serde::Deserialize;
+use tokio::sync::watch;
 use tulka_app::ai::{self, AiState, QueryRequest, SearchRequest, ToolText};
 use tulka_app::tulka_core::ObjectKind;
 
@@ -75,15 +77,45 @@ struct RunQueryParams {
     database: Option<String>,
     /// The T-SQL query: a single SELECT, or WITH followed by SELECT.
     sql: String,
-    /// Most rows to return. Lower than the default when few are needed.
+    /// Most rows to return. Capped at the row limit the user set in tulkabd.
     max_rows: Option<u32>,
 }
 
 /// The server. Cheap to build; all state lives in [`AiState`].
 pub struct TulkaServer {
     state: Arc<AiState>,
-    #[allow(dead_code, reason = "the tool_handler macro reaches this field")]
     tool_router: ToolRouter<Self>,
+    /// How many tool calls are running now.
+    in_flight: Arc<watch::Sender<usize>>,
+}
+
+/// Counts a running tool call for as long as it lives.
+struct InFlightGuard(Arc<watch::Sender<usize>>);
+
+impl InFlightGuard {
+    fn new(counter: &Arc<watch::Sender<usize>>) -> Self {
+        counter.send_modify(|n| *n += 1);
+        Self(counter.clone())
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.send_modify(|n| *n -= 1);
+    }
+}
+
+/// Lets the owner wait for the tool calls that are still running.
+#[derive(Clone)]
+pub struct InFlight(Arc<watch::Sender<usize>>);
+
+impl InFlight {
+    /// Waits until no tool call is running, at most `limit`. Calls whose
+    /// client left are cancelled and log themselves as they finish.
+    pub async fn drained(&self, limit: Duration) {
+        let mut rx = self.0.subscribe();
+        let _ = tokio::time::timeout(limit, rx.wait_for(|n| *n == 0)).await;
+    }
 }
 
 impl TulkaServer {
@@ -91,15 +123,24 @@ impl TulkaServer {
         Self {
             state,
             tool_router: Self::tool_router(),
+            in_flight: Arc::new(watch::channel(0).0),
         }
     }
 
-    /// Remembers the client's name for the run log. Read on every call, so it
-    /// does not matter how the client introduced itself.
-    fn note_client(&self, context: &RequestContext<RoleServer>) {
+    /// A handle to wait for running calls once the session is over.
+    pub fn in_flight(&self) -> InFlight {
+        InFlight(self.in_flight.clone())
+    }
+
+    /// Starts a call: remembers the client's name for the run log (read on
+    /// every call, so it does not matter how the client introduced itself)
+    /// and counts the call as running until the guard drops.
+    fn begin(&self, context: &RequestContext<RoleServer>) -> InFlightGuard {
+        let guard = InFlightGuard::new(&self.in_flight);
         if let Some(info) = context.client_info() {
             self.state.set_client(Some(info.name));
         }
+        guard
     }
 }
 
@@ -120,7 +161,7 @@ impl TulkaServer {
         description = "List the SQL Server connections the user shared with you (read only), with their environment and databases. Call this first."
     )]
     async fn list_connections(&self, context: RequestContext<RoleServer>) -> CallToolResult {
-        self.note_client(&context);
+        let _running = self.begin(&context);
         reply(ai::list_connections(&self.state).await)
     }
 
@@ -130,7 +171,7 @@ impl TulkaServer {
         Parameters(p): Parameters<ListDatabasesParams>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        self.note_client(&context);
+        let _running = self.begin(&context);
         reply(ai::list_databases(&self.state, p.connection).await)
     }
 
@@ -142,7 +183,7 @@ impl TulkaServer {
         Parameters(p): Parameters<SearchObjectsParams>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        self.note_client(&context);
+        let _running = self.begin(&context);
         let request = SearchRequest {
             query: p.query,
             connection: p.connection,
@@ -162,7 +203,7 @@ impl TulkaServer {
         Parameters(p): Parameters<DescribeTableParams>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        self.note_client(&context);
+        let _running = self.begin(&context);
         reply(ai::describe_table(&self.state, p.connection, p.database, p.table).await)
     }
 
@@ -174,7 +215,7 @@ impl TulkaServer {
         Parameters(p): Parameters<RunQueryParams>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        self.note_client(&context);
+        let _running = self.begin(&context);
         let request = QueryRequest {
             connection: p.connection,
             database: p.database,
@@ -185,10 +226,11 @@ impl TulkaServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for TulkaServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("tulkabd", env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)
     }
 }

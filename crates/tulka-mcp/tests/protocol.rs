@@ -114,6 +114,11 @@ async fn lists_the_five_tools_with_schemas() {
             "search_objects"
         ]
     );
+    let search = tools.iter().find(|t| t.name == "search_objects").unwrap();
+    let schema = serde_json::to_string(&*search.input_schema).unwrap();
+    for kind in ["\"table\"", "\"view\"", "\"procedure\""] {
+        assert!(schema.contains(kind), "kind schema lacks {kind}: {schema}");
+    }
     assert!(required("list_connections").is_empty());
     assert_eq!(required("list_databases"), ["connection"]);
     assert_eq!(required("search_objects"), ["query"]);
@@ -164,7 +169,7 @@ async fn bad_sql_is_a_tool_error_not_a_protocol_error() {
 /// rmcp 3.8 answers arguments that do not fit the schema as a tool error the
 /// model can read and fix (not as a JSON-RPC error), and never runs the tool.
 #[tokio::test]
-async fn missing_required_argument_is_invalid_params() {
+async fn missing_required_argument_is_a_tool_error() {
     let s = connect("test-client").await;
     let result = s
         .client
@@ -237,4 +242,29 @@ async fn cancelling_a_call_cancels_the_query() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("the cancelled query was never logged");
+}
+
+fn server_for_exit_tests() -> TulkaServer {
+    let f = Fixture::standard();
+    TulkaServer::new(Arc::new(f.state))
+}
+
+#[tokio::test]
+async fn client_leaving_after_initialize_exits_zero() {
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let exit = tokio::spawn(tulka_mcp::serve(server_for_exit_tests(), server_io));
+    let config = ClientConfig::new(ClientCapabilities::default(), Implementation::new("c", "1"));
+    let client = config.serve(client_io).await.expect("client starts");
+    drop(client.cancel().await);
+    assert_eq!(exit.await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn closing_before_initialize_exits_zero() {
+    let (server_io, client_io) = tokio::io::duplex(1024);
+    drop(client_io);
+    assert_eq!(
+        tulka_mcp::serve(server_for_exit_tests(), server_io).await,
+        0
+    );
 }

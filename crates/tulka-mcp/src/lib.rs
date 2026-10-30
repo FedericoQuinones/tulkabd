@@ -8,10 +8,20 @@ mod server;
 use std::io::Write;
 use std::sync::Arc;
 
-use rmcp::{transport::stdio, ServerHandler, ServiceExt};
+use std::time::Duration;
+
+use rmcp::{
+    service::{QuitReason, ServerInitializeError},
+    transport::{stdio, IntoTransport},
+    RoleServer, ServiceExt,
+};
 use tulka_app::ai::AiState;
 
-pub use server::TulkaServer;
+pub use server::{InFlight, TulkaServer};
+
+/// How long calls still running when the client leaves get to cancel their
+/// queries and write their run log entries.
+const DRAIN_LIMIT: Duration = Duration::from_secs(10);
 
 /// Runs the server on standard input and output until the client closes
 /// them. Returns the process exit code: 0 when the client left, 1 when the
@@ -31,29 +41,45 @@ pub fn main_stdio() -> i32 {
     };
     runtime.block_on(async {
         let server = TulkaServer::new(Arc::new(AiState::open_default()));
-        serve(server).await
+        serve(server, stdio()).await
     })
 }
 
-/// Serves `server` on standard input and output.
-async fn serve(server: impl ServerHandler) -> i32 {
-    let running = match server.serve(stdio()).await {
+/// Serves `server` on `transport` until the client leaves, then lets the
+/// calls still running finish their bookkeeping. Returns the exit code.
+#[doc(hidden)]
+pub async fn serve<E, A>(
+    server: TulkaServer,
+    transport: impl IntoTransport<RoleServer, E, A>,
+) -> i32
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let in_flight = server.in_flight();
+    let running = match server.serve(transport).await {
         Ok(running) => running,
         // The client left before it said hello.
-        Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => return 0,
+        Err(ServerInitializeError::ConnectionClosed(_)) => return 0,
+        // Not the error's own text: it would print the client's message,
+        // which could carry a query.
+        Err(ServerInitializeError::ExpectedInitializeRequest(_)) => {
+            return fail("the client did not start with an MCP initialize request")
+        }
         Err(e) => return fail(&format!("cannot start the MCP session: {e}")),
     };
-    match running.waiting().await {
-        Ok(rmcp::service::QuitReason::JoinError(e)) | Err(e) => {
-            fail(&format!("the server stopped: {e}"))
-        }
+    let quit = running.waiting().await;
+    in_flight.drained(DRAIN_LIMIT).await;
+    match quit {
+        // rmcp reports a failed read as the pipe closing, so a transport
+        // error shows up as `Closed`; only a crashed service task lands here.
+        Ok(QuitReason::JoinError(e)) | Err(e) => fail(&format!("the server stopped: {e}")),
         // The client closed the pipe, or asked the server to stop.
         Ok(_) => 0,
     }
 }
 
 fn fail(message: &str) -> i32 {
-    let _ = writeln!(std::io::stderr(), "tulka-mcp: {message}");
+    let _ = writeln!(std::io::stderr(), "tulkabd: {message}");
     1
 }
 
@@ -77,8 +103,8 @@ fn has_stdio() -> bool {
     })
 }
 
-const USAGE: &str = "tulka-mcp is an MCP server and talks over standard input and output.\n\
-Do not start it by hand: add it to the MCP configuration of your AI assistant.\n";
+const USAGE: &str =
+    "tulkabd mcp speaks MCP over stdin/stdout; add it to an MCP client (see the README).\n";
 
 #[cfg(not(windows))]
 fn report_missing_stdio() {
