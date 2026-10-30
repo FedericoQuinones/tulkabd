@@ -139,7 +139,10 @@ impl SessionStore {
     /// `<data dir>/session.db`; in memory when there is no data dir.
     pub fn open_default() -> SessionStore {
         match directories::ProjectDirs::from("dev", "tulkabd", "tulkabd") {
-            Some(dirs) => Self::open(&dirs.data_dir().join("session.db")),
+            Some(dirs) => {
+                private_file::ensure_private_dir(dirs.data_dir());
+                Self::open(&dirs.data_dir().join("session.db"))
+            }
             None => Self::in_memory(),
         }
     }
