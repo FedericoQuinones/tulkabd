@@ -240,6 +240,31 @@ impl Session for FakeSession {
                 Err(DriverError::Cancelled)
             }
             "SELECT none" => Ok(()),
+            "SELECT wide then slow" | "SELECT wide then err" => {
+                send(ExecEvent::ResultStart {
+                    index: 0,
+                    columns: vec![column("t")],
+                })
+                .await?;
+                // Just under the output budget, so the estimate does not cut.
+                for _ in 0..52 {
+                    let rows = vec![vec![Value::Text("x".repeat(1900))]];
+                    send(ExecEvent::Rows { index: 0, rows }).await?;
+                }
+                if sql.trim().ends_with("err") {
+                    return Err(DriverError::Query {
+                        message: "e".repeat(5000),
+                        line: Some(2),
+                    });
+                }
+                let woken = self.wake.notified();
+                tokio::pin!(woken);
+                woken.as_mut().enable();
+                if !self.cancelled.load(Ordering::SeqCst) {
+                    woken.await;
+                }
+                Err(DriverError::Cancelled)
+            }
             "SELECT many" => {
                 send(ExecEvent::ResultStart {
                     index: 0,
@@ -360,7 +385,7 @@ impl Session for FakeSession {
                     columns: vec![column("t")],
                 })
                 .await?;
-                for _ in 0..100 {
+                for _ in 0..1000 {
                     send(ExecEvent::Rows {
                         index: 0,
                         rows: vec![vec![Value::Text("x".repeat(1900))]],

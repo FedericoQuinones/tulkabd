@@ -124,21 +124,65 @@ impl Collector {
         false
     }
 
-    /// Rows kept to show.
-    fn shown(&self) -> u64 {
-        self.sets.iter().map(|set| set.rows.len() as u64).sum()
-    }
-
     /// Whether there is anything to show besides a notice.
     fn has_output(&self) -> bool {
         !self.sets.is_empty() || !self.messages.is_empty()
     }
 
-    /// The answer: a header line, the result sets, the messages and, when
-    /// the output was cut, the notice. Never longer than the output budget.
-    fn text(&self, head: &Head<'_>) -> String {
+    /// The answer: a header line, the result sets, the messages, the notice
+    /// when the output was cut and then `trailer` (why the query stopped, or
+    /// its error). The whole stays within the output budget: rows and
+    /// messages that do not fit are left out, and the header counts only
+    /// the rows that are in the text.
+    fn render(&self, head: &Head<'_>, trailer: &str) -> Rendered {
+        let chars = |s: &str| s.chars().count();
+        let notice = format!("{}\n", format::OUTPUT_CUT);
+        let trailer = if trailer.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", capped(trailer))
+        };
+        // Room kept for the header, the lines that name each result set,
+        // the notice and the trailer.
+        let overhead = chars(&head.prefix()) + 120 + self.sets.len() * 160;
+        let mut left =
+            AI_MAX_OUTPUT_CHARS.saturating_sub(overhead + chars(&notice) + chars(&trailer));
+        let mut cut = self.cut;
+
+        let no_rows: &[Vec<Value>] = &[];
+        let mut tables: Vec<(String, usize)> = Vec::new();
+        for set in &self.sets {
+            let mut table = tulka_core::to_ai(&set.columns, no_rows);
+            let header_chars = chars(&table);
+            left = left.saturating_sub(header_chars);
+            let mut shown = 0;
+            for row in &set.rows {
+                // Just the row's line: what `to_ai` writes after the header.
+                let line = tulka_core::to_ai(&set.columns, std::slice::from_ref(row));
+                let line = &line[table_header_len(&set.columns)..];
+                if chars(line) > left {
+                    cut = true;
+                    left = 0;
+                    break;
+                }
+                left -= chars(line);
+                table.push_str(line);
+                shown += 1;
+            }
+            tables.push((table, shown));
+        }
+        let mut messages = String::new();
+        for line in &self.messages {
+            if chars(line) + 1 > left {
+                cut = true;
+                break;
+            }
+            left -= chars(line) + 1;
+            messages.push_str(line);
+            messages.push('\n');
+        }
+
         let mark = format::LIMIT_REACHED;
-        let mut out = String::new();
         let rows = |n: usize| {
             if n == 1 {
                 "1 row".to_string()
@@ -146,63 +190,72 @@ impl Collector {
                 format!("{n} rows")
             }
         };
+        let limit = |set: &ResultSet| {
+            if set.limit_reached {
+                format!(" ({mark})")
+            } else {
+                String::new()
+            }
+        };
         let prefix = head.prefix();
         let ms = head.elapsed_ms;
-        match self.sets.as_slice() {
-            [] => out.push_str(&format!("{prefix} · no rows returned · {ms} ms\n")),
-            [set] => {
-                let limit = if set.limit_reached {
-                    format!(" ({mark})")
-                } else {
-                    String::new()
-                };
+        let mut out = String::new();
+        match (self.sets.as_slice(), tables.as_slice()) {
+            ([], _) => out.push_str(&format!("{prefix} · no rows returned · {ms} ms\n")),
+            ([set], [(table, shown)]) => {
                 out.push_str(&format!(
-                    "{prefix} · {}{limit} · {ms} ms\n",
-                    rows(set.rows.len())
+                    "{prefix} · {}{} · {ms} ms\n{table}",
+                    rows(*shown),
+                    limit(set)
                 ));
-                out.push_str(&tulka_core::to_ai(&set.columns, &set.rows));
             }
-            sets => {
+            (sets, tables) => {
                 out.push_str(&format!(
                     "{prefix} · {} result sets · {ms} ms\n",
                     sets.len()
                 ));
-                for (i, set) in sets.iter().enumerate() {
-                    let limit = if set.limit_reached {
-                        format!(" ({mark})")
-                    } else {
-                        String::new()
-                    };
-                    out.push_str(&format!("#{} · {}{limit}\n", i + 1, rows(set.rows.len())));
-                    out.push_str(&tulka_core::to_ai(&set.columns, &set.rows));
+                for (i, (set, (table, shown))) in sets.iter().zip(tables).enumerate() {
+                    out.push_str(&format!(
+                        "#{} · {}{}\n{table}",
+                        i + 1,
+                        rows(*shown),
+                        limit(set)
+                    ));
                 }
             }
         }
-        if !self.messages.is_empty() {
+        if !messages.is_empty() {
             out.push_str("Messages:\n");
-            for line in &self.messages {
-                out.push_str(line);
-                out.push('\n');
-            }
+            out.push_str(&messages);
         }
-        // The running count while collecting is an estimate: the text is
-        // measured for real here.
-        let notice = format!("{}\n", format::OUTPUT_CUT);
-        let room = AI_MAX_OUTPUT_CHARS - notice.chars().count();
-        let over = out.chars().count() > AI_MAX_OUTPUT_CHARS;
-        if (self.cut || over) && out.chars().count() > room {
-            let end = out
-                .char_indices()
-                .nth(room)
-                .map_or(out.len(), |(end, _)| end);
-            // Back to the end of the last whole line.
-            out.truncate(out[..end].rfind('\n').map_or(0, |i| i + 1));
-        }
-        if self.cut || over {
+        if cut {
             out.push_str(&notice);
         }
-        out
+        out.push_str(&trailer);
+        Rendered {
+            text: out,
+            rows: tables.iter().map(|(_, shown)| *shown as u64).sum(),
+        }
     }
+}
+
+/// An answer and how many result rows it contains.
+struct Rendered {
+    text: String,
+    rows: u64,
+}
+
+/// Longest error or notice text appended to an answer, in characters.
+const TRAILER_CHARS: usize = 2000;
+
+fn capped(text: &str) -> String {
+    shorten_text(text, TRAILER_CHARS).unwrap_or_else(|| text.to_string())
+}
+
+/// Length of the header line `to_ai` writes for `columns`.
+fn table_header_len(columns: &[Column]) -> usize {
+    let no_rows: &[Vec<Value>] = &[];
+    tulka_core::to_ai(columns, no_rows).len()
 }
 
 /// What the header line of an answer names.
@@ -432,52 +485,49 @@ pub async fn run_query(
         database: &log_db,
         elapsed_ms,
     };
-    // Whatever was collected, then the reason it stopped, if it did.
-    let with_notice = |notice: String| {
-        if collector.has_output() {
-            format!("{}{notice}\n", collector.text(&head))
-        } else {
-            notice
-        }
-    };
-    let (outcome, answer) = match (stop, &result) {
-        (Some(Stop::Timeout), _) => (
-            RunLogOutcome::Cancelled,
-            ToolText::error(with_notice(format::timed_out(timeout_s))),
-        ),
+    // Why the query stopped (or its error), after whatever was collected.
+    let (outcome, is_error, trailer) = match (stop, &result) {
+        (Some(Stop::Timeout), _) => (RunLogOutcome::Cancelled, true, format::timed_out(timeout_s)),
         (Some(Stop::Client), _) => (
             RunLogOutcome::Cancelled,
-            ToolText::error(with_notice(format::CANCELLED.to_string())),
+            true,
+            format::CANCELLED.to_string(),
         ),
-        (Some(Stop::OutputCut), _) => (RunLogOutcome::Ok, ToolText::ok(collector.text(&head))),
+        (Some(Stop::OutputCut), _) => (RunLogOutcome::Ok, false, String::new()),
         (None, Some(Err(e))) => {
             let outcome = match e {
                 DriverError::Disconnected(_) => RunLogOutcome::Disconnected,
                 DriverError::Cancelled => RunLogOutcome::Cancelled,
                 _ => RunLogOutcome::Error,
             };
-            (
-                outcome,
-                ToolText::error(with_notice(format::on_connection(&v.label, e))),
-            )
+            (outcome, true, format::on_connection(&v.label, e))
         }
         _ if collector.disconnected => (
             RunLogOutcome::Disconnected,
-            ToolText::error(with_notice(format::on_connection(
-                &v.label,
-                &DriverError::Disconnected(String::new()),
-            ))),
+            true,
+            format::on_connection(&v.label, &DriverError::Disconnected(String::new())),
         ),
         _ => match collector.error.clone() {
-            Some(error) => (RunLogOutcome::Error, ToolText::error(with_notice(error))),
-            None => (RunLogOutcome::Ok, ToolText::ok(collector.text(&head))),
+            Some(error) => (RunLogOutcome::Error, true, error),
+            None => (RunLogOutcome::Ok, false, String::new()),
         },
+    };
+    let rendered = if is_error && !collector.has_output() {
+        Rendered {
+            text: capped(&trailer),
+            rows: 0,
+        }
+    } else {
+        collector.render(&head, &trailer)
     };
     let logged = Logged {
         outcome,
-        rows: Some(collector.shown()),
+        rows: Some(rendered.rows),
         elapsed_ms: Some(elapsed_ms),
     };
     s.log_run(v, &log_db, sql, logged).await;
-    answer
+    ToolText {
+        text: rendered.text,
+        is_error,
+    }
 }

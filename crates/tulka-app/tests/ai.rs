@@ -743,8 +743,21 @@ async fn output_is_cut_at_the_character_budget_and_the_query_cancelled() {
     assert!(out
         .text
         .ends_with("Output cut at 100,000 characters; narrow the query.\n"));
-    assert!(out.text.chars().count() < 100_100);
+    assert!(out.text.chars().count() <= 100_000);
     assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
+    // The driver was told to stop long before it sent everything.
+    assert_eq!(f.driver.script.cancels.load(Ordering::SeqCst), 1);
+    assert!(out.text.lines().count() < 100);
+    // The header counts the rows that are in the text.
+    let shown = out.text.lines().count() - 3;
+    assert!(
+        masked(&out.text).starts_with(&format!(
+            "Local · LOCAL › master · {shown} rows · N ms\nt\n"
+        )),
+        "{}",
+        out.text.lines().next().unwrap()
+    );
+    assert_eq!(f.runlog.list(None, 1)[0].rows, Some(shown as u64));
 }
 
 #[tokio::test]
@@ -982,4 +995,38 @@ async fn an_unknown_driver_is_logged_as_an_error() {
     let log = f.runlog.list(None, 5);
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].outcome, RunLogOutcome::Error);
+}
+
+#[tokio::test]
+async fn timeout_and_error_after_near_budget_output_stay_in_budget() {
+    let f = Fixture::standard();
+    f.set_preferences(|p| p.ai_query_timeout_s = 1);
+    let out = run(&f, "SELECT wide then slow").await;
+    assert!(out.is_error);
+    assert!(
+        out.text.chars().count() <= 100_000,
+        "{}",
+        out.text.chars().count()
+    );
+    assert!(out
+        .text
+        .ends_with("Timeout (1 s) reached; the query was cancelled.\n"));
+    let entry = &f.runlog.list(None, 1)[0];
+    assert_eq!(entry.outcome, RunLogOutcome::Cancelled);
+    let shown = out.text.lines().filter(|l| l.starts_with("xxx")).count() as u64;
+    assert_eq!(entry.rows, Some(shown));
+
+    let out = run(&f, "SELECT wide then err").await;
+    assert!(out.is_error);
+    assert!(out.text.chars().count() <= 100_000);
+    // The server's text is cut to 2000 characters.
+    let last = out.text.lines().last().unwrap();
+    assert!(last.starts_with("Error (line 2): eee") && last.ends_with('…'));
+    assert_eq!(last.chars().count(), 2001);
+    // It did not fit beside every row: some were left out, and it says so.
+    assert!(out.text.contains("Output cut at 100,000 characters"));
+    let shown = out.text.lines().filter(|l| l.starts_with("xxx")).count();
+    assert!(shown < 52);
+    assert!(out.text.contains(&format!("· {shown} rows · ")));
+    assert_eq!(f.runlog.list(None, 1)[0].rows, Some(shown as u64));
 }
