@@ -18,7 +18,7 @@ pub struct McpSetup {
     /// Absolute path of this executable (the AppImage itself under `$APPIMAGE`).
     pub command: String,
     pub args: Vec<String>,
-    /// `claude mcp add tulkabd -- <command> mcp`, with the command quoted
+    /// `claude mcp add --scope user tulkabd -- <command> mcp`, with the command quoted
     /// only when it contains whitespace.
     pub claude_code: String,
     /// `{"mcpServers": {"tulkabd": {"command": ..., "args": ["mcp"]}}}`, pretty,
@@ -51,7 +51,7 @@ pub fn mcp_setup_for(exe: &str) -> McpSetup {
     } else {
         exe.to_string()
     };
-    let claude_code = format!("claude mcp add {SERVER_NAME} -- {shown} mcp");
+    let claude_code = format!("claude mcp add --scope user {SERVER_NAME} -- {shown} mcp");
     let pretty = |v: serde_json::Value| serde_json::to_string_pretty(&v).unwrap_or_default();
     McpSetup {
         command: exe.to_string(),
@@ -95,11 +95,11 @@ mod tests {
         let s = mcp_setup_for(r"C:\Program Files\tulkabd\tulkabd.exe");
         assert_eq!(
             s.claude_code,
-            r#"claude mcp add tulkabd -- "C:\Program Files\tulkabd\tulkabd.exe" mcp"#
+            r#"claude mcp add --scope user tulkabd -- "C:\Program Files\tulkabd\tulkabd.exe" mcp"#
         );
         assert_eq!(
             mcp_setup_for("/usr/bin/tulkabd").claude_code,
-            "claude mcp add tulkabd -- /usr/bin/tulkabd mcp"
+            "claude mcp add --scope user tulkabd -- /usr/bin/tulkabd mcp"
         );
     }
 
