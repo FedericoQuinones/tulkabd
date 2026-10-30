@@ -210,13 +210,88 @@ test("unbindConnection leaves the tabs of that connection without a session and 
   const a = tabs.open({ kind: "query", connectionId: "c1" });
   const b = tabs.open({ kind: "query" });
   await flush();
-  tabs.unbindConnection("c1");
+  await tabs.unbindConnection("c1");
   const pa = tabs.list.find((x) => x.id === a)!.pane!;
   expect(pa.connectionId).toBeNull();
   expect(pa.session).toBeNull();
   expect(pa.notice).toBe("This connection was deleted.");
   expect(tabs.list.find((x) => x.id === b)!.pane!.notice).toBeNull();
   expect(ipc.closeSession).toHaveBeenCalledWith(a);
+  expect(tabs.closePrompt).toBeNull();
+});
+
+test("unbindConnection asks before ending a session with an open transaction", async () => {
+  const busy = await liveTab();
+  const quiet = await liveTab();
+  vi.mocked(ipc.transactionCount).mockImplementation(async (id) => (id === busy ? 2 : 0));
+  await tabs.unbindConnection("c1");
+  // The quiet tab is unbound at once; the other waits for the answer, session intact.
+  expect(tabs.list.find((x) => x.id === quiet)!.pane!.connectionId).toBeNull();
+  const pane = tabs.list.find((x) => x.id === busy)!.pane!;
+  expect(pane.connectionId).toBe("c1");
+  expect(tabs.closePrompt?.scope).toBe("unbind");
+  expect(tabs.closePrompt?.items.map((x) => x.tabId)).toEqual([busy]);
+  expect(ipc.closeSession).not.toHaveBeenCalledWith(busy);
+  expect(ipc.endTransactions).not.toHaveBeenCalled();
+
+  await tabs.answerClose(true);
+  expect(ipc.endTransactions).toHaveBeenCalledWith(busy, true);
+  expect(pane.connectionId).toBeNull();
+  expect(pane.session).toBeNull();
+  expect(pane.notice).toBe("This connection was deleted.");
+  expect(tabs.list.some((x) => x.id === busy)).toBe(true);
+  expect(tabs.closePrompt).toBeNull();
+});
+
+test("cancelling the unbind prompt keeps the session and its transaction", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await tabs.unbindConnection("c1");
+  tabs.cancelClose();
+  const pane = tabs.list.find((x) => x.id === id)!.pane!;
+  expect(tabs.closePrompt).toBeNull();
+  expect(pane.session).not.toBeNull();
+  expect(ipc.endTransactions).not.toHaveBeenCalled();
+  expect(ipc.closeSession).not.toHaveBeenCalledWith(id);
+});
+
+test("unbindConnection waits for a prompt that is already open", async () => {
+  const first = await liveTab();
+  const second = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await tabs.requestClose(first);
+  expect(tabs.closePrompt?.scope).toBe("tab");
+  const unbinding = tabs.unbindConnection("c1");
+  await flush();
+  expect(tabs.closePrompt?.scope).toBe("tab");
+  await tabs.answerClose(false);
+  await unbinding.then(() => flush());
+  expect(tabs.closePrompt?.scope).toBe("unbind");
+  expect(tabs.closePrompt?.items.map((x) => x.tabId)).toEqual([second]);
+});
+
+test("closing a tab that is still connecting asks when its session holds a transaction", async () => {
+  const id = await liveTab();
+  // A reconnect is in flight and the previous session still answers with a transaction.
+  vi.mocked(ipc.openSession).mockReturnValue(new Promise(() => {}));
+  tabs.reconnect(id);
+  await flush();
+  expect(tabs.list.find((x) => x.id === id)!.pane!.status).toBe("connecting");
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await tabs.requestClose(id);
+  expect(tabs.closePrompt?.items[0]).toMatchObject({ tabId: id, state: "open" });
+  expect(tabs.list.some((x) => x.id === id)).toBe(true);
+});
+
+test("closing a tab that is connecting for the first time closes without asking", async () => {
+  vi.mocked(ipc.openSession).mockReturnValue(new Promise(() => {}));
+  const id = tabs.open({ kind: "query", connectionId: "c1" });
+  await flush();
+  expect(tabs.list.find((x) => x.id === id)!.pane!.status).toBe("connecting");
+  await tabs.requestClose(id);
+  expect(tabs.closePrompt).toBeNull();
+  expect(tabs.list.some((x) => x.id === id)).toBe(false);
+  expect(ipc.closeSession).toHaveBeenCalledWith(id);
 });
 
 test("splitActive opens a tab bound like the active one in a new active group beside it", async () => {

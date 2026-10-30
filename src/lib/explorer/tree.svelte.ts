@@ -742,7 +742,7 @@ class ExplorerStore {
   async deleteConnection(id: string): Promise<boolean> {
     return this.attempt(async () => {
       await connections.remove(id);
-      tabs.unbindConnection(id);
+      void tabs.unbindConnection(id);
       this.expanded.delete(id);
       delete this.conns[id];
       this.schedulePersist();

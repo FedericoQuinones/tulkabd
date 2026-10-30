@@ -110,7 +110,7 @@ export interface CloseItem {
 
 /** The dialog asking whether to commit or roll back before a tab, or the window, closes. */
 export interface ClosePrompt {
-  scope: "tab" | "window";
+  scope: "tab" | "window" | "unbind";
   items: CloseItem[];
   /** An answer is being carried out. */
   busy: boolean;
@@ -494,14 +494,27 @@ export class TabsStore {
       }
       const [done] = left.splice(0, 1);
       if (prompt.scope === "tab") this.close(done.tabId);
+      else if (prompt.scope === "unbind") {
+        const tab = this.list.find((x) => x.id === done.tabId);
+        if (tab) this.unbindTab(tab);
+      }
     }
-    this.closePrompt = null;
+    this.endPrompt();
     if (prompt.scope === "window") await getCurrentWindow().destroy();
   }
 
   /** Leaves the transactions alone and keeps the tab (or the window) open. */
   cancelClose(): void {
-    if (this.closePrompt && !this.closePrompt.busy) this.closePrompt = null;
+    const prompt = this.closePrompt;
+    if (!prompt || prompt.busy) return;
+    if (prompt.scope === "unbind") {
+      // The connection is gone but these sessions live on until the user ends them.
+      for (const item of prompt.items) {
+        const pane = this.list.find((x) => x.id === item.tabId)?.pane;
+        if (pane) pane.notice = t("tabs.connectionDeleted");
+      }
+    }
+    this.endPrompt();
   }
 
   /** Opens (or reopens) the tab's session. The password prompt is raised through `passwordRequest`. */
@@ -547,17 +560,53 @@ export class TabsStore {
     this.dropRequest(req.tabId);
   }
 
-  /** A connection was deleted: its tabs keep their text but lose the session and the binding. */
-  unbindConnection(connectionId: string): void {
-    for (const tab of this.list) {
-      if (tab.pane?.connectionId !== connectionId) continue;
-      this.dropRequest(tab.id);
-      this.pending.delete(tab.id);
-      this.wanted.delete(tab.id);
-      tab.connectError = null;
-      tab.pane.unbind();
-      tab.pane.notice = t("tabs.connectionDeleted");
+  /**
+   * A connection was deleted: its tabs keep their text but lose the session and the binding. A
+   * tab whose session holds (or may hold) a transaction is not unbound until the user answers
+   * the same prompt a closing tab gets; cancelling it keeps that tab's session.
+   */
+  async unbindConnection(connectionId: string): Promise<void> {
+    const affected = () => this.list.filter((x) => x.pane?.connectionId === connectionId);
+    let checks: CloseCheck[];
+    for (;;) {
+      await this.promptIdle();
+      checks = await Promise.all(affected().map((x) => this.checkTab(x)));
+      // Another prompt took over while counting: wait for it and count again.
+      if (!this.closePrompt) break;
     }
+    const plan = closePlan(checks);
+    const asked = new Set(plan.ask ? plan.tabs.map((c) => c.tabId) : []);
+    for (const tab of affected()) if (!asked.has(tab.id)) this.unbindTab(tab);
+    if (plan.ask) {
+      const items = this.itemsOf(plan.tabs.filter((c) => this.list.some((x) => x.id === c.tabId)));
+      if (items.length > 0) this.closePrompt = { scope: "unbind", items, busy: false, error: null };
+    }
+  }
+
+  private unbindTab(tab: Tab): void {
+    if (!tab.pane) return;
+    this.dropRequest(tab.id);
+    this.pending.delete(tab.id);
+    this.wanted.delete(tab.id);
+    tab.connectError = null;
+    tab.pane.unbind();
+    tab.pane.notice = t("tabs.connectionDeleted");
+  }
+
+  private promptWaiters: (() => void)[] = [];
+
+  /** Resolves once no close prompt is showing. */
+  private promptIdle(): Promise<void> {
+    if (!this.closePrompt) return Promise.resolve();
+    return new Promise((resolve) => this.promptWaiters.push(resolve));
+  }
+
+  /** Dismisses the close prompt and lets whatever waited for it go on. */
+  private endPrompt(): void {
+    this.closePrompt = null;
+    const waiting = this.promptWaiters;
+    this.promptWaiters = [];
+    for (const resolve of waiting) resolve();
   }
 
   /** Binds a connection picked in the Explorer: reuses the active tab when it is an unbound query tab. */
@@ -865,7 +914,7 @@ export class TabsStore {
     this.activeGroupId = w.activeGroupId;
     this.passwordRequests = [];
     this.nameRequest = null;
-    this.closePrompt = null;
+    this.endPrompt();
     this.pending.clear();
     this.wanted.clear();
     for (const tab of w.list) this.track(tab);
@@ -961,7 +1010,7 @@ export class TabsStore {
     this.activeGroupId = g.id;
     this.passwordRequests = [];
     this.nameRequest = null;
-    this.closePrompt = null;
+    this.endPrompt();
     this.pending.clear();
     this.wanted.clear();
     this.counter = 0;
