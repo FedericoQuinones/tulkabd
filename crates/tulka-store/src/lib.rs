@@ -7,7 +7,9 @@ mod runlog;
 mod search;
 mod session;
 
-pub use cache::{CachedDatabase, MetaCache, SCHEMA_VERSION};
+pub use cache::{
+    CachedDatabase, MetaCache, ObjectMatch, ObjectMatches, ObjectQuery, SCHEMA_VERSION,
+};
 pub use runlog::{
     NewRun, RunLogEntry, RunLogOutcome, RunLogStore, RunSource, SharedRunLog, MAX_LOGGED_SQL_BYTES,
 };
