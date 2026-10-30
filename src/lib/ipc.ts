@@ -545,3 +545,16 @@ export type DataLocationKey = "config" | "queries" | "data";
 export const revealDataLocation = (which: DataLocationKey) => invoke<void>("reveal_data_location", { which });
 /** Empties the metadata cache and the search index; connected servers are indexed again. */
 export const clearMetadataCache = () => invoke<void>("clear_metadata_cache");
+
+/** What to paste into each AI assistant to register tulkabd as an MCP server. */
+export interface McpSetup {
+  command: string;
+  args: string[];
+  claudeCode: string;
+  mcpServersJson: string;
+  vscodeJson: string;
+}
+export const mcpSetup = () => invoke<McpSetup>("mcp_setup");
+/** Copies one of the setups to the clipboard. */
+export type McpSetupKind = "claude" | "json" | "vscode";
+export const copyMcpSetup = (kind: McpSetupKind) => invoke<void>("copy_mcp_setup", { kind });

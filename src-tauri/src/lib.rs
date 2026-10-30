@@ -126,6 +126,8 @@ commands![
     settings::data_locations,
     settings::reveal_data_location,
     settings::clear_metadata_cache,
+    settings::mcp_setup,
+    settings::copy_mcp_setup,
 ];
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -288,7 +290,9 @@ mod tests {
         "session::load_session",
         "session::save_session",
         "settings::clear_metadata_cache",
+        "settings::copy_mcp_setup",
         "settings::data_locations",
+        "settings::mcp_setup",
         "settings::reveal_data_location",
         "startup_probe",
     ];
