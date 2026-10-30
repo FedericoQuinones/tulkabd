@@ -1151,7 +1151,7 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         // `SELECT ... FROM (DELETE ... OUTPUT ...) AS d`.
         let composed = depth > 0
             && sc.is_punct(i.wrapping_sub(1), '(')
-            && (sc.is_kw(i, "UPDATE") || sc.is_kw(i, "DELETE"));
+            && (sc.is_kw(i, "UPDATE") || sc.is_kw(i, "DELETE") || sc.is_kw(i, "MERGE"));
         if depth > 0 && !composed {
             i += 1;
             continue;
@@ -1727,7 +1727,8 @@ mod tests {
 
     #[test]
     fn merge_deleting_without_a_condition_is_flagged() {
-        let delete_t: &[(GuardKind, Option<&str>)] = &[(GuardKind::DeleteWithoutWhere, Some("dbo.T"))];
+        let delete_t: &[(GuardKind, Option<&str>)] =
+            &[(GuardKind::DeleteWithoutWhere, Some("dbo.T"))];
         for sql in [
             "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.a = s.a WHEN NOT MATCHED BY SOURCE THEN DELETE;",
             "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.a = s.a WHEN NOT MATCHED BY SOURCE THEN DELETE",
@@ -1749,7 +1750,11 @@ mod tests {
         let f = findings("SELECT 1;\nMERGE dbo.T t USING dbo.S s ON t.id = s.id WHEN MATCHED THEN DELETE;\nSELECT 2;");
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].line, 1);
-        assert!(f[0].statement.starts_with("MERGE dbo.T") && f[0].statement.ends_with("DELETE"), "{}", f[0].statement);
+        assert!(
+            f[0].statement.starts_with("MERGE dbo.T") && f[0].statement.ends_with("DELETE"),
+            "{}",
+            f[0].statement
+        );
     }
 
     #[test]
@@ -1781,6 +1786,14 @@ mod tests {
         assert_eq!(
             kinds("MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED AND CASE WHEN s.a IS NULL THEN 0 ELSE 1 END = 1 THEN DELETE;"),
             vec![]
+        );
+    }
+
+    #[test]
+    fn merge_inside_parentheses_is_read() {
+        assert_eq!(
+            kinds("INSERT INTO dbo.Log SELECT act, id FROM (MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE OUTPUT $action, deleted.id) AS c (act, id);"),
+            want(&[(GuardKind::DeleteWithoutWhere, Some("dbo.T"))])
         );
     }
 
