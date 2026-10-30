@@ -10,11 +10,13 @@ export const DEFAULT_PREFERENCES: Preferences = {
   copyNumbers: "system",
   runLogDays: 30,
   environments: {
-    production: { color: "#e5566f", guard: "confirm" },
-    staging: { color: "#d9a441", guard: "off" },
-    test: { color: "#44a282", guard: "off" },
-    local: { color: "#4a8ad6", guard: "off" },
+    production: { color: "#e5566f", guard: "confirm", aiAccess: "none" },
+    staging: { color: "#d9a441", guard: "off", aiAccess: "readOnly" },
+    test: { color: "#44a282", guard: "off", aiAccess: "readOnly" },
+    local: { color: "#4a8ad6", guard: "off", aiAccess: "readOnly" },
   },
+  aiMaxRows: 500,
+  aiQueryTimeoutS: 30,
 };
 
 /** The saved preferences, shared by the whole interface. */

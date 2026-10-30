@@ -32,6 +32,7 @@ const base: ConnectionConfig = {
   environment: "local",
   color: "#3b82f6",
   guard: "off",
+  aiAccess: "none",
   encrypt: true,
   trustServerCertificate: true,
   connectTimeoutS: 15,
