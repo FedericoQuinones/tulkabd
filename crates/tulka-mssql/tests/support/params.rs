@@ -2,6 +2,7 @@
 //! database. Included with `#[path]`, so it is not a test target of its own.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
@@ -39,11 +40,13 @@ pub fn test_params() -> Option<ConnectParams> {
     Some(p)
 }
 
-/// Runs `sql` and returns its result together with every emitted event.
-pub async fn collect(
-    session: &mut dyn Session,
-    sql: &str,
-) -> (Result<(), DriverError>, Vec<ExecEvent>) {
+/// Runs `call` with a sender and returns its result together with every
+/// event sent meanwhile.
+pub async fn collect_with<F, Fut, R>(call: F) -> (R, Vec<ExecEvent>)
+where
+    F: FnOnce(mpsc::Sender<ExecEvent>) -> Fut,
+    Fut: Future<Output = R>,
+{
     let (tx, mut rx) = mpsc::channel(16);
     let collector = tokio::spawn(async move {
         let mut events = Vec::new();
@@ -52,8 +55,16 @@ pub async fn collect(
         }
         events
     });
-    let result = session.execute(sql, tx).await;
+    let result = call(tx).await;
     (result, collector.await.unwrap())
+}
+
+/// Runs `sql` and returns its result together with every emitted event.
+pub async fn collect(
+    session: &mut dyn Session,
+    sql: &str,
+) -> (Result<(), DriverError>, Vec<ExecEvent>) {
+    collect_with(|tx| session.execute(sql, tx)).await
 }
 
 /// Runs `sql` on a new session and panics if it fails.
@@ -92,24 +103,31 @@ where
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let name = format!("tulka_ro_{}_{nanos}", std::process::id());
+    // The counter keeps names apart where the clock is coarse.
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let name = format!(
+        "tulka_ro_{}_{nanos}_{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
     run(&admin, &format!("CREATE DATABASE [{name}]")).await;
 
     let mut p = admin.clone();
     p.database = Some(name.clone());
     // Spawned so that a panic in `body` still reaches the cleanup below.
     let outcome = tokio::spawn(prepare_and_run(p, body)).await;
-    run(
-        &admin,
-        &format!(
-            "ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; \
-             DROP DATABASE [{name}]"
-        ),
-    )
-    .await;
+    // Cleanup must not hide the failure of `body`, so its own failure is only reported.
+    let drop_sql = format!(
+        "ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{name}]"
+    );
+    let cleanup = tokio::spawn(async move { run(&admin, &drop_sql).await }).await;
     if let Err(e) = outcome {
+        if cleanup.is_err() {
+            eprintln!("could not drop the temporary database {name}");
+        }
         std::panic::resume_unwind(e.into_panic());
     }
+    cleanup.expect("drop the temporary database");
 }
 
 async fn prepare_and_run<F, Fut>(p: ConnectParams, body: F)

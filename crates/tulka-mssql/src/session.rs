@@ -377,12 +377,15 @@ impl MssqlSession {
         max_rows: u32,
         tx: Sender<ExecEvent>,
     ) -> Result<(), DriverError> {
+        // Cleared once, before the preamble: a cancel from here on stops the
+        // script, even one that lands between the preamble and its first batch.
+        self.cancel_requested.store(false, Ordering::SeqCst);
         if let Err(e) = self.query_rows(&read_only_preamble(max_rows)).await {
             // Unknown whether the transaction opened: do not keep the session.
             self.client = None;
             return Err(e);
         }
-        let result = self.execute(sql, tx).await;
+        let result = self.run_events(sql, tx).await;
         if matches!(result, Err(DriverError::Disconnected(_))) {
             // The server rolls back when the connection goes away.
             return result;
@@ -420,6 +423,49 @@ impl MssqlSession {
         tx: Sender<ExecEvent>,
     ) -> Result<(), DriverError> {
         self.run_rolled_back(sql, max_rows, tx).await
+    }
+
+    /// Runs the script and reports how it ended, leaving the cancel flag as it is.
+    async fn run_events(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError> {
+        let mut out = Emitter {
+            tx,
+            receiver_gone: false,
+            cancel: self.cancel.clone(),
+            cancel_requested: self.cancel_requested.clone(),
+        };
+
+        let result = match self.client.as_mut() {
+            None => Err(closed()),
+            Some(client) => run_script(client, sql, &mut out).await,
+        };
+        let Err(e) = result else { return Ok(()) };
+
+        match &e {
+            DriverError::Query { message, line } => {
+                out.send(ExecEvent::Message {
+                    kind: MessageKind::Error,
+                    text: message.clone(),
+                    line: *line,
+                })
+                .await;
+            }
+            DriverError::Disconnected(reason) => {
+                out.send(ExecEvent::Disconnected {
+                    reason: reason.clone(),
+                })
+                .await;
+            }
+            DriverError::Other(text) => {
+                out.send(ExecEvent::Message {
+                    kind: MessageKind::Error,
+                    text: text.clone(),
+                    line: None,
+                })
+                .await;
+            }
+            _ => {}
+        }
+        Err(self.fail(e))
     }
 
     /// Drops the connection when `e` means it was lost.
@@ -560,45 +606,7 @@ impl Session for MssqlSession {
 
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError> {
         self.cancel_requested.store(false, Ordering::SeqCst);
-        let mut out = Emitter {
-            tx,
-            receiver_gone: false,
-            cancel: self.cancel.clone(),
-            cancel_requested: self.cancel_requested.clone(),
-        };
-
-        let result = match self.client.as_mut() {
-            None => Err(closed()),
-            Some(client) => run_script(client, sql, &mut out).await,
-        };
-        let Err(e) = result else { return Ok(()) };
-
-        match &e {
-            DriverError::Query { message, line } => {
-                out.send(ExecEvent::Message {
-                    kind: MessageKind::Error,
-                    text: message.clone(),
-                    line: *line,
-                })
-                .await;
-            }
-            DriverError::Disconnected(reason) => {
-                out.send(ExecEvent::Disconnected {
-                    reason: reason.clone(),
-                })
-                .await;
-            }
-            DriverError::Other(text) => {
-                out.send(ExecEvent::Message {
-                    kind: MessageKind::Error,
-                    text: text.clone(),
-                    line: None,
-                })
-                .await;
-            }
-            _ => {}
-        }
-        Err(self.fail(e))
+        self.run_events(sql, tx).await
     }
 
     async fn execute_read_only(

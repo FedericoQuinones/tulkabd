@@ -6,7 +6,6 @@
 
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
 use tulka_core::{ConnectParams, Driver, DriverError, ExecEvent, MessageKind, Session, Value};
 use tulka_mssql::MssqlDriver;
 
@@ -543,16 +542,14 @@ async fn collect_read_only(
     sql: &str,
     max_rows: u32,
 ) -> (Result<(), DriverError>, Vec<ExecEvent>) {
-    let (tx, mut rx) = mpsc::channel(16);
-    let collector = tokio::spawn(async move {
-        let mut events = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            events.push(ev);
-        }
-        events
-    });
-    let result = session.execute_read_only(sql, max_rows, tx).await;
-    (result, collector.await.unwrap())
+    params::collect_with(|tx| session.execute_read_only(sql, max_rows, tx)).await
+}
+
+/// `SELECT @@TRANCOUNT` on `session`.
+async fn trancount(session: &mut dyn Session) -> Value {
+    let (result, events) = collect(session, "SELECT @@TRANCOUNT").await;
+    result.unwrap();
+    rows(&events).remove(0).remove(0)
 }
 
 #[tokio::test]
@@ -604,9 +601,8 @@ async fn query_error_is_reported_and_rolled_back() {
             matches!(result, Err(DriverError::Query { .. })),
             "{result:?}"
         );
-        // The closing statement ran, so the session still answers.
-        let (after, _) = collect(s.as_mut(), "SELECT 1").await;
-        after.unwrap();
+        // The closing statement ran and left no transaction open.
+        assert_eq!(trancount(s.as_mut()).await, Value::Int(0));
     })
     .await;
 }
