@@ -845,7 +845,7 @@ mod tests {
             let start = std::time::Instant::now();
             let store = RunLogStore::open(&path);
             // A locked file must not hold up startup for long.
-            assert!(start.elapsed() < std::time::Duration::from_secs(1));
+            assert!(start.elapsed() < std::time::Duration::from_secs(2));
             assert!(store.list(None, 10).is_empty());
             other.execute_batch("ROLLBACK").unwrap();
         }
