@@ -320,3 +320,15 @@ test("unbinding the pane with the guard dialog open logs a cancelled run too", a
   pane.unbind();
   expect(ipc.logCancelledRun).toHaveBeenCalledWith("t1", "DELETE FROM dbo.T");
 });
+
+test("Run anyway after the level became Block shows the blocked state, not an error", async () => {
+  // The dialog was opened under Confirm; meanwhile the backend level moved to Block, so the
+  // confirmed run comes back blocked.
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(needs).mockResolvedValueOnce(blockedSummary);
+  await pane.run("DELETE FROM dbo.T", 0);
+  await pane.confirmGuard(false);
+  expect(pane.blocked).toHaveLength(1);
+  expect(pane.guardPrompt).toBeNull();
+  expect(pane.messages.filter((m) => m.kind === "error")).toEqual([]);
+  expect(pane.status).toBe("idle");
+});
