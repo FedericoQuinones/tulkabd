@@ -1096,8 +1096,14 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
                 .split(|c: char| !is_word_char(c))
                 .next()
                 .unwrap_or("");
-            if first_word.eq_ignore_ascii_case("MERGE") && (!pure || other_literal_has_merge_part) {
-                // MERGE is not inspected, so it cannot be called safe.
+            if first_word.eq_ignore_ascii_case("MERGE")
+                && (!pure
+                    || (other_literal_has_merge_part
+                        && !has_word(&text, "USING")
+                        && !has_word(&text, "INTO")))
+            {
+                // A MERGE with holes in it, or only a header whose USING is in
+                // another literal, cannot be called safe.
                 out.push(unparsed());
             } else if level < MAX_DYNAMIC_LEVEL {
                 let mut found = Vec::new();
@@ -1807,6 +1813,18 @@ mod tests {
     }
 
     #[test]
+    fn a_pure_merge_literal_in_a_variable_is_analyzed() {
+        assert_eq!(
+            kinds("DECLARE @s nvarchar(max) = N'MERGE dbo.T t USING dbo.S s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = 1;'; EXEC(@s)"),
+            vec![]
+        );
+        assert_eq!(
+            kinds("DECLARE @s nvarchar(max) = N'MERGE dbo.T t USING dbo.S s ON t.id = s.id WHEN MATCHED THEN DELETE;'; EXEC(@s)"),
+            want(&[(GuardKind::DeleteWithoutWhere, Some("dbo.T"))])
+        );
+    }
+
+    #[test]
     fn keeps_the_whole_statement_text() {
         for sql in [
             "DROP TABLE IF EXISTS dbo.t",
@@ -2208,8 +2226,11 @@ mod tests {
     #[test]
     fn merge_in_a_literal_run_through_a_variable_is_unparsed() {
         use GuardKind::*;
+        assert_eq!(
+            kinds("DECLARE @s nvarchar(max) = N'MERGE dbo.Orders t USING dbo.X s ON 1=1 WHEN MATCHED THEN DELETE;'; EXEC(@s)"),
+            want(&[(DeleteWithoutWhere, Some("dbo.Orders"))])
+        );
         for sql in [
-            "DECLARE @s nvarchar(max) = N'MERGE dbo.Orders t USING dbo.X s ON 1=1 WHEN MATCHED THEN DELETE;'; EXEC(@s)",
             "DECLARE @s nvarchar(max) = N'MERGE dbo.Orders t USING ' + @src + N' s ON 1=1 WHEN MATCHED THEN DELETE;'; EXEC(@s)",
         ] {
             assert_eq!(kinds(sql), want(&[(Unparsed, None)]), "{sql}");
@@ -2290,7 +2311,7 @@ mod tests {
         assert_eq!(kinds("SET @msg = N'Merge complete'; EXEC(@s)"), vec![]);
         assert_eq!(
             kinds("DECLARE @s nvarchar(max) = N'MERGE INTO dbo.Orders t USING dbo.X s ON 1=1 WHEN MATCHED THEN DELETE;'; EXEC(@s)"),
-            want(&[(Unparsed, None)])
+            want(&[(DeleteWithoutWhere, Some("dbo.Orders"))])
         );
     }
 
