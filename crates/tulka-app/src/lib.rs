@@ -12,6 +12,7 @@
 //! [`NOT_ALLOWED`], [`NOT_TEXT`] and [`TOO_LARGE`].
 //! Background events go to [`AppEvents`].
 
+pub mod ai;
 pub mod connections;
 pub mod explorer;
 pub mod files;

@@ -555,10 +555,23 @@ impl MetaCache {
     /// rest; ties go to the shorter name, then alphabetical order. Read
     /// errors yield no matches.
     pub fn find_objects(&self, q: &ObjectQuery<'_>) -> ObjectMatches {
+        self.find_objects_in(q, &[])
+    }
+
+    /// Like [`MetaCache::find_objects`], but a connection listed in
+    /// `only_databases` is searched in those databases alone (compared
+    /// ignoring letter case), whatever else is cached for it. The
+    /// restriction is part of the query, so `total` and `capped` stay exact.
+    pub fn find_objects_in(
+        &self,
+        q: &ObjectQuery<'_>,
+        only_databases: &[(String, Vec<String>)],
+    ) -> ObjectMatches {
         if q.connection_ids.is_empty() || q.terms.is_empty() {
             return ObjectMatches::default();
         }
-        let mut args: Vec<String> = q.connection_ids.to_vec();
+        let restricted = |id: &String| only_databases.iter().find(|(c, _)| c == id);
+        let mut args: Vec<String> = Vec::new();
         let (select, name_expr) = if q.in_columns {
             (
                 "SELECT o.connection_id, o.database, o.schema, o.name, o.kind, c.name
@@ -571,10 +584,36 @@ impl MetaCache {
                 "(o.schema || '.' || o.name)",
             )
         };
-        let marks = vec!["?"; args.len()].join(",");
-        let mut sql = format!("{select} WHERE o.connection_id IN ({marks})");
+        let mut alternatives: Vec<String> = Vec::new();
+        let open: Vec<&String> = q
+            .connection_ids
+            .iter()
+            .filter(|id| restricted(id).is_none())
+            .collect();
+        if !open.is_empty() {
+            alternatives.push(format!(
+                "o.connection_id IN ({})",
+                vec!["?"; open.len()].join(",")
+            ));
+            args.extend(open.into_iter().cloned());
+        }
+        for id in q.connection_ids {
+            if let Some((_, names)) = restricted(id) {
+                if names.is_empty() {
+                    alternatives.push("0".to_string());
+                } else {
+                    args.push(id.clone());
+                    args.extend(names.iter().cloned());
+                    alternatives.push(format!(
+                        "(o.connection_id = ? AND o.database COLLATE NOCASE IN ({}))",
+                        vec!["?"; names.len()].join(",")
+                    ));
+                }
+            }
+        }
+        let mut sql = format!("{select} WHERE ({})", alternatives.join(" OR "));
         if let Some(db) = q.database {
-            sql.push_str(" AND o.database = ?");
+            sql.push_str(" AND o.database = ? COLLATE NOCASE");
             args.push(db.to_string());
         }
         if let Some(kind) = q.kind {
