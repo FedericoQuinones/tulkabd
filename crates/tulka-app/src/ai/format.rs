@@ -1,7 +1,7 @@
 //! The texts an AI assistant receives. They are plain English and never
 //! mention sentinels: the model reads them and acts on them.
 
-use tulka_core::{Column, Value};
+use tulka_core::{Column, DriverError, Value};
 
 /// Answer when no connection is shared with AI assistants.
 pub(crate) const NO_CONNECTIONS: &str =
@@ -34,8 +34,40 @@ pub(crate) fn config_unreadable(error: &str) -> String {
     format!("tulkabd could not read its configuration: {error}")
 }
 
-pub(crate) fn connect_failed(connection: &str, error: &str) -> String {
-    format!("Could not connect to \"{connection}\": {error}")
+pub(crate) fn no_databases_selected(connection: &str) -> String {
+    format!("\"{connection}\" has no databases selected in tulkabd, so there is nothing to use.")
+}
+
+pub(crate) fn connect_failed(connection: &str, error: &DriverError) -> String {
+    format!(
+        "Could not connect to \"{connection}\": {}",
+        driver_failure(error)
+    )
+}
+
+/// What a driver error says to the assistant. The messages drivers produce
+/// can carry the server address or the login name, which the assistant must
+/// not learn, so only a server's own query error keeps its text.
+pub(crate) fn driver_failure(error: &DriverError) -> String {
+    match error {
+        DriverError::Query {
+            message,
+            line: Some(line),
+        } => format!("Error (line {line}): {message}"),
+        DriverError::Query {
+            message,
+            line: None,
+        } => format!("Error: {message}"),
+        DriverError::Unreachable(_) => "the server could not be reached.".into(),
+        DriverError::AuthFailed(_) => {
+            "the saved login was rejected; open tulkabd and check the connection.".into()
+        }
+        DriverError::Tls(_) => "the secure connection (TLS) could not be set up.".into(),
+        DriverError::Cancelled => "the request was cancelled.".into(),
+        DriverError::Disconnected(_) => "the connection was lost.".into(),
+        DriverError::NoAccess(_) => "the login has no access to that database.".into(),
+        DriverError::Other(_) => "the request failed.".into(),
+    }
 }
 
 /// A table of text cells in the compact `|` format shared with "Copy for

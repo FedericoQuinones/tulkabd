@@ -6,6 +6,7 @@ use common::ai_fixture::*;
 use tulka_app::ai::{
     describe_table, list_connections, list_databases, search_objects, SearchRequest, ToolText,
 };
+use tulka_core::SecretStore as _;
 use tulka_core::{
     AiAccess, ColumnInfo, DatabaseScope, DatabaseSnapshot, DbObject, Environment, Folder,
     ForeignKey, IndexInfo, ObjectKind, TableStructure,
@@ -230,7 +231,7 @@ async fn unreachable_server_falls_back_to_the_cache() {
     assert_eq!(
         out,
         ToolText {
-            text: "Could not connect to \"Local\": server unreachable: connection refused".into(),
+            text: "Could not connect to \"Local\": the server could not be reached.".into(),
             is_error: true,
         }
     );
@@ -512,5 +513,106 @@ async fn sessions_use_the_ai_application_name() {
             .live
             .load(std::sync::atomic::Ordering::SeqCst),
         0
+    );
+}
+
+#[tokio::test]
+async fn connect_errors_never_carry_the_host_or_the_login() {
+    let mut local = connection("Local", Environment::Local, AiAccess::ReadOnly);
+    local.user = "svc_report".into();
+    let f = Fixture::with(vec![local.clone()], Vec::new());
+    let leaks = |text: &str| text.contains("db.example.com") || text.contains("svc_report");
+
+    *f.driver.script.databases.lock().unwrap() = None;
+    let unreachable = list_databases(&f.state, "Local".into()).await;
+    let described = describe_table(&f.state, "Local".into(), None, "t".into()).await;
+    let mut req = search("t");
+    req.database = Some("x".into());
+    let live = search_objects(&f.state, req).await;
+    f.secrets.set(&local.id, "another password").unwrap();
+    let rejected = describe_table(&f.state, "Local".into(), None, "t".into()).await;
+    for out in [&unreachable, &described, &live, &rejected] {
+        assert!(out.is_error);
+        assert!(!leaks(&out.text), "{}", out.text);
+        assert!(!out.text.contains("another password"));
+    }
+    assert_eq!(
+        rejected.text,
+        "Could not connect to \"Local\": the saved login was rejected; open tulkabd and check the connection."
+    );
+}
+
+#[tokio::test]
+async fn search_ignores_cached_databases_outside_the_selection() {
+    let mut a = connection("A", Environment::Test, AiAccess::ReadOnly);
+    a.databases = selected(&["erp"]);
+    let b = connection("B", Environment::Test, AiAccess::ReadOnly);
+    let f = Fixture::with(vec![a.clone(), b.clone()], Vec::new());
+    // Indexed while A exposed every database, before it was narrowed.
+    f.seed(&a.id, "erp", &[("dbo", "clientes_ok")]);
+    f.seed(&a.id, "stale", &[("dbo", "clientes_stale")]);
+    f.seed(&b.id, "stale", &[("dbo", "clientes_b")]);
+
+    let out = search_objects(&f.state, search("clientes")).await;
+    assert_eq!(
+        out.text,
+        "connection|database|kind|object\nB|stale|table|dbo.clientes_b\n\
+         A|erp|table|dbo.clientes_ok\n2 of 2 matches"
+    );
+    let mut req = search("clientes");
+    req.database = Some("STALE".into());
+    let out = search_objects(&f.state, req).await;
+    assert_eq!(
+        out.text,
+        "connection|database|kind|object\nB|stale|table|dbo.clientes_b\n1 of 1 matches"
+    );
+}
+
+#[tokio::test]
+async fn database_names_are_matched_ignoring_case() {
+    let f = Fixture::standard();
+    f.seed(&id_of(&f, "Local"), "sales", &[("dbo", "clientes")]);
+    let mut req = search("cli");
+    req.connection = Some("Local".into());
+    req.database = Some("SALES".into());
+    let out = search_objects(&f.state, req).await;
+    assert_eq!(
+        out.text,
+        "connection|database|kind|object\nLocal|sales|table|dbo.clientes\n1 of 1 matches"
+    );
+    assert!(f.driver.script.snapshots_asked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_selection_with_no_databases_offers_nothing() {
+    let mut local = connection("Local", Environment::Local, AiAccess::ReadOnly);
+    local.databases = selected(&[]);
+    let f = Fixture::with(vec![local], Vec::new());
+    let out = describe_table(&f.state, "Local".into(), None, "t".into()).await;
+    assert_eq!(
+        out,
+        ToolText {
+            text: "\"Local\" has no databases selected in tulkabd, so there is nothing to use."
+                .into(),
+            is_error: true,
+        }
+    );
+    assert!(f.driver.script.connects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_hidden_namesake_does_not_rename_the_visible_connection() {
+    let folders = vec![Folder {
+        id: "f1".into(),
+        name: "Other".into(),
+        parent_id: None,
+    }];
+    let mut hidden = connection("Local", Environment::Production, AiAccess::None);
+    hidden.folder_id = Some("f1".into());
+    let visible = connection("Local", Environment::Local, AiAccess::ReadOnly);
+    let f = Fixture::with(vec![hidden, visible], folders);
+    assert_eq!(
+        list_connections(&f.state).await.text,
+        "connection|environment|databases\nLocal|local|all (not indexed)\n"
     );
 }

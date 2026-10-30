@@ -68,10 +68,16 @@ impl Driver for FakeDriver {
     async fn connect(&self, p: &ConnectParams) -> Result<Box<dyn Session>, DriverError> {
         self.script.connects.lock().unwrap().push(p.clone());
         if p.password != PASSWORD {
-            return Err(DriverError::AuthFailed("Login failed for user".into()));
+            return Err(DriverError::AuthFailed(format!(
+                "Login failed for user {}@{}",
+                p.user, p.server
+            )));
         }
         if self.script.databases.lock().unwrap().is_none() {
-            return Err(DriverError::Unreachable("connection refused".into()));
+            return Err(DriverError::Unreachable(format!(
+                "{}:{}: connection refused for {}",
+                p.server, p.port, p.user
+            )));
         }
         let now = self.script.live.fetch_add(1, Ordering::SeqCst) + 1;
         self.script.peak.fetch_max(now, Ordering::SeqCst);

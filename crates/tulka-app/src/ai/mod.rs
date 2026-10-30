@@ -13,6 +13,7 @@ mod format;
 mod tools;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -74,7 +75,10 @@ pub struct AiState {
     secrets: Arc<dyn SecretStore>,
     drivers: HashMap<&'static str, Arc<dyn Driver>>,
     /// The app's metadata cache, if it exists.
-    cache: Option<Arc<MetaCache>>,
+    cache: Mutex<Option<Arc<MetaCache>>>,
+    /// Where to look for the cache while it does not exist yet (the app
+    /// creates it the first time it runs).
+    cache_path: Option<PathBuf>,
     /// Where queries are recorded.
     #[allow(dead_code)]
     runlog: Arc<SharedRunLog>,
@@ -97,7 +101,8 @@ impl AiState {
             config_error: None,
             secrets,
             drivers: drivers.into_iter().map(|d| (d.id(), d)).collect(),
-            cache,
+            cache: Mutex::new(cache),
+            cache_path: None,
             runlog,
             slots: Semaphore::new(MAX_SERVER_CALLS),
             client: Mutex::new(None),
@@ -110,16 +115,22 @@ impl AiState {
     pub fn open_default() -> Self {
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore::new());
         let drivers: Vec<Arc<dyn Driver>> = vec![Arc::new(MssqlDriver)];
-        let cache = MetaCache::default_path()
-            .and_then(|path| MetaCache::open_existing(&path))
+        let cache_path = MetaCache::default_path();
+        let cache = cache_path
+            .as_deref()
+            .and_then(MetaCache::open_existing)
             .map(Arc::new);
         let runlog = Arc::new(SharedRunLog::open_default());
-        match ConfigStore::open_default() {
+        let state = match ConfigStore::open_default() {
             Ok(config) => Self::new(config, secrets, drivers, cache, runlog),
             Err(e) => Self {
                 config_error: Some(e.to_string()),
                 ..Self::new(ConfigStore::at(""), secrets, drivers, cache, runlog)
             },
+        };
+        Self {
+            cache_path,
+            ..state
         }
     }
 
@@ -223,13 +234,33 @@ impl AiState {
             .expect("the semaphore is never closed")
     }
 
+    /// The cache, opened now if the app created it after this process began.
+    async fn current_cache(&self) -> Option<Arc<MetaCache>> {
+        let known = self
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if known.is_some() {
+            return known;
+        }
+        let path = self.cache_path.clone()?;
+        let opened = blocking(move || MetaCache::open_existing(&path))
+            .await
+            .ok()
+            .flatten()
+            .map(Arc::new)?;
+        *self.cache.lock().unwrap_or_else(PoisonError::into_inner) = Some(opened.clone());
+        Some(opened)
+    }
+
     /// Runs `f` on the metadata cache, off the async runtime. `None` without
     /// a cache.
     async fn with_cache<T: Send + 'static>(
         &self,
         f: impl FnOnce(&MetaCache) -> T + Send + 'static,
     ) -> Option<T> {
-        let cache = self.cache.clone()?;
+        let cache = self.current_cache().await?;
         blocking(move || f(&cache)).await.ok()
     }
 }
@@ -248,6 +279,9 @@ impl Visible {
         let requested = requested.map(str::trim).filter(|d| !d.is_empty());
         match &self.conn.databases {
             DatabaseScope::All => Ok(requested.map(str::to_string)),
+            DatabaseScope::Selected { names } if names.is_empty() => {
+                Err(ToolText::error(format::no_databases_selected(&self.label)))
+            }
             DatabaseScope::Selected { names } => match requested {
                 None => Ok(names.first().cloned()),
                 Some(wanted) => names

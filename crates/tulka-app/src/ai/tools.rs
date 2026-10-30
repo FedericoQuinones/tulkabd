@@ -115,7 +115,7 @@ pub async fn list_databases(s: &AiState, connection: String) -> ToolText {
             v.label,
             format::table(&["database", "access"], rows(names))
         )),
-        Err(e) if cached.is_empty() => ToolText::error(format::connect_failed(&v.label, &e.to_string())),
+        Err(e) if cached.is_empty() => ToolText::error(format::connect_failed(&v.label, &e)),
         Err(_) => ToolText::ok(format!(
             "{} › databases (all; the server could not be reached, so this is what tulkabd cached)\n{}",
             v.label,
@@ -191,6 +191,15 @@ pub async fn search_objects(s: &AiState, req: SearchRequest) -> ToolText {
     }
 
     let ids: Vec<String> = scope.iter().map(|v| v.conn.id.clone()).collect();
+    // A connection that selects databases is searched in those alone, even
+    // if the cache still holds others from when it exposed all of them.
+    let only_databases: Vec<(String, Vec<String>)> = scope
+        .iter()
+        .filter_map(|v| match &v.conn.databases {
+            DatabaseScope::Selected { names } => Some((v.conn.id.clone(), names.clone())),
+            DatabaseScope::All => None,
+        })
+        .collect();
     let cached: Vec<Vec<CachedDatabase>> = {
         let ids = ids.clone();
         s.with_cache(move |c| ids.iter().map(|id| c.databases(id)).collect())
@@ -230,14 +239,17 @@ pub async fn search_objects(s: &AiState, req: SearchRequest) -> ToolText {
         let (kind, in_columns, db) = (req.kind, req.in_columns, database.clone());
         let found = s
             .with_cache(move |c| {
-                c.find_objects(&ObjectQuery {
-                    connection_ids: &ids,
-                    database: db.as_deref(),
-                    terms: &terms,
-                    kind,
-                    in_columns,
-                    limit,
-                })
+                c.find_objects_in(
+                    &ObjectQuery {
+                        connection_ids: &ids,
+                        database: db.as_deref(),
+                        terms: &terms,
+                        kind,
+                        in_columns,
+                        limit,
+                    },
+                    &only_databases,
+                )
             })
             .await
             .unwrap_or_default();
@@ -311,7 +323,7 @@ async fn live_search(
         session.snapshot(database).await
     }
     .await
-    .map_err(|e| ToolText::error(format::connect_failed(&v.label, &e.to_string())))?;
+    .map_err(|e| ToolText::error(format::connect_failed(&v.label, &e)))?;
 
     let lower: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
     let all_in = |text: &str| {
@@ -397,13 +409,13 @@ pub async fn describe_table(
     let _slot = s.slot().await;
     let mut session = match driver.connect(&params).await {
         Ok(session) => session,
-        Err(e) => return ToolText::error(format::connect_failed(&v.label, &e.to_string())),
+        Err(e) => return ToolText::error(format::connect_failed(&v.label, &e)),
     };
     let database = match database {
         Some(db) => db,
         None => match session.current_database().await {
             Ok(db) => db,
-            Err(e) => return ToolText::error(e.to_string()),
+            Err(e) => return ToolText::error(format::driver_failure(&e)),
         },
     };
 
@@ -413,7 +425,7 @@ pub async fn describe_table(
     };
     let structure = match session.structure(&database, &schema, &name).await {
         Ok(structure) => structure,
-        Err(e) => return ToolText::error(e.to_string()),
+        Err(e) => return ToolText::error(format::driver_failure(&e)),
     };
     if structure.columns.is_empty() {
         return ToolText::error(format!(
