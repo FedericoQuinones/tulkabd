@@ -13,8 +13,10 @@ vi.mock("../ipc", () => ({
   startupError: vi.fn(),
   transactionCount: vi.fn(),
   endTransactions: vi.fn(),
+  onQuitRequested: vi.fn(),
 }));
 
+let quitRequested: (() => void) | null = null;
 let closeRequested: ((event: { preventDefault: () => void }) => Promise<void>) | null = null;
 const destroy = vi.fn(async () => {});
 vi.mock("@tauri-apps/api/window", () => ({
@@ -47,8 +49,13 @@ beforeEach(async () => {
   vi.mocked(ipc.transactionCount).mockResolvedValue(0);
   vi.mocked(ipc.endTransactions).mockResolvedValue();
   vi.mocked(ipc.cancelQuery).mockResolvedValue();
+  vi.mocked(ipc.onQuitRequested).mockImplementation(async (cb) => {
+    quitRequested = cb;
+    return () => {};
+  });
   destroy.mockClear();
   closeRequested = null;
+  quitRequested = null;
   connections.list = [conn, nopw];
   await tabs.reset();
   vi.mocked(ipc.closeSession).mockClear();
@@ -529,6 +536,40 @@ test("window close with two open tabs asks once", async () => {
   expect(ipc.endTransactions).toHaveBeenCalledWith(b, true);
   expect(ipc.endTransactions).toHaveBeenCalledTimes(2);
   expect(destroy).toHaveBeenCalledTimes(1);
+});
+
+test("a quit request with an open transaction asks and keeps the app running", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await armWindowClose();
+  expect(quitRequested).not.toBeNull();
+  quitRequested!();
+  await flush();
+  expect(tabs.closePrompt?.scope).toBe("window");
+  expect(tabs.closePrompt?.items.map((x) => x.tabId)).toEqual([id]);
+  expect(destroy).not.toHaveBeenCalled();
+  await tabs.answerClose(false);
+  expect(destroy).toHaveBeenCalledTimes(1);
+});
+
+test("a quit request with nothing to ask closes the window, which ends the app", async () => {
+  await liveTab();
+  await armWindowClose();
+  quitRequested!();
+  await flush();
+  expect(tabs.closePrompt).toBeNull();
+  expect(destroy).toHaveBeenCalledTimes(1);
+});
+
+test("a quit request while a prompt is open leaves the window alone", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await tabs.requestClose(id);
+  await armWindowClose();
+  quitRequested!();
+  await flush();
+  expect(tabs.closePrompt?.scope).toBe("tab");
+  expect(destroy).not.toHaveBeenCalled();
 });
 
 test("Cancel keeps the window open", async () => {

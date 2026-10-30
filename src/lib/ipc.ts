@@ -505,6 +505,9 @@ export const writeSqlFile = (path: string, text: string, encoding: FileEncoding,
 export const onSqlFilesDropped = (cb: (paths: string[]) => void): Promise<UnlistenFn> =>
   listen<string[]>("sql-files-dropped", (ev) => cb(ev.payload));
 
+/** The user asked to quit the app (Cmd+Q on macOS), which has no close request on the window. */
+export const onQuitRequested = (cb: () => void): Promise<UnlistenFn> => listen("quit-requested", () => cb());
+
 /** Subscribes to the explorer and indexing events. Call the returned function to stop. */
 export const onAppEvent = (cb: (e: AppEvent) => void): Promise<UnlistenFn> =>
   listen<AppEvent>("app-event", (ev) => cb(ev.payload));

@@ -991,8 +991,31 @@ export class TabsStore {
         else unlisten = fn;
       })
       .catch(() => {});
+    // macOS Cmd+Q quits without a close request on the window: the app holds the exit and asks
+    // the UI to go through the same flow, then destroys the window, which ends the app.
+    let unlistenQuit: (() => void) | null = null;
+    try {
+      void Promise.resolve(
+        ipc.onQuitRequested(() => {
+          void (async () => {
+            if (!stopped && !held) await flush();
+            let kept = false;
+            await this.confirmWindowClose({ preventDefault: () => (kept = true) });
+            if (!kept) await getCurrentWindow().destroy();
+          })().catch(() => {});
+        }),
+      )
+        .then((fn) => {
+          if (stopped) fn();
+          else unlistenQuit = fn;
+        })
+        .catch(() => {});
+    } catch {
+      // No event channel (a test double): the window close request is all there is.
+    }
     return () => {
       stopped = true;
+      unlistenQuit?.();
       clearTimeout(timer);
       clearTimeout(maxTimer);
       stopEffect();
