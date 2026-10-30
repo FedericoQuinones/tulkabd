@@ -110,7 +110,7 @@ export interface CloseItem {
 
 /** The dialog asking whether to commit or roll back before a tab, or the window, closes. */
 export interface ClosePrompt {
-  scope: "tab" | "window" | "unbind";
+  scope: "tab" | "window" | "unbind" | "reconnect";
   items: CloseItem[];
   /** An answer is being carried out. */
   busy: boolean;
@@ -501,6 +501,7 @@ export class TabsStore {
     }
     this.endPrompt();
     if (prompt.scope === "window") await getCurrentWindow().destroy();
+    if (prompt.scope === "reconnect") this.reconnectNow(prompt.items[0].tabId);
   }
 
   /** Leaves the transactions alone and keeps the tab (or the window) open. */
@@ -637,13 +638,36 @@ export class TabsStore {
     void this.connectTab(id, conn, undefined, pane.database ?? undefined);
   }
 
-  /** Reopens a query tab's session on the connection and database it was bound to. */
+  /**
+   * Reopens a query tab's session on the connection and database it was bound to. A live session
+   * is replaced, so a transaction it holds is asked about first, like when the tab closes;
+   * cancelling leaves the session as it was.
+   */
   reconnect(id: string): void {
+    const pane = this.list.find((x) => x.id === id)?.pane;
+    if (!pane) return;
+    if (!pane.session || pane.status !== "idle") {
+      this.reconnectNow(id);
+      return;
+    }
+    void this.askThenReconnect(id);
+  }
+
+  private async askThenReconnect(id: string): Promise<void> {
     const tab = this.list.find((x) => x.id === id);
-    const pane = tab?.pane;
-    if (!tab || !pane) return;
+    if (!tab || this.closePrompt) return;
+    const plan = closePlan([await this.checkTab(tab)]);
+    // Closed meanwhile, or another prompt took over while counting.
+    if (!this.list.some((x) => x.id === id) || this.closePrompt) return;
+    if (plan.ask) this.closePrompt = { scope: "reconnect", items: this.itemsOf(plan.tabs), busy: false, error: null };
+    else this.reconnectNow(id);
+  }
+
+  private reconnectNow(id: string): void {
+    const pane = this.list.find((x) => x.id === id)?.pane;
+    if (!pane) return;
     const conn = connections.list.find((c) => c.id === pane.connectionId);
-    if (conn) void this.connectTab(tab.id, conn, undefined, pane.database ?? undefined);
+    if (conn) void this.connectTab(id, conn, undefined, pane.database ?? undefined);
   }
 
   /** Loads (or reloads) a definition tab's text; needs the Explorer session. */
