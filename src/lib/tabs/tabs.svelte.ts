@@ -110,7 +110,7 @@ export interface CloseItem {
 
 /** The dialog asking whether to commit or roll back before a tab, or the window, closes. */
 export interface ClosePrompt {
-  scope: "tab" | "window" | "unbind";
+  scope: "tab" | "window" | "unbind" | "reconnect";
   items: CloseItem[];
   /** An answer is being carried out. */
   busy: boolean;
@@ -497,6 +497,12 @@ export class TabsStore {
       else if (prompt.scope === "unbind") {
         const tab = this.list.find((x) => x.id === done.tabId);
         if (tab) this.unbindTab(tab);
+      } else if (prompt.scope === "reconnect") {
+        const next = this.resume.get(done.tabId);
+        this.resume.delete(done.tabId);
+        this.endPrompt();
+        next?.();
+        return;
       }
     }
     this.endPrompt();
@@ -514,14 +520,31 @@ export class TabsStore {
         if (pane) pane.notice = t("tabs.connectionDeleted");
       }
     }
+    if (prompt.scope === "reconnect") {
+      for (const item of prompt.items) {
+        this.resume.delete(item.tabId);
+        // The run that waited for this reconnect is dropped with it.
+        this.pending.delete(item.tabId);
+      }
+    }
     this.endPrompt();
   }
 
   /** Opens (or reopens) the tab's session. The password prompt is raised through `passwordRequest`. */
-  async connectTab(id: string, conn: ConnectionConfig, password?: string, database?: string): Promise<void> {
+  async connectTab(
+    id: string,
+    conn: ConnectionConfig,
+    password?: string,
+    database?: string,
+    confirmed = false,
+  ): Promise<void> {
     const tab = this.list.find((x) => x.id === id);
     const pane = tab?.pane;
     if (!pane || pane.status === "connecting" || pane.status === "running") return;
+    // Replacing a live session ends its transaction: ask first, and carry on once it is ended.
+    if (!confirmed && pane.session && !(await this.confirmReplace(tab, () => this.connectTab(id, conn, password, database, true)))) {
+      return;
+    }
     tab.connectError = null;
     if (!conn.passwordSaved && password === undefined) {
       this.request({ tabId: id, conn, database });
@@ -545,6 +568,30 @@ export class TabsStore {
       if (p?.run && p.sql) void pane.run(p.sql, p.lineOffset ?? 0);
     }
   }
+
+  /**
+   * Whether the tab's live session may be replaced now. When it holds (or may hold) a transaction
+   * the user is asked instead, and `resume` runs only if the transaction is ended.
+   */
+  private async confirmReplace(tab: Tab, resume: () => void): Promise<boolean> {
+    const pane = tab.pane;
+    let check: CloseCheck;
+    for (;;) {
+      await this.promptIdle();
+      check = await this.checkTab(tab);
+      // Another prompt took over while counting: wait for it and count again.
+      if (!this.closePrompt) break;
+    }
+    // Closed or busy meanwhile: this reconnect no longer applies.
+    if (!pane || !this.list.includes(tab) || pane.status !== "idle") return false;
+    const plan = closePlan([check]);
+    if (!plan.ask) return true;
+    this.resume.set(tab.id, resume);
+    this.closePrompt = { scope: "reconnect", items: this.itemsOf(plan.tabs), busy: false, error: null };
+    return false;
+  }
+
+  private resume = new Map<string, () => void>();
 
   async submitPassword(password: string): Promise<void> {
     const req = this.passwordRequest;

@@ -719,3 +719,69 @@ test("a window close while a tab prompt is open keeps the window", async () => {
   expect(preventDefault).toHaveBeenCalledTimes(1);
   expect(destroy).not.toHaveBeenCalled();
 });
+
+test("reconnecting a live tab with an open transaction asks first and keeps the session", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  vi.mocked(ipc.openSession).mockClear();
+  tabs.reconnect(id);
+  await flush();
+  expect(tabs.closePrompt?.scope).toBe("reconnect");
+  expect(tabs.closePrompt?.items.map((x) => x.tabId)).toEqual([id]);
+  expect(ipc.closeSession).not.toHaveBeenCalled();
+  expect(ipc.openSession).not.toHaveBeenCalled();
+});
+
+test("cancelling the reconnect prompt leaves the session and the tab as they were", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  vi.mocked(ipc.openSession).mockClear();
+  tabs.reconnect(id);
+  await flush();
+  tabs.cancelClose();
+  await flush();
+  const pane = tabs.list.find((x) => x.id === id)!.pane!;
+  expect(tabs.closePrompt).toBeNull();
+  expect(pane.session).not.toBeNull();
+  expect(pane.status).toBe("idle");
+  expect(ipc.endTransactions).not.toHaveBeenCalled();
+  expect(ipc.closeSession).not.toHaveBeenCalled();
+  expect(ipc.openSession).not.toHaveBeenCalled();
+});
+
+test("answering the reconnect prompt ends the transaction, then reconnects", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(2);
+  vi.mocked(ipc.openSession).mockClear();
+  tabs.reconnect(id);
+  await flush();
+  await tabs.answerClose(false);
+  await flush();
+  expect(ipc.endTransactions).toHaveBeenCalledWith(id, false);
+  expect(ipc.openSession).toHaveBeenCalledTimes(1);
+  expect(tabs.closePrompt).toBeNull();
+  expect(tabs.list.some((x) => x.id === id)).toBe(true);
+});
+
+test("a failed answer to the reconnect prompt does not reconnect", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  vi.mocked(ipc.endTransactions).mockRejectedValue("boom");
+  vi.mocked(ipc.openSession).mockClear();
+  tabs.reconnect(id);
+  await flush();
+  await tabs.answerClose(true);
+  await flush();
+  expect(tabs.closePrompt?.error).not.toBeNull();
+  expect(ipc.openSession).not.toHaveBeenCalled();
+});
+
+test("reconnecting a live tab without a transaction goes straight through", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.openSession).mockClear();
+  tabs.reconnect(id);
+  await flush();
+  expect(tabs.closePrompt).toBeNull();
+  expect(ipc.openSession).toHaveBeenCalledTimes(1);
+  expect(tabs.list.some((x) => x.id === id)).toBe(true);
+});
