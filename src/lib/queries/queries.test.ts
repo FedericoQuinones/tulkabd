@@ -24,7 +24,7 @@ import * as ipc from "../ipc";
 import { connections } from "../connections/store.svelte";
 import { buildMenu, keyOf, type MenuActions, type MenuStore, type Row } from "../explorer/tree";
 import { explorer } from "../explorer/tree.svelte";
-import { palette } from "../palette/palette.svelte";
+import { palette } from "../palette/paletteState.svelte";
 import { tabs } from "../tabs/tabs.svelte";
 import NameDialog from "./NameDialog.svelte";
 import { pickConnection, queries, queryError } from "./queries.svelte";

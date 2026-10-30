@@ -3,7 +3,7 @@
   import { onMount, tick } from "svelte";
   import { t } from "../i18n/t";
   import { highlight, paletteKey } from "./hits";
-  import { palette } from "./palette.svelte";
+  import { palette } from "./paletteState.svelte";
   import { shortcutLetter } from "../tabs/shortcuts";
 
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
