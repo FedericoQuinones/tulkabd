@@ -86,8 +86,21 @@ fn concurrent_migration_succeeds() {
                 let log = SharedRunLog::open(&path);
                 log.insert(&run("shared".into(), RunSource::Ai)).unwrap();
             } else {
-                let log = RunLogStore::open(&path);
-                log.insert(&run("store".into(), RunSource::App)).unwrap();
+                // The app waits only 200 ms on a busy file and then keeps its
+                // log in memory; on a slow disk the other opener may hold the
+                // file that long, so retry until the row reaches the file.
+                let check = SharedRunLog::open(&path);
+                let stored =
+                    |check: &SharedRunLog| check.list(None, 10).iter().any(|e| e.sql == "store");
+                for _ in 0..50 {
+                    let log = RunLogStore::open(&path);
+                    log.insert(&run("store".into(), RunSource::App)).unwrap();
+                    if stored(&check) {
+                        return;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(100));
+                }
+                panic!("the app never reached the file");
             }
         })
     };
@@ -95,5 +108,11 @@ fn concurrent_migration_succeeds() {
     a.join().unwrap();
     b.join().unwrap();
     // Neither open replaced the file: both rows are there.
-    assert_eq!(RunLogStore::open(&path).list(None, 10).len(), 2);
+    let sqls: Vec<String> = SharedRunLog::open(&path)
+        .list(None, 10)
+        .into_iter()
+        .map(|e| e.sql)
+        .collect();
+    assert!(sqls.contains(&"shared".to_string()));
+    assert!(sqls.contains(&"store".to_string()));
 }

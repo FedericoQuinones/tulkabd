@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
+use rusqlite::config::DbConfig;
 use rusqlite::{params, params_from_iter, Connection, ErrorCode, OpenFlags};
 use serde::Serialize;
 use tulka_core::{ColumnInfo, DatabaseSnapshot, DbObject, ObjectKind};
@@ -136,11 +137,17 @@ fn remove_files(path: &Path) {
     }
 }
 
-fn is_busy(e: &rusqlite::Error) -> bool {
-    matches!(
-        e.sqlite_error_code(),
-        Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
-    )
+/// True when the file itself is bad: not a database, corrupt, or a layout
+/// that is not the current one (`try_open` reports that as `InvalidQuery`, a
+/// missing table as a generic SQL error).
+fn is_unusable(e: &rusqlite::Error) -> bool {
+    match e {
+        rusqlite::Error::InvalidQuery => true,
+        _ => matches!(
+            e.sqlite_error_code(),
+            Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt | ErrorCode::Unknown)
+        ),
+    }
 }
 
 /// Escapes `%`, `_` and `\` so a term matches only itself under `LIKE`.
@@ -192,17 +199,19 @@ pub struct ObjectMatches {
 }
 
 impl MetaCache {
-    /// Never fails. A file that cannot be opened, is not a valid database or
-    /// has another `user_version` is deleted (with its `-wal`/`-shm`
-    /// sidecars) and recreated; if even that fails, falls back to memory
-    /// (see [`MetaCache::is_persistent`]).
+    /// Never fails. A file that is not a valid database, is corrupt or has
+    /// another `user_version` is deleted (with its `-wal`/`-shm` sidecars)
+    /// and recreated. A file that cannot be opened right now (busy, locked,
+    /// unreadable, an I/O or sharing error) is kept untouched. If no file can
+    /// be used, falls back to memory (see [`MetaCache::is_persistent`]).
     pub fn open(path: &Path) -> MetaCache {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         let conn = try_open(path).or_else(|e| {
-            // A file another process holds busy is not damaged: keep it.
-            if is_busy(&e) {
+            // Only a file known to be damaged or of another layout is
+            // replaced; anything else may be a healthy file in use.
+            if !is_unusable(&e) {
                 return Err(e);
             }
             remove_files(path);
@@ -249,6 +258,10 @@ impl MetaCache {
         )
         .ok()?;
         conn.busy_timeout(READ_BUSY_TIMEOUT).ok()?;
+        // The app owns the file: closing this reader must not checkpoint the
+        // WAL into it.
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .ok()?;
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .ok()?;
@@ -977,6 +990,24 @@ mod tests {
         drop(ro);
         drop(writer);
         assert!(p.exists());
+        assert_eq!(MetaCache::open(&p).all_objects().len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_keeps_an_unreadable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.db");
+        persisted(&p);
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&p).is_ok() {
+            // Running as root: permissions do not stop reads, nothing to test.
+            return;
+        }
+        let c = MetaCache::open(&p);
+        assert!(!c.is_persistent());
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(MetaCache::open(&p).all_objects().len(), 3);
     }
 

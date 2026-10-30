@@ -503,7 +503,12 @@ impl SharedRunLog {
     /// when there is no data dir.
     pub fn open_default() -> SharedRunLog {
         match default_path() {
-            Some(path) => Self::open(&path),
+            Some(path) => {
+                if let Some(dir) = path.parent() {
+                    private_file::ensure_private_dir(dir);
+                }
+                Self::open(&path)
+            }
             None => Self::in_memory(),
         }
     }
@@ -1080,7 +1085,7 @@ mod tests {
         let shared = SharedRunLog::open(&path);
         let start = std::time::Instant::now();
         assert!(shared.insert(&run("during", 2)).is_err());
-        assert!(start.elapsed() >= Duration::from_secs(1));
+        assert!(start.elapsed() >= SHARED_BUSY_TIMEOUT - Duration::from_millis(200));
         holder.join().unwrap();
         shared.insert(&run("after", 3)).unwrap();
         let sqls: Vec<_> = shared.list(None, 10).into_iter().map(|e| e.sql).collect();
