@@ -626,6 +626,9 @@ async fn cancel_during_read_only_is_cancelled() {
             "{:?}",
             result.0
         );
+        // The closing batch ran after the cancel: the session is usable and
+        // has no transaction left.
+        assert_eq!(trancount(s.as_mut()).await, Value::Int(0));
     })
     .await;
 }
