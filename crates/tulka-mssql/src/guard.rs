@@ -200,8 +200,9 @@ impl Scan<'_> {
             return false;
         }
         let t = target.trim_matches(['[', ']', '"']).to_lowercase();
-        let named =
-            |k: usize| matches!(self.toks[k].kind, Kind::Word | Kind::Quoted) && self.norm(k) == t;
+        let named = |k: usize| {
+            matches!(self.toks[k].kind, Kind::Word | Kind::Quoted) && self.norm_is(k, &t)
+        };
         let Some(first) = (stmt + 1..end).find(|&k| named(k)) else {
             return false;
         };
@@ -251,6 +252,22 @@ impl Scan<'_> {
 
     /// The name at token `k` without its delimiters, lowercased (Unicode
     /// aware), for comparing identifiers.
+    /// Whether `norm(k)` equals `lower`, a lowercase text, without allocating
+    /// when both are ASCII.
+    fn norm_is(&self, k: usize, lower: &str) -> bool {
+        let src = self.src(k);
+        let src = if self.toks[k].kind == Kind::Quoted {
+            src.trim_matches(['[', ']', '"'])
+        } else {
+            src
+        };
+        if src.is_ascii() && lower.is_ascii() {
+            src.eq_ignore_ascii_case(lower)
+        } else {
+            src.to_lowercase() == lower
+        }
+    }
+
     fn norm(&self, k: usize) -> String {
         let src = self.src(k);
         let src = if self.toks[k].kind == Kind::Quoted {
@@ -1093,10 +1110,12 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
             (GuardKind::Drop, first, all_temp, i)
         };
 
+        // Where the statement ends: computed once, as it is needed to tell
+        // aliases of temporary tables and again to look for the `WHERE`.
+        let stmt_end = is_dml.then(|| sc.statement_end(i, sc.is_kw(i, "UPDATE")));
         if !temp && is_dml {
             // `DELETE t FROM #t t`: the alias stands for a temporary table.
-            if let Some(target) = &object {
-                let (end, _) = sc.statement_end(i, sc.is_kw(i, "UPDATE"));
+            if let (Some(target), Some((end, _))) = (&object, stmt_end) {
                 temp = sc.alias_of_temporary(target, i, end);
             }
         }
@@ -1104,7 +1123,7 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
         if temp && is_dml {
             // A `#name` can stand for a real table: an alias in the FROM
             // clause (`DELETE #o FROM dbo.Orders #o`) or a CTE.
-            let (end, _) = sc.statement_end(i, sc.is_kw(i, "UPDATE"));
+            let (end, _) = stmt_end.unwrap_or_default();
             let target = object.clone().unwrap_or_default();
             if let Some(real) = sc.real_table_behind(&target, i, end) {
                 temp = false;
@@ -1116,7 +1135,8 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
             continue;
         }
 
-        let (end, where_seen) = sc.statement_end(i, sc.is_kw(i, "UPDATE"));
+        let (end, where_seen) =
+            stmt_end.unwrap_or_else(|| sc.statement_end(i, sc.is_kw(i, "UPDATE")));
         let flagged = match kind {
             GuardKind::UpdateWithoutWhere | GuardKind::DeleteWithoutWhere => !where_seen,
             _ => true,
