@@ -14,9 +14,10 @@ pub mod secrets;
 pub mod value;
 
 pub use config::{
-    clamp_zoom, AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope, Environment,
-    EnvironmentDefaults, EnvironmentStyle, Folder, GuardLevel, NumberFormat, Preferences,
-    MAX_ROWS_DEFAULT,
+    clamp_zoom, AiAccess, AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope,
+    Environment, EnvironmentDefaults, EnvironmentStyle, Folder, GuardLevel, NumberFormat,
+    Preferences, AI_MAX_ROWS_DEFAULT, AI_MAX_ROWS_MAX, AI_MAX_ROWS_MIN, AI_TIMEOUT_DEFAULT_S,
+    AI_TIMEOUT_MAX_S, AI_TIMEOUT_MIN_S, MAX_ROWS_DEFAULT,
 };
 pub use connstr::{
     format_connection_string, parse_connection_string, ConnStrError, ParsedConnection,

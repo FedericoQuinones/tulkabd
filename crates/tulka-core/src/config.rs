@@ -46,6 +46,25 @@ impl Environment {
             Environment::Staging | Environment::Test | Environment::Local => GuardLevel::Off,
         }
     }
+
+    /// Default AI access for connections in this environment.
+    pub fn default_ai_access(&self) -> AiAccess {
+        match self {
+            Environment::Production => AiAccess::None,
+            Environment::Staging | Environment::Test | Environment::Local => AiAccess::ReadOnly,
+        }
+    }
+}
+
+/// What AI assistants (through `tulkabd mcp`) may do on a connection.
+///
+/// Serialized as a plain string: `"none"` or `"readOnly"`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AiAccess {
+    #[default]
+    None,
+    ReadOnly,
 }
 
 /// How dangerous statements are handled on a connection. Only stored and
@@ -96,6 +115,9 @@ pub struct ConnectionConfig {
     /// The folder holding this connection; `None` is the root.
     #[serde(default)]
     pub folder_id: Option<String>,
+    /// What AI assistants may do here; a config without it grants none.
+    #[serde(default, deserialize_with = "lenient")]
+    pub ai_access: AiAccess,
 }
 
 /// A folder of the connections tree (nestable).
@@ -136,6 +158,7 @@ impl ConnectionConfig {
             connect_timeout_s: 15,
             password_saved: false,
             folder_id: None,
+            ai_access: environment.default_ai_access(),
         }
     }
 }
@@ -180,6 +203,14 @@ pub const QUERY_TIMEOUT_MAX_S: u32 = 86_400;
 /// Smallest and largest number of days the run log is kept.
 pub const RUN_LOG_DAYS_MIN: u16 = 1;
 pub const RUN_LOG_DAYS_MAX: u16 = 365;
+/// Smallest, largest and default number of rows returned to an AI assistant.
+pub const AI_MAX_ROWS_MIN: u32 = 1;
+pub const AI_MAX_ROWS_MAX: u32 = 10_000;
+pub const AI_MAX_ROWS_DEFAULT: u32 = 500;
+/// Smallest, largest and default query timeout for an AI assistant, in seconds.
+pub const AI_TIMEOUT_MIN_S: u32 = 1;
+pub const AI_TIMEOUT_MAX_S: u32 = 3_600;
+pub const AI_TIMEOUT_DEFAULT_S: u32 = 30;
 
 /// Whether `color` is written as `#rrggbb`.
 fn is_hex_color(color: &str) -> bool {
@@ -206,6 +237,7 @@ pub struct EnvironmentStyle {
     /// Accent color as `#rrggbb`.
     pub color: String,
     pub guard: GuardLevel,
+    pub ai_access: AiAccess,
 }
 
 impl EnvironmentStyle {
@@ -214,6 +246,7 @@ impl EnvironmentStyle {
         Self {
             color: environment.default_color().into(),
             guard: environment.default_guard(),
+            ai_access: environment.default_ai_access(),
         }
     }
 
@@ -231,6 +264,12 @@ impl EnvironmentStyle {
             .and_then(|g| serde_json::from_value(g.clone()).ok())
         {
             style.guard = guard;
+        }
+        if let Some(ai_access) = value
+            .and_then(|v| v.get("aiAccess"))
+            .and_then(|a| serde_json::from_value(a.clone()).ok())
+        {
+            style.ai_access = ai_access;
         }
         style
     }
@@ -309,6 +348,12 @@ fn default_max_rows() -> u32 {
 fn default_run_log_days() -> u16 {
     30
 }
+fn default_ai_max_rows() -> u32 {
+    AI_MAX_ROWS_DEFAULT
+}
+fn default_ai_timeout_s() -> u32 {
+    AI_TIMEOUT_DEFAULT_S
+}
 
 /// Like [`lenient`], for a field whose default is not the type's default.
 macro_rules! lenient_with {
@@ -324,6 +369,8 @@ lenient_with!(lenient_font_size, u8, default_font_size);
 lenient_with!(lenient_true, bool, default_true);
 lenient_with!(lenient_max_rows, u32, default_max_rows);
 lenient_with!(lenient_run_log_days, u16, default_run_log_days);
+lenient_with!(lenient_ai_max_rows, u32, default_ai_max_rows);
+lenient_with!(lenient_ai_timeout_s, u32, default_ai_timeout_s);
 
 /// Settings of the interface that survive restarts.
 ///
@@ -357,6 +404,12 @@ pub struct Preferences {
     /// Color and guard level new connections start with, per environment.
     #[serde(deserialize_with = "lenient")]
     pub environments: EnvironmentDefaults,
+    /// Rows an AI assistant gets per query (1 to 10,000).
+    #[serde(deserialize_with = "lenient_ai_max_rows")]
+    pub ai_max_rows: u32,
+    /// Seconds after which an AI query is cancelled (1 to 3,600).
+    #[serde(deserialize_with = "lenient_ai_timeout_s")]
+    pub ai_query_timeout_s: u32,
 }
 
 impl Default for Preferences {
@@ -370,6 +423,8 @@ impl Default for Preferences {
             copy_numbers: NumberFormat::System,
             run_log_days: default_run_log_days(),
             environments: EnvironmentDefaults::default(),
+            ai_max_rows: AI_MAX_ROWS_DEFAULT,
+            ai_query_timeout_s: AI_TIMEOUT_DEFAULT_S,
         }
     }
 }
@@ -383,6 +438,10 @@ impl Preferences {
         self.max_rows = self.max_rows.clamp(MAX_ROWS_MIN, MAX_ROWS_MAX);
         self.query_timeout_s = self.query_timeout_s.min(QUERY_TIMEOUT_MAX_S);
         self.run_log_days = self.run_log_days.clamp(RUN_LOG_DAYS_MIN, RUN_LOG_DAYS_MAX);
+        self.ai_max_rows = self.ai_max_rows.clamp(AI_MAX_ROWS_MIN, AI_MAX_ROWS_MAX);
+        self.ai_query_timeout_s = self
+            .ai_query_timeout_s
+            .clamp(AI_TIMEOUT_MIN_S, AI_TIMEOUT_MAX_S);
         let envs = [
             (&mut self.environments.production, Environment::Production),
             (&mut self.environments.staging, Environment::Staging),
@@ -553,6 +612,10 @@ mod tests {
         assert!(expected.restore_session);
         assert_eq!((expected.max_rows, expected.query_timeout_s), (100_000, 0));
         assert_eq!(expected.run_log_days, 30);
+        assert_eq!(
+            (expected.ai_max_rows, expected.ai_query_timeout_s),
+            (500, 30)
+        );
     }
 
     #[test]
@@ -719,7 +782,7 @@ mod tests {
                 "user": "u", "databases": {"kind": "all"}, "environment": "test",
                 "color": "#44a282", "guard": "off", "encrypt": true,
                 "trustServerCertificate": false, "connectTimeoutS": 15,
-                "passwordSaved": false, "folderId": null
+                "passwordSaved": false, "folderId": null, "aiAccess": "readOnly"
             })
         );
         assert_eq!(
@@ -728,13 +791,105 @@ mod tests {
                 "zoom": 100, "fontSize": 13, "restoreSession": true, "maxRows": 100000,
                 "queryTimeoutS": 0, "copyNumbers": "system", "runLogDays": 30,
                 "environments": {
-                    "production": {"color": "#e5566f", "guard": "confirm"},
-                    "staging": {"color": "#d9a441", "guard": "off"},
-                    "test": {"color": "#44a282", "guard": "off"},
-                    "local": {"color": "#4a8ad6", "guard": "off"}
-                }
+                    "production": {"color": "#e5566f", "guard": "confirm", "aiAccess": "none"},
+                    "staging": {"color": "#d9a441", "guard": "off", "aiAccess": "readOnly"},
+                    "test": {"color": "#44a282", "guard": "off", "aiAccess": "readOnly"},
+                    "local": {"color": "#4a8ad6", "guard": "off", "aiAccess": "readOnly"}
+                },
+                "aiMaxRows": 500, "aiQueryTimeoutS": 30
             }})
         );
+    }
+
+    fn conn_json(id: &str, extra: &str) -> String {
+        format!(
+            r##"{{"id": "{id}", "name": "{id}", "driver": "mssql", "server": "h", "port": 1433,
+            "user": "u", "databases": {{"kind": "all"}}, "environment": "local",
+            "color": "#4a8ad6", "guard": "off", "encrypt": true,
+            "trustServerCertificate": false, "connectTimeoutS": 15,
+            "passwordSaved": false{extra}}}"##
+        )
+    }
+
+    #[test]
+    fn connection_without_ai_access_loads_no_access() {
+        let cfg = load_text(&format!(
+            r#"{{"version": 1, "connections": [{}]}}"#,
+            conn_json("a", "")
+        ));
+        assert_eq!(cfg.connections[0].ai_access, AiAccess::None);
+    }
+
+    #[test]
+    fn unknown_ai_access_loads_no_access_and_keeps_other_connections() {
+        let cfg = load_text(&format!(
+            r#"{{"version": 1, "connections": [{}, {}]}}"#,
+            conn_json("a", r#", "aiAccess": "admin""#),
+            conn_json("b", r#", "aiAccess": "readOnly""#)
+        ));
+        assert_eq!(cfg.connections.len(), 2);
+        assert_eq!(cfg.connections[0].ai_access, AiAccess::None);
+        assert_eq!(cfg.connections[1].ai_access, AiAccess::ReadOnly);
+        assert_eq!(cfg.connections[1].id, "b");
+    }
+
+    #[test]
+    fn ai_access_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::at(dir.path().join("config.json"));
+        let mut c = ConnectionConfig::new("A", "h", 1, "u", Environment::Production);
+        c.ai_access = AiAccess::ReadOnly;
+        let cfg = AppConfig {
+            connections: vec![c],
+            ..AppConfig::default()
+        };
+        store.save(&cfg).unwrap();
+        assert_eq!(
+            store.load().unwrap().connections[0].ai_access,
+            AiAccess::ReadOnly
+        );
+    }
+
+    #[test]
+    fn new_connection_takes_the_environment_default() {
+        let prod = ConnectionConfig::new("A", "h", 1, "u", Environment::Production);
+        let local = ConnectionConfig::new("A", "h", 1, "u", Environment::Local);
+        assert_eq!(prod.ai_access, AiAccess::None);
+        assert_eq!(local.ai_access, AiAccess::ReadOnly);
+    }
+
+    #[test]
+    fn environment_style_ai_access_is_lenient() {
+        let cfg = load_text(
+            r#"{"version": 1, "preferences": {"environments": {
+                "production": {"aiAccess": "admin"},
+                "local": {"aiAccess": "none"}
+            }}}"#,
+        );
+        let e = cfg.preferences.environments;
+        assert_eq!(e.production.ai_access, AiAccess::None);
+        assert_eq!(e.local.ai_access, AiAccess::None);
+        assert_eq!(e.staging.ai_access, AiAccess::ReadOnly);
+        let cfg = load_text(r#"{"version": 1, "preferences": {"environments": {"local": {}}}}"#);
+        assert_eq!(
+            cfg.preferences.environments.local.ai_access,
+            AiAccess::ReadOnly
+        );
+    }
+
+    #[test]
+    fn ai_preferences_default_and_clamp() {
+        let p = load_text(r#"{"version": 1, "preferences": {}}"#).preferences;
+        assert_eq!((p.ai_max_rows, p.ai_query_timeout_s), (500, 30));
+        let p =
+            load_text(r#"{"version": 1, "preferences": {"aiMaxRows": 0, "aiQueryTimeoutS": 0}}"#)
+                .preferences;
+        assert_eq!((p.ai_max_rows, p.ai_query_timeout_s), (1, 1));
+        let p = load_text(
+            r#"{"version": 1, "preferences": {"aiMaxRows": 99999, "aiQueryTimeoutS": 99999}}"#,
+        )
+        .preferences;
+        assert_eq!((p.ai_max_rows, p.ai_query_timeout_s), (10_000, 3_600));
     }
 
     #[test]

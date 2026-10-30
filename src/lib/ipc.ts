@@ -32,6 +32,8 @@ export type Environment = "production" | "staging" | "test" | "local";
 export type GuardLevel = "off" | "confirm" | "block";
 export type DatabaseScope = { kind: "all" } | { kind: "selected"; names: string[] };
 
+/** What AI assistants (through `tulkabd mcp`) may do on a connection. */
+export type AiAccess = "none" | "readOnly";
 export interface ConnectionConfig {
   id: string;
   name: string;
@@ -43,6 +45,7 @@ export interface ConnectionConfig {
   environment: Environment;
   color: string;
   guard: GuardLevel;
+  aiAccess: AiAccess;
   encrypt: boolean;
   trustServerCertificate: boolean;
   connectTimeoutS: number;
@@ -382,6 +385,7 @@ export interface EnvironmentStyle {
   /** `#rrggbb`. */
   color: string;
   guard: GuardLevel;
+  aiAccess: AiAccess;
 }
 /** Preferences kept in `config.json`; the backend brings every value into its range. */
 export interface Preferences {
@@ -400,6 +404,10 @@ export interface Preferences {
   runLogDays: number;
   /** Color and guard level new connections start with. */
   environments: Record<Environment, EnvironmentStyle>;
+  /** Rows an AI assistant gets per query (1 to 10,000). */
+  aiMaxRows: number;
+  /** Seconds after which an AI query is cancelled (1 to 3,600). */
+  aiQueryTimeoutS: number;
 }
 export const getPreferences = () => invoke<Preferences>("get_preferences");
 /** Stores all preferences; resolves to what was kept, brought into range. */

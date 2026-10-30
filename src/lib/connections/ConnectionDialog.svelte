@@ -161,6 +161,7 @@
       environment: env.environment,
       color: env.color,
       guard: env.guard,
+      aiAccess: initial?.aiAccess ?? "none",
       encrypt,
       trustServerCertificate: trust,
       // Only called after validate(), which rejects an empty timeout.

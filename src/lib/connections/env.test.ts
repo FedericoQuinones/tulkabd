@@ -18,10 +18,10 @@ describe("applyEnvironment", () => {
 
 describe("environment defaults", () => {
   const custom = {
-    production: { color: "#aa0000", guard: "block" as const },
-    staging: { color: "#bb0000", guard: "confirm" as const },
-    test: { color: "#cc0000", guard: "off" as const },
-    local: { color: "#dd0000", guard: "off" as const },
+    production: { color: "#aa0000", guard: "block" as const, aiAccess: "none" as const },
+    staging: { color: "#bb0000", guard: "confirm" as const, aiAccess: "none" as const },
+    test: { color: "#cc0000", guard: "off" as const, aiAccess: "none" as const },
+    local: { color: "#dd0000", guard: "off" as const, aiAccess: "none" as const },
   };
   it("environment defaults come from preferences", () => {
     const s = applyEnvironment(base, "production", custom);
