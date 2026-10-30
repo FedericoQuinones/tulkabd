@@ -18,7 +18,7 @@ import { connections } from "../connections/store.svelte";
 import { explorer } from "../explorer/tree.svelte";
 import { tabs } from "../tabs/tabs.svelte";
 import { groupHits, highlight, paletteKey } from "./hits";
-import { palette } from "./palette.svelte";
+import { palette } from "./paletteState.svelte";
 import Palette from "./Palette.svelte";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
