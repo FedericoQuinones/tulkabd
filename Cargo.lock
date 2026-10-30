@@ -5117,7 +5117,9 @@ dependencies = [
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tempfile",
  "tulka-app",
+ "tulka-mcp",
 ]
 
 [[package]]
