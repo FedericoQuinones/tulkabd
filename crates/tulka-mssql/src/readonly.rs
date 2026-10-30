@@ -147,28 +147,26 @@ pub fn violation(sql: &str) -> Option<ReadOnlyViolation> {
     let mut any = false;
     for batch in split_batches(sql) {
         let base = batch.start_line - 1;
-        if let Some(offset) = suspicious_char(&batch.text) {
-            return Some(found(
-                ReadOnlyReason::Unparsed,
-                None,
-                base + line_of(&batch.text, offset),
-            ));
-        }
-        let tokens = match lexer::lex(&batch.text) {
+        let text = &batch.text;
+        let control = suspicious_char(text);
+        let tokens = match lexer::lex(text) {
             Ok(t) => t,
             Err(offset) => {
-                let line = line_of(&batch.text, offset);
-                return Some(found(ReadOnlyReason::Unparsed, None, base + line));
+                let at = control.map_or(offset, |c| c.min(offset));
+                return Some(found(
+                    ReadOnlyReason::Unparsed,
+                    None,
+                    base + line_of(text, at),
+                ));
             }
         };
-        if let Some(offset) = line_break_outside_strings(&batch.text, &tokens) {
-            return Some(found(
-                ReadOnlyReason::Unparsed,
-                None,
-                base + line_of(&batch.text, offset),
-            ));
-        }
-        if let Some(v) = check_batch(&batch.text, &tokens, base, &mut any) {
+        // The first problem in the text wins, so the walk stops at the
+        // first character the server may read differently from the lexer.
+        let limit = [control, line_break_outside_strings(text, &tokens)]
+            .into_iter()
+            .flatten()
+            .min();
+        if let Some(v) = check_batch(text, &tokens, base, limit, &mut any) {
             return Some(v);
         }
     }
@@ -188,14 +186,16 @@ fn line_of(text: &str, offset: usize) -> u32 {
 
 /// Offset of the first character the server may read differently from the
 /// lexer: an ASCII control character other than tab, newline and carriage
-/// return, or a carriage return not followed by a newline (the server may
-/// end a `--` comment there).
+/// return, or a carriage return in the middle of the text not followed by a
+/// newline (the server may end a `--` comment there).
 fn suspicious_char(text: &str) -> Option<usize> {
     let b = text.as_bytes();
     b.iter().enumerate().find_map(|(i, &c)| {
         let bad = match c {
             b'\t' | b'\n' => false,
-            b'\r' => b.get(i + 1) != Some(&b'\n'),
+            // A batch ends in `\r` when its script uses CRLF line ends and
+            // `GO` follows.
+            b'\r' => i + 1 < b.len() && b[i + 1] != b'\n',
             c => c < 0x20 || c == 0x7f,
         };
         bad.then_some(i)
@@ -280,6 +280,7 @@ fn check_batch(
     text: &str,
     tokens: &[Token],
     base: u32,
+    limit: Option<usize>,
     any: &mut bool,
 ) -> Option<ReadOnlyViolation> {
     // At the start of a statement (after `;`, or after the parentheses that
@@ -291,6 +292,10 @@ fn check_batch(
     let mut after_dot = false;
 
     for (i, t) in tokens.iter().enumerate() {
+        if limit.is_some_and(|l| t.start >= l) {
+            let line = base + line_of(text, limit.unwrap());
+            return Some(found(ReadOnlyReason::Unparsed, None, line));
+        }
         let line = base + t.line;
         let is_dot = is_punct(text, t, ".");
 
@@ -352,7 +357,11 @@ fn check_batch(
                     let then_next = tokens.get(i + 1).is_some_and(|n| {
                         is_keyword(text, n, "NEXT") || is_keyword(text, n, "FIRST")
                     });
-                    if !(after_rows && then_next) {
+                    // The row count is a number, a variable or an expression.
+                    let then_count = tokens.get(i + 2).is_some_and(|c| {
+                        matches!(c.kind, Kind::Num | Kind::Var) || is_punct(text, c, "(")
+                    });
+                    if !(after_rows && then_next && then_count) {
                         return Some(found(ReadOnlyReason::Forbidden, word_of(text, t), line));
                     }
                 }
@@ -376,6 +385,13 @@ fn check_batch(
             dots = 0;
             after_dot = false;
         }
+    }
+    if let Some(l) = limit {
+        return Some(found(
+            ReadOnlyReason::Unparsed,
+            None,
+            base + line_of(text, l),
+        ));
     }
     if depth > 0 {
         let last = tokens.last().map_or(0, |t| t.line);
@@ -561,6 +577,49 @@ mod tests {
             "SELECT 1 ORDER BY a OFFSET 1 ROWS FETCH FROM c",
             Some((Forbidden, Some("FETCH"))),
         );
+    }
+
+    #[test]
+    fn fetch_needs_a_row_count() {
+        for sql in [
+            "SELECT 1 ROWS FETCH NEXT FROM c",
+            "SELECT 1 ROWS FETCH NEXT c",
+            "SELECT 1 ROWS FETCH FIRST",
+        ] {
+            check(sql, Some((Forbidden, Some("FETCH"))));
+        }
+        check(
+            "SELECT 1 ORDER BY a OFFSET 1 ROWS FETCH NEXT @n ROWS ONLY",
+            None,
+        );
+        check(
+            "SELECT 1 ORDER BY a OFFSET 1 ROWS FETCH NEXT (1+1) ROWS ONLY",
+            None,
+        );
+    }
+
+    #[test]
+    fn crlf_scripts_with_go_are_accepted() {
+        check("SELECT 1\r\nGO\r\nSELECT 2", None);
+        check("SELECT 1\r\n\r\nGO\r\nSELECT 2\r\n", None);
+        check("SELECT 1 -- c\r\nGO\r\nSELECT 2", None);
+        check("SELECT 1\rFROM t", Some((Unparsed, None)));
+        check(
+            "SELECT 1\r\nGO\r\nSELECT 1 -- c\rDELETE",
+            Some((Unparsed, None)),
+        );
+    }
+
+    #[test]
+    fn the_first_problem_in_the_text_wins() {
+        let v = violation("SELECT 1 DELETE FROM t\n\u{1}").unwrap();
+        assert_eq!((v.reason, v.line), (Forbidden, 0));
+        let v = violation("SELECT 1\n\u{1} DELETE FROM t").unwrap();
+        assert_eq!((v.reason, v.line), (Unparsed, 1));
+        let v = violation("SELECT 1 -- a\u{2028}b\nDELETE FROM t").unwrap();
+        assert_eq!((v.reason, v.line), (Unparsed, 0));
+        let v = violation("SELECT 1\n'unclosed \u{1}").unwrap();
+        assert_eq!((v.reason, v.line), (Unparsed, 1));
     }
 
     #[test]
