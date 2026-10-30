@@ -6,6 +6,8 @@
   import type { PaneState } from "../pane/pane.svelte";
   import CopyToast from "./CopyToast.svelte";
   import MessagesView from "./MessagesView.svelte";
+  import RunLogView from "../runlog/RunLogView.svelte";
+  import { runLog } from "../runlog/runlog.svelte";
   import ResultGrid from "./ResultGrid.svelte";
   import { toIpcSelection } from "./selection";
   import { isFiltered, resultView, type ResultView } from "./view";
@@ -16,26 +18,41 @@
   }
   let { pane, onjump }: Props = $props();
 
-  const MAX_ROWS = 100_000;
   const TOAST_MS = 2500;
   const ERROR_TOAST_MS = 5000;
   const FILTER_DEBOUNCE_MS = 150;
 
-  let tab = $state<number | "messages">(0);
+  let tab = $state(0);
   let grid = $state<ResultGrid>();
   let toast = $state<{ text: string; error: boolean } | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let copying = false;
 
   // A new run goes back to the first result set.
+  let seenRun = untrack(() => pane.runCount);
   $effect(() => {
-    void pane.runCount;
-    tab = 0;
-    toast = null;
+    const run = pane.runCount;
+    untrack(() => {
+      if (run !== seenRun) {
+        seenRun = run;
+        pane.bottomTab = "results";
+      }
+      tab = 0;
+      toast = null;
+    });
   });
 
-  const active = $derived(tab !== "messages" && pane.results[tab] ? tab : "messages");
-  const result = $derived(active === "messages" ? null : pane.results[active]);
+  // The Run log is read the first time its tab is shown.
+  $effect(() => {
+    if (pane.bottomTab === "runlog") void runLog.ensureLoaded();
+  });
+
+  const active = $derived(
+    pane.bottomTab === "runlog" ? "runlog" : pane.bottomTab === "results" && pane.results[tab] ? tab : "messages",
+  );
+  // The index of the result set shown, or null on the Messages and Run log tabs.
+  const index = $derived(typeof active === "number" ? active : null);
+  const result = $derived(index === null ? null : pane.results[index]);
   const count = (n: number) => n.toLocaleString("en-US");
   // Sorting and filtering wait for the run to end, when all the rows are in; the backend says "busy" before that.
   const ready = $derived(pane.status !== "running");
@@ -45,7 +62,7 @@
     return (spec: ViewSpec) =>
       run === pane.runCount ? ipc.setResultView(pane.tabId, index, spec) : Promise.reject(new Error("stale run"));
   }
-  const view = $derived(active === "messages" ? null : resultView(pane, pane.runCount, active, sender(active, pane.runCount)));
+  const view = $derived(index === null ? null : resultView(pane, pane.runCount, index, sender(index, pane.runCount)));
 
   // `viewVersion` grows on each change of the active view, so the template reads it again.
   let viewVersion = $state(0);
@@ -124,12 +141,12 @@
 
   async function copy(mode: "excel" | "ai") {
     // While a view is on its way, the selection's row indexes may belong to either order.
-    if (active === "messages" || !result || copying || viewPending) return;
+    if (index === null || !result || copying || viewPending) return;
     const sel = grid?.getSelection() ?? null;
     const run = pane.runCount;
     copying = true;
     try {
-      const out = await ipc.copyResults(pane.tabId, active, mode, toIpcSelection(sel));
+      const out = await ipc.copyResults(pane.tabId, index, mode, toIpcSelection(sel));
       if (run !== pane.runCount) return;
       const rows = out.rows;
       const tokens = count(out.tokens);
@@ -151,15 +168,18 @@
 <div class="panel">
   <div class="rhead">
     {#each pane.results as r, i (i)}
-      <button type="button" class="rt" class:on={active === i} onclick={() => (tab = i)}>
+      <button type="button" class="rt" class:on={active === i} onclick={() => { tab = i; pane.bottomTab = "results"; }}>
         {i === 0 ? t("results.tab") : t("results.tabN", { n: i + 1 })}<span class="num">{count(r.total)}</span>
       </button>
     {/each}
-    <button type="button" class="rt" class:on={active === "messages"} onclick={() => (tab = "messages")}>
+    <button type="button" class="rt" class:on={active === "messages"} onclick={() => (pane.bottomTab = "messages")}>
       {t("pane.messages")}
     </button>
+    <button type="button" class="rt" class:on={active === "runlog"} onclick={() => (pane.bottomTab = "runlog")}>
+      {t("runlog.tab")}<span class="num">{count(runLog.todayCount)}</span>
+    </button>
     <!-- Always mounted: a live region announces changes of its text, not its arrival. -->
-    <span class="grow"><span class="meta num" aria-live="polite">{shown ?? ""}</span></span>
+    <span class="grow"><span class="meta num" aria-live="polite">{active === "runlog" ? t("runlog.meta") : (shown ?? "")}</span></span>
     {#if result}
       <input
         class="filter"
@@ -176,7 +196,7 @@
       />
     {/if}
     {#if result?.truncated}
-      <span class="warn">{t("results.truncated", { max: count(MAX_ROWS) })}</span>
+      <span class="warn">{t("results.truncated", { max: count(pane.runMaxRows) })}</span>
     {/if}
     {#if pane.summary}
       <span class="meta num">{t("results.elapsed", { ms: count(pane.summary.elapsedMs) })}{finishedAt ? ` · ${finishedAt}` : ""}</span>
@@ -185,12 +205,14 @@
     <button type="button" class="ghost" disabled={!result || viewPending} onclick={() => copy("ai")}>{t("results.copyAi")}</button>
   </div>
   <div class="body">
-    {#if active === "messages" || !result}
+    {#if active === "runlog"}
+      <RunLogView tabId={pane.tabId} />
+    {:else if !result}
       <MessagesView messages={pane.messages} {onjump} />
-    {:else if view}
-      {#key `${pane.runCount}:${active}`}
-        <ResultGrid bind:this={grid} tabId={pane.tabId} resultIndex={active} {result} {view} {ready}
-          final={pane.status !== "running" || pane.results.length > active + 1}
+    {:else if view && index !== null}
+      {#key `${pane.runCount}:${index}`}
+        <ResultGrid bind:this={grid} tabId={pane.tabId} resultIndex={index} {result} {view} {ready}
+          final={pane.status !== "running" || pane.results.length > index + 1}
           oncopy={() => copy("excel")}
         />
       {/key}

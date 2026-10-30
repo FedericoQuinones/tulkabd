@@ -4,6 +4,8 @@
   import { ENVIRONMENTS } from "../connections/env";
   import SqlEditor from "../editor/SqlEditor.svelte";
   import ResultsPanel from "../results/ResultsPanel.svelte";
+  import BlockedBar from "../guard/BlockedBar.svelte";
+  import GuardDialog from "../guard/GuardDialog.svelte";
   import PaneToolbar from "./PaneToolbar.svelte";
   import type { PaneState } from "./pane.svelte";
 
@@ -33,6 +35,16 @@
     if (onrun) onrun(target.sql, target.lineOffset);
     else void pane.run(target.sql, target.lineOffset);
   }
+
+  // Whatever closes the dialog, the keyboard goes back to the editor.
+  async function confirmGuard(dontAskAgain: boolean) {
+    // Focus moves as the run starts, not when a long query ends.
+    await pane.confirmGuard(dontAskAgain, () => editor?.focus());
+  }
+  function cancelGuard() {
+    pane.cancelGuard();
+    editor?.focus();
+  }
 </script>
 
 <section class="pane" style:--env={envColor}>
@@ -57,7 +69,19 @@
     {/if}
     <SqlEditor bind:this={editor} {pane} {autofocus} onrun={run} oncursor={(p) => (pane.cursor = p)} />
   </div>
-  <div class="res"><ResultsPanel {pane} onjump={(line) => editor?.jumpToLine(line)} /></div>
+  <div class="res">
+    {#if pane.blocked && connection}<BlockedBar {connection} findings={pane.blocked} />{/if}
+    <div class="rp"><ResultsPanel {pane} onjump={(line) => editor?.jumpToLine(line)} /></div>
+    {#if pane.guardToast}
+      <div class="gtoast" role="status">
+        <span>{pane.guardToast.text}</span>
+        <button type="button" onclick={() => void pane.undoGuardOff()}>{t("guard.undo")}</button>
+      </div>
+    {/if}
+  </div>
+  {#if pane.guardPrompt && connection}
+    <GuardDialog {connection} prompt={pane.guardPrompt} onconfirm={confirmGuard} oncancel={cancelGuard} />
+  {/if}
 </section>
 
 <style>
@@ -112,5 +136,36 @@
   }
   .res {
     min-height: 0;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+  .rp {
+    flex: 1;
+    min-height: 0;
+  }
+  .gtoast {
+    position: absolute;
+    right: 14px;
+    bottom: 12px;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--raised);
+    border: 1px solid var(--control);
+    border-radius: var(--radius-card);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+  .gtoast button {
+    height: 28px;
+    padding: 0 12px;
+    border: 1px solid var(--control);
+    border-radius: var(--radius-control);
+    background: none;
+    color: var(--soft);
+    font: inherit;
+    cursor: pointer;
   }
 </style>

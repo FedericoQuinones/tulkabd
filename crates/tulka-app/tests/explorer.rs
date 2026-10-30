@@ -1183,8 +1183,39 @@ async fn delete_connection_closes_its_sessions_and_forgets_its_cache() {
     let r = search(&f, "pedidos").await;
     assert_eq!(r.hits.len(), 1);
     assert_eq!(r.hits[0].connection_id, "other");
-    assert!(run_query(&f.state, "t1".into(), "SELECT 1".into(), |_| {})
-        .await
-        .is_err());
+    assert!(
+        run_query(&f.state, "t1".into(), "SELECT 1".into(), false, |_| {})
+            .await
+            .is_err()
+    );
     assert_eq!(explorer_databases(&f.state, "other".into()).await.len(), 1);
+}
+
+#[tokio::test]
+async fn clearing_the_metadata_cache_forgets_disconnected_connections_and_reindexes_connected_ones()
+{
+    let f = fx_with_cache(Inner::new(&["db"]), cache_with(&["c2"]));
+    save(&f, conn("c1", "Live", None)).await;
+    save(&f, conn("c2", "Cached", None)).await;
+    connect_explorer(&f.state, "c1".into(), None).await.unwrap();
+    f.events.wait_idle("c1").await;
+    let before = search_settled(&f, "pedidos", 2).await;
+    assert_eq!(before.hits.len(), 2);
+
+    clear_metadata_cache(&f.state).await;
+
+    // The connected one is indexed again; the cached-only one is gone.
+    let after = tokio::time::timeout(TIMEOUT, async {
+        loop {
+            let r = search_settled(&f, "pedidos", 1).await;
+            if r.hits.iter().all(|h| h.connection_id == "c1") {
+                return r;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the cache was not cleared");
+    assert_eq!(after.hits.len(), 1);
+    assert!(explorer_databases(&f.state, "c2".into()).await.is_empty());
 }

@@ -16,6 +16,27 @@ describe("applyEnvironment", () => {
   });
 });
 
+describe("environment defaults", () => {
+  const custom = {
+    production: { color: "#aa0000", guard: "block" as const },
+    staging: { color: "#bb0000", guard: "confirm" as const },
+    test: { color: "#cc0000", guard: "off" as const },
+    local: { color: "#dd0000", guard: "off" as const },
+  };
+  it("environment defaults come from preferences", () => {
+    const s = applyEnvironment(base, "production", custom);
+    expect([s.color, s.guard]).toEqual(["#aa0000", "block"]);
+    const fresh = initialEnvState(undefined, custom);
+    expect([fresh.environment, fresh.color, fresh.colorTouched]).toEqual(["local", "#dd0000", false]);
+  });
+  it("a stored connection matching the preferences is untouched, one matching the factory is not", () => {
+    const s = initialEnvState({ environment: "production", color: "#aa0000", guard: "block" }, custom);
+    expect([s.colorTouched, s.guardTouched]).toEqual([false, false]);
+    const f = initialEnvState({ environment: "production", color: "#e5566f", guard: "confirm" }, custom);
+    expect([f.colorTouched, f.guardTouched]).toEqual([true, true]);
+  });
+});
+
 describe("initialEnvState", () => {
   it("follows env changes when stored values are the defaults", () => {
     const s = applyEnvironment(initialEnvState({ environment: "local", color: "#4a8ad6", guard: "off" }), "production");

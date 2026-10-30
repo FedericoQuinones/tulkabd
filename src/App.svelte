@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { onDestroy, tick } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { t } from "./lib/i18n/t";
   import Rail from "./lib/shell/Rail.svelte";
   import StatusBar from "./lib/shell/StatusBar.svelte";
-  import { loadSession, saveSession, type ConnectionConfig, type ParsedConnection } from "./lib/ipc";
+  import { loadSession, onAppEvent, onSqlFilesDropped, saveSession, type ConnectionConfig, type ParsedConnection } from "./lib/ipc";
   import ConnectionDialog from "./lib/connections/ConnectionDialog.svelte";
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
+  import TransactionDialog from "./lib/tabs/TransactionDialog.svelte";
   import { connections } from "./lib/connections/store.svelte";
   import ExplorerTree from "./lib/explorer/ExplorerTree.svelte";
   import { explorer } from "./lib/explorer/tree.svelte";
@@ -19,7 +19,11 @@
   import { queries } from "./lib/queries/queries.svelte";
   import { shortcutAction } from "./lib/tabs/shortcuts";
   import { zoom } from "./lib/zoom.svelte";
+  import { prefs } from "./lib/settings/prefs.svelte";
   import { tabs } from "./lib/tabs/tabs.svelte";
+  import { runLog } from "./lib/runlog/runlog.svelte";
+  import { showRunLog } from "./lib/runlog/reveal";
+  import Settings from "./lib/settings/Settings.svelte";
   import Workspace from "./lib/workspace/Workspace.svelte";
   import { parseSession, restore } from "./lib/workspace/session";
 
@@ -43,6 +47,10 @@
   const activePane = $derived(tabs.activePane);
 
   void explorer.init();
+  // Every finished run, of any tab, joins the Run log.
+  void onAppEvent((e) => {
+    if (e.kind === "runLogged") runLog.prepend(e.entry);
+  }).catch(() => {});
   void queries.reload();
   void connections.loadStartupError();
   zoom.init();
@@ -60,26 +68,27 @@
     stopDrop?.();
   });
 
-  // `.sql` files dropped on the window open in tabs. The native drop (dragDropEnabled) only sees
-  // files from outside: tabs and tree items move with pointer events, not HTML drag and drop.
-  try {
-    getCurrentWebview()
-      .onDragDropEvent((e) => {
-        if (e.payload.type === "drop") void tabs.dropFiles(e.payload.paths);
-      })
-      .then((fn) => {
-        if (destroyed) fn();
-        else stopDrop = fn;
-      })
-      .catch(() => {});
-  } catch {
-    // Outside Tauri (tests): nothing is ever dropped.
-  }
+  // `.sql` files dropped on the window open in tabs. The backend reads the native drop, allows the
+  // `.sql` paths and sends the accepted ones here; tabs and tree items move with pointer events,
+  // not HTML drag and drop, so only files from outside arrive.
+  onSqlFilesDropped((paths) => void tabs.openFiles(paths))
+    .then((fn) => {
+      if (destroyed) fn();
+      else stopDrop = fn;
+    })
+    .catch(() => {});
   async function restoreSession() {
     // `undefined` when the saved session could not be loaded at all.
-    const [json] = await Promise.all([loadSession().catch(() => undefined), connections.refresh()]);
+    const [json, loaded] = await Promise.all([
+      loadSession().catch(() => undefined),
+      prefs.load(),
+      connections.refresh(),
+      connections.loadGuardOff(),
+    ]);
     if (destroyed) return;
-    const session = parseSession(json ?? null);
+    // With "open with the last session" off the workspace starts empty, and the saved session stays
+    // on disk until the user edits something, like one this version cannot restore.
+    const session = loaded.restoreSession ? parseSession(json ?? null) : null;
     if (session) {
       // Unreadable connections file: keep the bindings rather than drop them all.
       const ids = connections.error
@@ -106,9 +115,33 @@
   let leftPanel = $state<"rail.explorer" | "rail.saved">("rail.explorer");
   const remember = () => saveLayout({ width: explorerWidth, hidden: explorerHidden });
 
+  // The Settings screen takes the place of the workspace; the tabs stay mounted underneath.
+  let settingsOpen = $state(false);
+
+  /** Leaves Settings. The focus goes back to the gear unless something else is taking it. */
+  function closeSettings(focusGear = true) {
+    if (!settingsOpen) return;
+    settingsOpen = false;
+    if (focusGear) void tick().then(() => document.querySelector<HTMLElement>(`nav button[aria-label="${t("rail.settings")}"]`)?.focus());
+  }
+
+  // Opening or showing a tab (Explorer, palette, saved queries, files) leaves Settings.
+  $effect(() => {
+    void tabs.shown;
+    untrack(() => closeSettings(false));
+  });
+
   /** A panel icon shows its panel; pressed again while shown, it hides the left panel. */
   function onrail(key: string) {
+    if (key === "rail.settings") {
+      if (settingsOpen) closeSettings();
+      else settingsOpen = true;
+      return;
+    }
+    // Any other icon acts on the workspace, which Settings covers.
+    closeSettings(false);
     if (key === "rail.search") palette.show();
+    if (key === "rail.log") void showRunLog();
     if (key !== "rail.explorer" && key !== "rail.saved") return;
     if (!explorerHidden && leftPanel !== key) leftPanel = key;
     else {
@@ -147,6 +180,8 @@
     if (document.querySelector('[aria-modal="true"]')) return;
     const action = shortcutAction(e, isMac);
     if (!action) return;
+    // A shortcut that acts on the tabs leaves Settings first; the zoom applies to both.
+    if (action !== "zoomIn" && action !== "zoomOut" && action !== "zoomReset") closeSettings(false);
     e.preventDefault();
     if (action === "zoomIn" || action === "zoomOut" || action === "zoomReset") zoom.apply(action);
     else if (action === "palette") palette.show();
@@ -155,7 +190,7 @@
     else if (action === "new") tabs.newTab();
     else if (action === "splitRight") tabs.splitActive("row");
     else if (action === "splitDown") tabs.splitActive("column");
-    else if (tabs.activeId) tabs.close(tabs.activeId);
+    else if (tabs.activeId) void tabs.requestClose(tabs.activeId);
   }
 </script>
 
@@ -163,7 +198,7 @@
 
 <div class="win">
   <div class="cols" class:no-explorer={explorerHidden}>
-    <Rail active={explorerHidden ? null : leftPanel} onselect={onrail} />
+    <Rail active={explorerHidden ? null : leftPanel} onselect={onrail} {settingsOpen} />
     {#if !explorerHidden}
       <aside class="explorer" style:width="{explorerWidth}px">
         {#if leftPanel === "rail.saved"}
@@ -200,7 +235,10 @@
       </aside>
     {/if}
     <main class="workspace">
-      {#if restored}<Workspace />{/if}
+      <div class="ws" hidden={settingsOpen}>
+        {#if restored}<Workspace />{/if}
+      </div>
+      {#if settingsOpen}<Settings onclose={() => closeSettings()} />{/if}
       {#if tabs.fileError}
         <div class="file-error" role="alert">
           <span>{tabs.fileError}</span>
@@ -235,6 +273,9 @@
 {/if}
 {#if palette.isOpen}
   <Palette />
+{/if}
+{#if tabs.closePrompt}
+  <TransactionDialog prompt={tabs.closePrompt} onanswer={(commit) => void tabs.answerClose(commit)} oncancel={() => tabs.cancelClose()} />
 {/if}
 {#if tabs.nameRequest}
   {#key tabs.nameRequest}
@@ -309,6 +350,12 @@
     background: var(--ground);
     min-width: 0;
     min-height: 0;
+  }
+  .ws {
+    height: 100%;
+  }
+  .ws[hidden] {
+    display: none;
   }
   /* Files that could not be opened, over the top right of the workspace. */
   .file-error {

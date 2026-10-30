@@ -4,7 +4,10 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use tulka_core::{Column, ConnectionConfig, DbObject, ExecEvent, MessageKind, ServerInfo};
+use tulka_core::{
+    Column, ConnectionConfig, DbObject, ExecEvent, GuardFinding, MessageKind, ServerInfo,
+};
+use tulka_store::RunLogEntry;
 
 /// Command error meaning there is no saved password and none was given.
 pub const PASSWORD_REQUIRED: &str = "password_required";
@@ -17,8 +20,8 @@ pub const NOT_FOUND: &str = "not_found";
 pub const EMPTY_NAME: &str = "empty_name";
 /// Saved-query command error: a query with that name already exists.
 pub const EXISTS: &str = "exists";
-/// File command error: the path was never allowed in this run (picked in
-/// the open dialog, or passed to `allow_paths` by the UI).
+/// File command error: the user never picked or dropped the path (in this
+/// run or an earlier one).
 pub const NOT_ALLOWED: &str = "not_allowed";
 /// File or saved-query command error: the file is not text, neither UTF-8
 /// nor UTF-16 with a BOM, or it holds NUL characters.
@@ -58,7 +61,8 @@ pub enum ConnectionStatus {
 /// Serialized internally tagged:
 /// `{"kind": "explorerStatus", "connectionId": "..", "status": "error", "message": ".."}`,
 /// `{"kind": "indexProgress", "connectionId": "..", "database": "..", "done": true, "noAccess": false}`,
-/// `{"kind": "indexIdle", "connectionId": ".."}`.
+/// `{"kind": "indexIdle", "connectionId": ".."}`,
+/// `{"kind": "runLogged", "entry": {..}}`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(
     tag = "kind",
@@ -84,6 +88,8 @@ pub enum AppEvent {
     },
     /// The connection's indexing queue is empty. Not sent after an error.
     IndexIdle { connection_id: String },
+    /// A run was added to the run log.
+    RunLogged { entry: RunLogEntry },
 }
 
 /// Where [`AppEvent`]s go. The Tauri layer emits them to the window; tests
@@ -238,8 +244,8 @@ impl UiEvent {
     }
 }
 
-/// How a `run_query` ended. Serialized as `"ok"`, `"error"`, `"cancelled"`
-/// or `"disconnected"`.
+/// How a `run_query` ended. Serialized as `"ok"`, `"error"`, `"cancelled"`,
+/// `"disconnected"`, `"blocked"` or `"needsConfirmation"`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RunOutcome {
@@ -247,6 +253,13 @@ pub enum RunOutcome {
     Error,
     Cancelled,
     Disconnected,
+    /// The connection's guard is `block` and the script has dangerous
+    /// statements: nothing was sent to the server.
+    Blocked,
+    /// The connection's guard is `confirm`, the script has dangerous
+    /// statements and the run was not confirmed: nothing was sent to the
+    /// server. Run it again with `confirmed` set to go ahead.
+    NeedsConfirmation,
 }
 
 /// Returned by `run_query` once the script ended.
@@ -257,6 +270,10 @@ pub struct RunSummary {
     /// RFC 3339 UTC timestamp, e.g. `2026-10-21T14:03:00.123Z`.
     pub finished_at: String,
     pub outcome: RunOutcome,
+    /// The dangerous statements found; empty unless the outcome is
+    /// `blocked` or `needsConfirmation`.
+    #[serde(default)]
+    pub findings: Vec<GuardFinding>,
 }
 
 /// Returned by `open_session`.
@@ -394,15 +411,18 @@ mod tests {
             elapsed_ms: 42,
             finished_at: "2026-10-21T14:03:00.123Z".into(),
             outcome: RunOutcome::Cancelled,
+            findings: vec![],
         };
         assert_eq!(
             to_json(&s),
-            json!({"elapsedMs": 42, "finishedAt": "2026-10-21T14:03:00.123Z", "outcome": "cancelled"})
+            json!({"elapsedMs": 42, "finishedAt": "2026-10-21T14:03:00.123Z", "outcome": "cancelled", "findings": []})
         );
         for (o, text) in [
             (RunOutcome::Ok, "ok"),
             (RunOutcome::Error, "error"),
             (RunOutcome::Disconnected, "disconnected"),
+            (RunOutcome::Blocked, "blocked"),
+            (RunOutcome::NeedsConfirmation, "needsConfirmation"),
         ] {
             assert_eq!(to_json(&o), json!(text));
         }
@@ -477,6 +497,24 @@ mod tests {
                     connection_id: "c1".into(),
                 },
                 json!({"kind": "indexIdle", "connectionId": "c1"}),
+            ),
+            (
+                AppEvent::RunLogged {
+                    entry: RunLogEntry {
+                        id: 1,
+                        at_ms: 5,
+                        connection_id: "c1".into(),
+                        connection_name: "prod".into(),
+                        color: "#fff".into(),
+                        database: "db".into(),
+                        sql: "SELECT 1".into(),
+                        sql_truncated: false,
+                        outcome: tulka_store::RunLogOutcome::Ok,
+                        rows: Some(1),
+                        elapsed_ms: None,
+                    },
+                },
+                json!({"kind": "runLogged", "entry": {"id": 1, "atMs": 5, "connectionId": "c1", "connectionName": "prod", "color": "#fff", "database": "db", "sql": "SELECT 1", "sqlTruncated": false, "outcome": "ok", "rows": 1, "elapsedMs": null}}),
             ),
         ];
         for (ev, expected) in cases {

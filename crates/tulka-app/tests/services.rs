@@ -10,12 +10,14 @@ use tempfile::TempDir;
 
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver};
 use tokio::sync::Notify;
+use tulka_app::tulka_store::RunLogOutcome;
 use tulka_app::*;
 use tulka_core::{
     estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, CancelHandle, Column,
     ColumnInfo, ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, DatabaseSnapshot,
-    DbObject, Driver, DriverError, Environment, ExecEvent, MemoryStore, MessageKind, ObjectKind,
-    SecretStore, ServerInfo, Session, TableStructure, UnavailableStore, Value,
+    DbObject, Driver, DriverError, Environment, ExecEvent, MemoryStore, MessageKind, NumberFormat,
+    ObjectKind, Preferences, SecretStore, ServerInfo, Session, TableStructure, UnavailableStore,
+    Value,
 };
 
 const PASSWORD: &str = "s3cret-pw";
@@ -43,6 +45,7 @@ impl Driver for FakeDriver {
             database: p.database.clone().unwrap_or_else(|| "master".into()),
             cancel: Arc::new(FakeCancel::default()),
             dropped: None,
+            fail_end: p.user == "failtx",
         }))
     }
 }
@@ -70,6 +73,7 @@ impl Driver for GatedDriver {
             database: "master".into(),
             cancel: Arc::new(FakeCancel::default()),
             dropped: Some(self.dropped.clone()),
+            fail_end: false,
         }))
     }
 }
@@ -79,6 +83,8 @@ struct FakeSession {
     database: String,
     cancel: Arc<FakeCancel>,
     dropped: Option<Arc<AtomicBool>>,
+    /// `end_transactions` fails.
+    fail_end: bool,
 }
 
 impl Drop for FakeSession {
@@ -299,6 +305,20 @@ impl Session for FakeSession {
     fn cancel_handle(&self) -> Box<dyn CancelHandle> {
         Box::new(CancelRef(self.cancel.clone()))
     }
+
+    async fn transaction_count(&mut self) -> Result<u32, DriverError> {
+        Ok(2)
+    }
+
+    async fn end_transactions(&mut self, _commit: bool) -> Result<(), DriverError> {
+        if self.fail_end {
+            return Err(DriverError::Query {
+                message: "cannot end".into(),
+                line: None,
+            });
+        }
+        Ok(())
+    }
 }
 
 struct CancelRef(Arc<FakeCancel>);
@@ -394,9 +414,12 @@ fn streamer() -> (
 
 async fn run(state: &AppState, tab: &str, sql: &str) -> (Result<RunSummary, String>, Vec<UiEvent>) {
     let (sink, events) = recorder();
-    let result = tokio::time::timeout(TIMEOUT, run_query(state, tab.into(), sql.into(), sink))
-        .await
-        .expect("run_query did not finish");
+    let result = tokio::time::timeout(
+        TIMEOUT,
+        run_query(state, tab.into(), sql.into(), false, sink),
+    )
+    .await
+    .expect("run_query did not finish");
     let events = events.lock().unwrap().clone();
     (result, events)
 }
@@ -769,10 +792,9 @@ async fn cancel_stops_a_run_that_streams_rows_meanwhile() {
     let (sink, mut rx) = streamer();
     let state = f.state.clone();
     // Spawned: the run_query future must be Send for the Tauri layer.
-    let running =
-        tokio::spawn(
-            async move { run_query(&state, "t1".into(), "rows 700; wait".into(), sink).await },
-        );
+    let running = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 700; wait".into(), false, sink).await
+    });
     wait_for_total(&mut rx, 700).await;
 
     // Rows are readable while the query is still running...
@@ -801,10 +823,9 @@ async fn close_session_cancels_a_running_query() {
     let (f, _) = connected("t1").await;
     let (sink, mut rx) = streamer();
     let state = f.state.clone();
-    let running =
-        tokio::spawn(
-            async move { run_query(&state, "t1".into(), "rows 1; wait".into(), sink).await },
-        );
+    let running = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 1; wait".into(), false, sink).await
+    });
     wait_for_total(&mut rx, 1).await;
 
     close_session(&f.state, "t1".into()).await.unwrap();
@@ -821,14 +842,100 @@ async fn close_session_cancels_a_running_query() {
 }
 
 #[tokio::test]
+async fn transaction_count_is_busy_while_running() {
+    let (f, _) = connected("t1").await;
+    assert_eq!(transaction_count(&f.state, "t1".into()).await, Ok(2));
+    let (sink, mut rx) = streamer();
+    let state = f.state.clone();
+    let running = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 1; wait".into(), false, sink).await
+    });
+    wait_for_total(&mut rx, 1).await;
+
+    assert_eq!(
+        transaction_count(&f.state, "t1".into()).await,
+        Err("busy".to_string())
+    );
+    assert_eq!(
+        end_transactions(&f.state, "t1".into(), false).await,
+        Err("busy".to_string())
+    );
+    cancel_query(&f.state, "t1".into()).await.unwrap();
+    tokio::time::timeout(TIMEOUT, running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(transaction_count(&f.state, "t1".into()).await, Ok(2));
+}
+
+#[tokio::test]
+async fn transaction_count_without_session_is_zero() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    assert_eq!(transaction_count(&f.state, "nope".into()).await, Ok(0));
+    assert_eq!(
+        end_transactions(&f.state, "nope".into(), true).await,
+        Ok(())
+    );
+    assert!(list_run_log(&f.state, None, 10).await.is_empty());
+}
+
+#[tokio::test]
+async fn transaction_count_on_a_lost_connection_is_disconnected() {
+    let (f, _) = connected("t1").await;
+    let (result, _) = run(&f.state, "t1", "disconnect").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Disconnected);
+    assert_eq!(
+        transaction_count(&f.state, "t1".into()).await,
+        Err("disconnected".to_string())
+    );
+}
+
+#[tokio::test]
+async fn end_transactions_is_logged() {
+    let (f, _) = connected("t1").await;
+    end_transactions(&f.state, "t1".into(), true).await.unwrap();
+    end_transactions(&f.state, "t1".into(), false)
+        .await
+        .unwrap();
+    let log = list_run_log(&f.state, None, 10).await;
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0].sql, "ROLLBACK TRANSACTION");
+    assert_eq!(log[1].sql, "COMMIT TRANSACTION");
+    assert!(log.iter().all(|e| e.outcome == RunLogOutcome::Ok));
+    assert!(log
+        .iter()
+        .all(|e| e.rows.is_none() && e.elapsed_ms.is_some()));
+
+    // A failure is reported and logged as an error.
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let mut conn = new_conn();
+    conn.user = "failtx".into();
+    let saved = save_connection(&f.state, conn, Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    open_session(&f.state, "t1".into(), saved.id, None, None)
+        .await
+        .unwrap();
+    let err = end_transactions(&f.state, "t1".into(), true)
+        .await
+        .unwrap_err();
+    assert!(err.contains("cannot end"), "{err}");
+    let log = list_run_log(&f.state, None, 10).await;
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].sql, "COMMIT TRANSACTION");
+    assert_eq!(log[0].outcome, RunLogOutcome::Error);
+}
+
+#[tokio::test]
 async fn reopening_a_running_tab_does_not_mix_runs() {
     let (f, saved) = connected("t1").await;
     let (sink, mut rx) = streamer();
     let state = f.state.clone();
-    let running =
-        tokio::spawn(
-            async move { run_query(&state, "t1".into(), "rows 4; wait".into(), sink).await },
-        );
+    let running = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 4; wait".into(), false, sink).await
+    });
     wait_for_total(&mut rx, 4).await;
 
     open_session(&f.state, "t1".into(), saved.id, None, None)
@@ -1106,10 +1213,9 @@ async fn result_view_is_busy_while_rows_arrive() {
     let (f, _) = connected("t1").await;
     let (sink, mut rx) = streamer();
     let state = f.state.clone();
-    let running =
-        tokio::spawn(
-            async move { run_query(&state, "t1".into(), "rows 700; wait".into(), sink).await },
-        );
+    let running = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 700; wait".into(), false, sink).await
+    });
     wait_for_total(&mut rx, 700).await;
     assert_eq!(
         set_result_view(&f.state, "t1".into(), 0, sort_by(0, true)).await,
@@ -1132,10 +1238,9 @@ async fn copy_works_while_the_result_is_streaming() {
     let (f, _) = connected("t1").await;
     let (sink, mut rx) = streamer();
     let state = f.state.clone();
-    let running =
-        tokio::spawn(
-            async move { run_query(&state, "t1".into(), "rows 700; wait".into(), sink).await },
-        );
+    let running = tokio::spawn(async move {
+        run_query(&state, "t1".into(), "rows 700; wait".into(), false, sink).await
+    });
     wait_for_total(&mut rx, 700).await;
     let clipboard = Arc::new(FakeClipboard::default());
     let out = copy_results(
@@ -1185,7 +1290,7 @@ async fn a_panicking_driver_leaves_the_tab_disconnected_not_busy() {
     let (f, saved) = connected("t1").await;
     let state = f.state.clone();
     let joined = tokio::spawn(async move {
-        run_query(&state, "t1".into(), "rows 1; panic".into(), |_| {}).await
+        run_query(&state, "t1".into(), "rows 1; panic".into(), false, |_| {}).await
     })
     .await;
     assert!(joined.unwrap_err().is_panic());
@@ -1197,7 +1302,7 @@ async fn a_panicking_event_sink_leaves_the_tab_disconnected_not_busy() {
     let (f, saved) = connected("t1").await;
     let state = f.state.clone();
     let joined = tokio::spawn(async move {
-        run_query(&state, "t1".into(), "rows 1".into(), |_| {
+        run_query(&state, "t1".into(), "rows 1".into(), false, |_| {
             panic!("sink panic")
         })
         .await
@@ -1212,7 +1317,7 @@ async fn a_dropped_run_leaves_the_tab_disconnected_not_busy() {
     let (f, saved) = connected("t1").await;
     let dropped = tokio::time::timeout(
         Duration::from_millis(100),
-        run_query(&f.state, "t1".into(), "rows 1; wait".into(), |_| {}),
+        run_query(&f.state, "t1".into(), "rows 1; wait".into(), false, |_| {}),
     )
     .await;
     assert!(dropped.is_err(), "the run should still be waiting");
@@ -1957,4 +2062,196 @@ async fn session_saves_even_when_the_config_is_read_only() {
         load_session(&state).await.as_deref(),
         Some(r#"{"tabs":[]}"#)
     );
+}
+
+// --------------------------------------------------------------- preferences
+
+async fn with_prefs(state: &AppState, edit: impl FnOnce(&mut Preferences)) {
+    let mut prefs = get_preferences(state).await;
+    edit(&mut prefs);
+    set_preferences(state, prefs).await.unwrap();
+}
+
+#[tokio::test]
+async fn set_preferences_clamps_persists_and_set_zoom_keeps_the_rest() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let mut prefs = Preferences {
+        max_rows: 5,
+        run_log_days: 9999,
+        ..Preferences::default()
+    };
+    prefs.environments.local.color = "nope".into();
+    let kept = set_preferences(&f.state, prefs).await.unwrap();
+    assert_eq!((kept.max_rows, kept.run_log_days), (1_000, 365));
+    assert_eq!(kept.environments.local.color, "#4a8ad6");
+    assert_eq!(get_preferences(&f.state).await, kept);
+    let saved = ConfigStore::at(f._dir.path().join("config.json"))
+        .load()
+        .unwrap();
+    assert_eq!(saved.preferences, kept);
+
+    assert_eq!(set_zoom(&f.state, 150).await.unwrap(), 150);
+    let after = get_preferences(&f.state).await;
+    assert_eq!((after.zoom, after.max_rows), (150, 1_000));
+}
+
+#[tokio::test]
+async fn max_rows_preference_caps_the_buffer() {
+    let (f, _) = connected("t1").await;
+    with_prefs(&f.state, |p| p.max_rows = 1_000).await;
+    let (result, events) = run(&f.state, "t1", "rows 1500").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    // The buffer holds 1000 rows and the result is flagged as truncated.
+    assert_eq!(row_counts(&events, 0).last(), Some(&(1_000, true)));
+    assert_eq!(
+        fetch_rows(&f.state, "t1".into(), 0, 990, 100)
+            .await
+            .unwrap()
+            .len(),
+        10
+    );
+}
+
+#[tokio::test]
+async fn rows_beyond_the_buffer_limit_still_count_in_the_run_log() {
+    let (f, _) = connected("t1").await;
+    with_prefs(&f.state, |p| p.max_rows = 1_000).await;
+    let (result, _) = run(&f.state, "t1", "rows 1500").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    let log = list_run_log(&f.state, None, 10).await;
+    assert_eq!(log[0].rows, Some(1_500));
+}
+
+#[tokio::test]
+async fn query_timeout_cancels() {
+    let (f, _) = connected("t1").await;
+    with_prefs(&f.state, |p| p.query_timeout_s = 1).await;
+    let started = std::time::Instant::now();
+    let (result, events) = run(&f.state, "t1", "wait 0").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Cancelled);
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert!(events.contains(&UiEvent::Message {
+        kind: MessageKind::Warning,
+        text: "Query timeout (1 s) reached; the query was cancelled.".into(),
+        line: None,
+    }));
+    let log = list_run_log(&f.state, None, 10).await;
+    assert_eq!(log[0].outcome, RunLogOutcome::Cancelled);
+    // The session is usable again.
+    let (result, _) = run(&f.state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+}
+
+#[tokio::test]
+async fn a_query_that_ends_before_the_timeout_is_left_alone() {
+    let (f, _) = connected("t1").await;
+    with_prefs(&f.state, |p| p.query_timeout_s = 1).await;
+    let (result, events) = run(&f.state, "t1", "rows 3").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, UiEvent::Message { text, .. } if text.contains("timeout"))));
+    // No stray timer fires later and cancels the next run.
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    let (result, _) = run(&f.state, "t1", "rows 3").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+}
+
+#[tokio::test]
+async fn invariant_copy_uses_a_dot() {
+    let (f, _) = connected("t1").await;
+    let (result, _) = run(&f.state, "t1", "rows 4").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    with_prefs(&f.state, |p| p.copy_numbers = NumberFormat::Invariant).await;
+    let all_rows: Vec<_> = (0..4).map(fake_row).collect();
+    let clipboard = Arc::new(FakeClipboard::default());
+    copy_results(
+        &f.state,
+        "t1".into(),
+        0,
+        CopyMode::Excel,
+        Selection::All,
+        clipboard.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = to_excel_tsv(&fake_columns(), &all_rows, '.');
+    assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+    assert!(expected.contains("0.50"));
+}
+
+#[tokio::test]
+async fn pruning_uses_the_run_log_days_preference() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(tulka_app::tulka_store::RunLogStore::in_memory());
+    let state = AppState::new(
+        ConfigStore::at(dir.path().join("config.json")),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakeDriver)],
+    )
+    .unwrap()
+    .with_runlog(store.clone());
+    let day = 24 * 60 * 60 * 1000;
+    let now = chrono::Utc::now().timestamp_millis();
+    for (age_days, sql) in [(40, "old"), (10, "recent"), (0, "today")] {
+        store
+            .insert(&tulka_app::tulka_store::NewRun {
+                at_ms: now - age_days * day,
+                connection_id: "c".into(),
+                connection_name: "C".into(),
+                color: "#000000".into(),
+                database: "d".into(),
+                sql: sql.into(),
+                outcome: RunLogOutcome::Ok,
+                rows: None,
+                elapsed_ms: None,
+            })
+            .unwrap();
+    }
+    with_prefs(&state, |p| p.run_log_days = 30).await;
+    prune_run_log(&state).await;
+    assert_eq!(list_run_log(&state, None, 10).await.len(), 2);
+    with_prefs(&state, |p| p.run_log_days = 5).await;
+    prune_run_log(&state).await;
+    let left = list_run_log(&state, None, 10).await;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].sql, "today");
+}
+
+#[tokio::test]
+async fn running_a_query_does_not_prune_the_run_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(tulka_app::tulka_store::RunLogStore::in_memory());
+    let state = AppState::new(
+        ConfigStore::at(dir.path().join("config.json")),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakeDriver)],
+    )
+    .unwrap()
+    .with_runlog(store.clone());
+    store
+        .insert(&tulka_app::tulka_store::NewRun {
+            at_ms: chrono::Utc::now().timestamp_millis() - 40 * 24 * 60 * 60 * 1000,
+            connection_id: "c".into(),
+            connection_name: "C".into(),
+            color: "#000000".into(),
+            database: "d".into(),
+            sql: "old".into(),
+            outcome: RunLogOutcome::Ok,
+            rows: None,
+            elapsed_ms: None,
+        })
+        .unwrap();
+    with_prefs(&state, |p| p.run_log_days = 30).await;
+    let saved = save_connection(&state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    open_session(&state, "t1".into(), saved.id, None, None)
+        .await
+        .unwrap();
+    let (result, _) = run(&state, "t1", "rows 1").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    // Pruning is the job of a background timer, never of the run itself.
+    assert_eq!(list_run_log(&state, None, 10).await.len(), 2);
 }

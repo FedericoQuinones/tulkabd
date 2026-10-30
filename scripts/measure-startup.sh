@@ -81,6 +81,10 @@ CREATE TABLE session (
     json TEXT NOT NULL,
     saved_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS allowed_file (
+    path TEXT PRIMARY KEY,
+    at INTEGER NOT NULL
+);
 INSERT INTO session (id, json, saved_at)
 VALUES (1, CAST(readfile('${SESSION_JSON//\'/\'\'}') AS TEXT), CAST(unixepoch('subsec') * 1000 AS INTEGER));
 PRAGMA user_version = 1;

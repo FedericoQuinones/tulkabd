@@ -50,7 +50,7 @@
 //! disk the file commands may touch sit behind their own short-held mutex;
 //! see [`crate::files`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, MutexGuard, PoisonError};
 
@@ -59,7 +59,7 @@ use tulka_core::{
     AppConfig, CancelHandle, ConfigStore, Driver, KeyringStore, SecretStore, Session,
 };
 use tulka_mssql::MssqlDriver;
-use tulka_store::{MetaCache, SessionStore};
+use tulka_store::{MetaCache, RunLogStore, SessionStore};
 
 use crate::explorer::Explorer;
 use crate::files::AllowedFiles;
@@ -89,6 +89,11 @@ pub struct AppState {
     pub(crate) queries: Arc<SavedQueries>,
     /// The `.sql` files from disk the file commands may read and write.
     pub(crate) files: AllowedFiles,
+    /// Connections whose guard is switched off until the app closes. Only
+    /// held for short, non-async critical sections.
+    pub(crate) guard_off_session: std::sync::Mutex<HashSet<String>>,
+    /// Every statement run, with where it ran; see [`crate::runlog`].
+    pub(crate) runlog: Arc<RunLogStore>,
 }
 
 /// A result buffer shared between the run that fills it and the commands
@@ -144,6 +149,8 @@ impl AppState {
             session: Arc::new(SessionStore::in_memory()),
             queries: SavedQueries::unavailable(),
             files: AllowedFiles::default(),
+            guard_off_session: std::sync::Mutex::default(),
+            runlog: Arc::new(RunLogStore::in_memory()),
         })
     }
 
@@ -168,6 +175,8 @@ impl AppState {
             session: Arc::new(SessionStore::in_memory()),
             queries: SavedQueries::unavailable(),
             files: AllowedFiles::default(),
+            guard_off_session: std::sync::Mutex::default(),
+            runlog: Arc::new(RunLogStore::in_memory()),
         }
     }
 
@@ -184,7 +193,9 @@ impl AppState {
     }
 
     /// Persists the workspace session in `store` instead of memory.
+    /// The `.sql` paths the user allowed in earlier runs are allowed again.
     pub fn with_session(mut self, store: Arc<SessionStore>) -> Self {
+        self.files = AllowedFiles::from_paths(store.allowed_files());
         self.session = store;
         self
     }
@@ -194,6 +205,12 @@ impl AppState {
     /// returns at once.
     pub fn with_queries(mut self, store: QueriesStore) -> Self {
         self.queries = SavedQueries::start(store);
+        self
+    }
+
+    /// Keeps the run log in `store` instead of memory.
+    pub fn with_runlog(mut self, store: Arc<RunLogStore>) -> Self {
+        self.runlog = store;
         self
     }
 
@@ -232,6 +249,7 @@ impl AppState {
             .with_metadata(Arc::new(MetaCache::open_default()), events)
             .with_session(Arc::new(SessionStore::open_default()))
             .with_queries(QueriesStore::open_default())
+            .with_runlog(Arc::new(RunLogStore::open_default()))
     }
 
     /// Fails when the state is read-only.

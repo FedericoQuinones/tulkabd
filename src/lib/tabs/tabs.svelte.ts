@@ -1,6 +1,6 @@
 import { t } from "../i18n/t";
 import * as ipc from "../ipc";
-import type { ConnectionConfig, FileEncoding, LineEnding } from "../ipc";
+import type { ConnectionConfig, FileEncoding, LineEnding, RunLogEntry } from "../ipc";
 import { connections } from "../connections/store.svelte";
 import { queries, type NameRequest } from "../queries/queries.svelte";
 import { ENVIRONMENTS } from "../connections/env";
@@ -8,6 +8,7 @@ import { PaneState } from "../pane/pane.svelte";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { groups, removeGroup, split, type Layout } from "../workspace/layout";
 import { snapshot, watchSession } from "../workspace/session";
+import { checkFrom, closePlan, errorText, type CloseCheck } from "./closeFlow";
 
 export type TabSpec =
   | {
@@ -82,6 +83,41 @@ export const AUTOSAVE_MAX_WAIT_MS = 5000;
 /** Longest a save may hold up the next one, or the window close. */
 export const SAVE_TIMEOUT_MS = 2000;
 
+/** Pause between attempts to end the transactions of a tab whose query is still stopping. */
+export const END_RETRY_MS = 50;
+/** Attempts before giving up on a tab whose query does not stop. */
+export const END_RETRIES = 100;
+
+/** Longest wait for a tab to say how many transactions it holds before it counts as unknown. */
+export const CHECK_TIMEOUT_MS = 3000;
+
+/** A rejection of the transaction commands as user text: sentinels become words. */
+function txErrorText(e: unknown): string {
+  const text = errorText(e);
+  if (text === "busy") return t("tx.error.busy");
+  if (text === "disconnected") return t("tx.error.disconnected");
+  return text;
+}
+
+/** A tab to ask about before it closes, and where it runs. */
+export interface CloseItem {
+  tabId: string;
+  connection: string;
+  database: string;
+  state: "open" | "unknown";
+  count: number;
+}
+
+/** The dialog asking whether to commit or roll back before a tab, or the window, closes. */
+export interface ClosePrompt {
+  scope: "tab" | "window";
+  items: CloseItem[];
+  /** An answer is being carried out. */
+  busy: boolean;
+  /** Why the last answer failed; the tabs stay open. */
+  error: string | null;
+}
+
 /** Resolves when `p` settles or after `ms`, whichever comes first; never rejects. */
 function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -132,7 +168,11 @@ export class TabsStore {
   nameRequest = $state.raw<NameRequest | null>(null);
   /** Why the last files opened could not all be opened; App shows it until dismissed or the next open. */
   fileError = $state<string | null>(null);
+  /** Open transactions the user must answer for before a tab or the window closes. */
+  closePrompt = $state.raw<ClosePrompt | null>(null);
 
+  /** Grows whenever a tab is added or brought forward, so the shell can leave a screen covering the tabs. */
+  shown = $state(0);
   private counter = 0;
   private pending = new Map<string, Pending>();
   private saveNotices = new WeakMap<PaneState, string>();
@@ -208,6 +248,7 @@ export class TabsStore {
     const g = this.group(this.activeGroupId)!;
     g.tabIds.push(tab.id);
     g.activeId = tab.id;
+    this.shown++;
   }
 
   open(spec: TabSpec): string {
@@ -251,6 +292,26 @@ export class TabsStore {
     return id;
   }
 
+  /**
+   * Opens a run of the Run log in a new tab: its text, bound to the connection and database it ran
+   * on. Nothing connects until the user runs it, as with a restored tab. A connection that was
+   * deleted since leaves the tab unbound, with a notice.
+   */
+  openFromRunLog(entry: RunLogEntry): string {
+    const id = `tab-${crypto.randomUUID()}`;
+    const pane = new PaneState(id);
+    pane.initialDoc = entry.sql;
+    if (connections.list.some((c) => c.id === entry.connectionId)) {
+      pane.connectionId = entry.connectionId;
+      pane.database = entry.database;
+    } else {
+      pane.notice = t("runlog.connectionGone");
+    }
+    if (entry.sqlTruncated) pane.notice = pane.notice ? `${pane.notice} ${t("runlog.truncated")}` : t("runlog.truncated");
+    this.add({ id, kind: "query", title: `untitled-${++this.counter}`, pane, connectError: null, dirty: false });
+    return id;
+  }
+
   /** Ctrl+T: a new query tab bound to the active tab's connection and database. */
   newTab(): string | null {
     const { connectionId, database } = this.binding(this.active);
@@ -263,6 +324,7 @@ export class TabsStore {
     if (!g) return;
     g.activeId = id;
     this.activeGroupId = g.id;
+    this.shown++;
   }
 
   focusGroup(groupId: string) {
@@ -334,6 +396,112 @@ export class TabsStore {
       this.dropIfEmpty(g);
     }
     void tab.pane?.close();
+  }
+
+  /** Closes a tab the way the UI asks for it: first asks what to do with an open transaction. */
+  async requestClose(id: string): Promise<void> {
+    const tab = this.list.find((x) => x.id === id);
+    if (!tab || this.closePrompt) return;
+    const plan = closePlan([await this.checkTab(tab)]);
+    // Closed meanwhile, or another prompt took over while counting.
+    if (!this.list.some((x) => x.id === id) || this.closePrompt) return;
+    if (plan.ask) this.closePrompt = { scope: "tab", items: this.itemsOf(plan.tabs), busy: false, error: null };
+    else this.close(id);
+  }
+
+  /** What the tab's session holds. A tab with no session or a lost one holds nothing. */
+  private async checkTab(tab: Tab): Promise<CloseCheck> {
+    if (!tab.pane || tab.pane.status === "disconnected") return { tabId: tab.id, state: "none", count: 0 };
+    // A dead connection can leave the question unanswered; the user is then asked.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject("timeout"), CHECK_TIMEOUT_MS);
+    });
+    try {
+      return checkFrom(tab.id, { count: await Promise.race([ipc.transactionCount(tab.id), timeout]) });
+    } catch (error) {
+      return checkFrom(tab.id, { error });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private itemsOf(checks: CloseCheck[]): CloseItem[] {
+    return checks.flatMap((c) => {
+      const pane = this.list.find((x) => x.id === c.tabId)?.pane;
+      if (c.state === "none") return [];
+      const connection = connections.list.find((x) => x.id === pane?.connectionId)?.name ?? "";
+      return [{ tabId: c.tabId, connection, database: pane?.database ?? "", state: c.state, count: c.count }];
+    });
+  }
+
+  /** The window is being closed: ask once for every tab that holds, or may hold, a transaction. */
+  private async confirmWindowClose(event: { preventDefault: () => void }): Promise<void> {
+    if (this.closePrompt) {
+      // Answering an earlier prompt: the window stays until that is done.
+      event.preventDefault();
+      return;
+    }
+    const checks = await Promise.all(this.list.map((x) => this.checkTab(x)));
+    const plan = closePlan(checks);
+    if (!plan.ask) return;
+    event.preventDefault();
+    this.closePrompt = { scope: "window", items: this.itemsOf(plan.tabs), busy: false, error: null };
+  }
+
+  /**
+   * Ends the transactions of one listed tab; a running tab is cancelled first. A rollback that
+   * cannot reach the session (still busy, or the connection is gone) closes the session instead:
+   * the server undoes an open transaction when its connection goes away. A commit never does.
+   */
+  private async endOne(item: CloseItem, commit: boolean): Promise<void> {
+    const running = item.state === "unknown";
+    if (running) await ipc.cancelQuery(item.tabId).catch(() => {});
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await ipc.endTransactions(item.tabId, commit);
+      } catch (e) {
+        const text = errorText(e);
+        // The cancelled query still holds the session for a moment.
+        if (text === "busy" && running && attempt < END_RETRIES) {
+          await new Promise((r) => setTimeout(r, END_RETRY_MS));
+          continue;
+        }
+        if (!commit && text === "disconnected") return;
+        if (!commit && text === "busy") return ipc.closeSession(item.tabId);
+        throw e;
+      }
+    }
+  }
+
+  /**
+   * Carries out the user's answer to `closePrompt`. Whatever fails stops there: the tabs left
+   * (and the window) stay open and the prompt shows the error, so nothing is lost silently.
+   */
+  async answerClose(commit: boolean): Promise<void> {
+    const prompt = this.closePrompt;
+    if (!prompt || prompt.busy) return;
+    // What a running query did so far is not worth committing: it can only be rolled back.
+    if (commit && prompt.items.some((x) => x.state === "unknown")) return;
+    this.closePrompt = { ...prompt, busy: true, error: null };
+    const left = [...prompt.items];
+    while (left.length > 0) {
+      try {
+        await this.endOne(left[0], commit);
+      } catch (e) {
+        this.closePrompt = { ...prompt, items: left, busy: false, error: t("tx.failed", { error: txErrorText(e) }) };
+        return;
+      }
+      const [done] = left.splice(0, 1);
+      if (prompt.scope === "tab") this.close(done.tabId);
+    }
+    this.closePrompt = null;
+    if (prompt.scope === "window") await getCurrentWindow().destroy();
+  }
+
+  /** Leaves the transactions alone and keeps the tab (or the window) open. */
+  cancelClose(): void {
+    if (this.closePrompt && !this.closePrompt.busy) this.closePrompt = null;
   }
 
   /** Opens (or reopens) the tab's session. The password prompt is raised through `passwordRequest`. */
@@ -472,16 +640,8 @@ export class TabsStore {
       // Written back in place, in its own encoding and line endings; never asks for a name.
       const { path, encoding, lineEnding } = tab.file;
       const edits = pane.edits;
-      const write = () => ipc.writeSqlFile(path, pane.text(), encoding, lineEnding);
       try {
-        try {
-          await write();
-        } catch (e) {
-          if (String(e) !== "not_allowed") throw e;
-          // A restored tab whose path the backend could not take at startup: allow it again.
-          await ipc.allowDroppedPaths([path]);
-          await write();
-        }
+        await ipc.writeSqlFile(path, pane.text(), encoding, lineEnding);
       } catch (e) {
         this.saveNotice(pane, t("files.saveFailed", { error: fileErrorText(e) }));
         return;
@@ -602,18 +762,6 @@ export class TabsStore {
     if (paths.length) await this.openFiles(paths);
   }
 
-  /** Paths dropped on the window: the `.sql` ones are allowed in the backend, then opened. */
-  async dropFiles(paths: string[]): Promise<void> {
-    const sql = paths.filter((p) => /\.sql$/i.test(p));
-    if (!sql.length) return;
-    try {
-      await ipc.allowDroppedPaths(sql);
-    } catch {
-      // Reading them says why.
-    }
-    await this.openFiles(sql);
-  }
-
   private tabOfFile(path: string): Tab | undefined {
     return this.list.find((x) => x.file?.path === path);
   }
@@ -717,6 +865,7 @@ export class TabsStore {
     this.activeGroupId = w.activeGroupId;
     this.passwordRequests = [];
     this.nameRequest = null;
+    this.closePrompt = null;
     this.pending.clear();
     this.wanted.clear();
     for (const tab of w.list) this.track(tab);
@@ -784,8 +933,9 @@ export class TabsStore {
       });
     });
     getCurrentWindow()
-      .onCloseRequested(async () => {
+      .onCloseRequested(async (event) => {
         if (!stopped && !held) await flush();
+        await this.confirmWindowClose(event);
       })
       .then((fn) => {
         if (stopped) fn();
@@ -811,6 +961,7 @@ export class TabsStore {
     this.activeGroupId = g.id;
     this.passwordRequests = [];
     this.nameRequest = null;
+    this.closePrompt = null;
     this.pending.clear();
     this.wanted.clear();
     this.counter = 0;

@@ -135,6 +135,15 @@ pub async fn get_preferences(state: State<'_, AppState>) -> Result<Preferences, 
     Ok(tulka_app::get_preferences(&state).await)
 }
 
+/// Stores the preferences and returns what was kept, brought into range.
+#[tauri::command]
+pub async fn set_preferences(
+    state: State<'_, AppState>,
+    prefs: Preferences,
+) -> Result<Preferences, String> {
+    tulka_app::set_preferences(&state, prefs).await
+}
+
 /// Stores the zoom (percent) and returns the value kept, brought into 70 to 200.
 #[tauri::command]
 pub async fn set_zoom(state: State<'_, AppState>, zoom: u16) -> Result<u16, String> {

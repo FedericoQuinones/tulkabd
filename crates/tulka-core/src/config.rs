@@ -153,7 +153,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub expanded: Vec<String>,
     /// User preferences; a config written before they existed gets the defaults.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub preferences: Preferences,
 }
 
@@ -167,17 +167,234 @@ pub fn clamp_zoom(zoom: u16) -> u16 {
     zoom.clamp(ZOOM_MIN, ZOOM_MAX)
 }
 
+/// Smallest and largest editor and grid font size, in pixels.
+pub const FONT_SIZE_MIN: u8 = 10;
+pub const FONT_SIZE_MAX: u8 = 24;
+/// Smallest and largest number of rows kept in memory per result.
+pub const MAX_ROWS_MIN: u32 = 1_000;
+pub const MAX_ROWS_MAX: u32 = 1_000_000;
+/// Default number of rows kept in memory per result.
+pub const MAX_ROWS_DEFAULT: u32 = 100_000;
+/// Largest query timeout in seconds (one day); `0` means no limit.
+pub const QUERY_TIMEOUT_MAX_S: u32 = 86_400;
+/// Smallest and largest number of days the run log is kept.
+pub const RUN_LOG_DAYS_MIN: u16 = 1;
+pub const RUN_LOG_DAYS_MAX: u16 = 365;
+
+/// Whether `color` is written as `#rrggbb`.
+fn is_hex_color(color: &str) -> bool {
+    color.len() == 7 && color.starts_with('#') && color[1..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// How numbers are written by the "Copy" (Excel) command.
+///
+/// Serialized as a plain string: `"system"` or `"invariant"`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum NumberFormat {
+    /// The decimal separator of the operating system's locale.
+    #[default]
+    System,
+    /// Always a dot.
+    Invariant,
+}
+
+/// The color and guard level new connections of one environment start with.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentStyle {
+    /// Accent color as `#rrggbb`.
+    pub color: String,
+    pub guard: GuardLevel,
+}
+
+impl EnvironmentStyle {
+    /// The factory style of `environment`.
+    pub fn factory(environment: Environment) -> Self {
+        Self {
+            color: environment.default_color().into(),
+            guard: environment.default_guard(),
+        }
+    }
+
+    /// Reads a style from loose JSON: each field that is missing or invalid
+    /// takes the factory value of `environment`.
+    fn from_value(value: Option<&serde_json::Value>, environment: Environment) -> Self {
+        let mut style = Self::factory(environment);
+        if let Some(color) = value.and_then(|v| v.get("color")).and_then(|c| c.as_str()) {
+            if is_hex_color(color) {
+                style.color = color.into();
+            }
+        }
+        if let Some(guard) = value
+            .and_then(|v| v.get("guard"))
+            .and_then(|g| serde_json::from_value(g.clone()).ok())
+        {
+            style.guard = guard;
+        }
+        style
+    }
+}
+
+/// The style new connections start with, for each environment.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentDefaults {
+    pub production: EnvironmentStyle,
+    pub staging: EnvironmentStyle,
+    pub test: EnvironmentStyle,
+    pub local: EnvironmentStyle,
+}
+
+impl EnvironmentDefaults {
+    /// The style of `environment`.
+    pub fn get(&self, environment: Environment) -> &EnvironmentStyle {
+        match environment {
+            Environment::Production => &self.production,
+            Environment::Staging => &self.staging,
+            Environment::Test => &self.test,
+            Environment::Local => &self.local,
+        }
+    }
+}
+
+impl Default for EnvironmentDefaults {
+    fn default() -> Self {
+        Self {
+            production: EnvironmentStyle::factory(Environment::Production),
+            staging: EnvironmentStyle::factory(Environment::Staging),
+            test: EnvironmentStyle::factory(Environment::Test),
+            local: EnvironmentStyle::factory(Environment::Local),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EnvironmentDefaults {
+    /// Never fails on content: anything unusable becomes the factory style.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        let style = |key: &str, env| EnvironmentStyle::from_value(value.get(key), env);
+        Ok(Self {
+            production: style("production", Environment::Production),
+            staging: style("staging", Environment::Staging),
+            test: style("test", Environment::Test),
+            local: style("local", Environment::Local),
+        })
+    }
+}
+
+/// Deserializes a field leniently: a value of the wrong type yields the
+/// field's default instead of failing the whole file.
+fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+fn default_zoom() -> u16 {
+    100
+}
+fn default_font_size() -> u8 {
+    13
+}
+fn default_true() -> bool {
+    true
+}
+fn default_max_rows() -> u32 {
+    MAX_ROWS_DEFAULT
+}
+fn default_run_log_days() -> u16 {
+    30
+}
+
+/// Like [`lenient`], for a field whose default is not the type's default.
+macro_rules! lenient_with {
+    ($name:ident, $ty:ty, $default:path) => {
+        fn $name<'de, D: serde::Deserializer<'de>>(d: D) -> Result<$ty, D::Error> {
+            let value = serde_json::Value::deserialize(d)?;
+            Ok(serde_json::from_value(value).unwrap_or_else(|_| $default()))
+        }
+    };
+}
+lenient_with!(lenient_zoom, u16, default_zoom);
+lenient_with!(lenient_font_size, u8, default_font_size);
+lenient_with!(lenient_true, bool, default_true);
+lenient_with!(lenient_max_rows, u32, default_max_rows);
+lenient_with!(lenient_run_log_days, u16, default_run_log_days);
+
 /// Settings of the interface that survive restarts.
+///
+/// Loading is forgiving: a missing field takes its default, a field of the
+/// wrong type too, and unknown fields are ignored. Call [`Preferences::clamped`]
+/// to bring values into their ranges.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Preferences {
     /// Zoom of the editor and the result grid, in percent (70 to 200).
+    #[serde(deserialize_with = "lenient_zoom")]
     pub zoom: u16,
+    /// Font size of the editor and the grid at 100 % zoom, in pixels (10 to 24).
+    #[serde(deserialize_with = "lenient_font_size")]
+    pub font_size: u8,
+    /// Whether the tabs of the last session are reopened at startup.
+    #[serde(deserialize_with = "lenient_true")]
+    pub restore_session: bool,
+    /// Rows kept in memory per result set (1,000 to 1,000,000).
+    #[serde(deserialize_with = "lenient_max_rows")]
+    pub max_rows: u32,
+    /// Seconds after which a running query is cancelled; `0` is no limit.
+    #[serde(deserialize_with = "lenient")]
+    pub query_timeout_s: u32,
+    /// How "Copy" writes numbers.
+    #[serde(deserialize_with = "lenient")]
+    pub copy_numbers: NumberFormat,
+    /// Days the run log keeps its entries (1 to 365).
+    #[serde(deserialize_with = "lenient_run_log_days")]
+    pub run_log_days: u16,
+    /// Color and guard level new connections start with, per environment.
+    #[serde(deserialize_with = "lenient")]
+    pub environments: EnvironmentDefaults,
 }
 
 impl Default for Preferences {
     fn default() -> Self {
-        Self { zoom: 100 }
+        Self {
+            zoom: default_zoom(),
+            font_size: default_font_size(),
+            restore_session: true,
+            max_rows: MAX_ROWS_DEFAULT,
+            query_timeout_s: 0,
+            copy_numbers: NumberFormat::System,
+            run_log_days: default_run_log_days(),
+            environments: EnvironmentDefaults::default(),
+        }
+    }
+}
+
+impl Preferences {
+    /// The preferences with every value brought into its range and every
+    /// environment color that is not `#rrggbb` reset to the factory color.
+    pub fn clamped(mut self) -> Self {
+        self.zoom = clamp_zoom(self.zoom);
+        self.font_size = self.font_size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+        self.max_rows = self.max_rows.clamp(MAX_ROWS_MIN, MAX_ROWS_MAX);
+        self.query_timeout_s = self.query_timeout_s.min(QUERY_TIMEOUT_MAX_S);
+        self.run_log_days = self.run_log_days.clamp(RUN_LOG_DAYS_MIN, RUN_LOG_DAYS_MAX);
+        let envs = [
+            (&mut self.environments.production, Environment::Production),
+            (&mut self.environments.staging, Environment::Staging),
+            (&mut self.environments.test, Environment::Test),
+            (&mut self.environments.local, Environment::Local),
+        ];
+        for (style, env) in envs {
+            if !is_hex_color(&style.color) {
+                style.color = env.default_color().into();
+            }
+        }
+        self
     }
 }
 
@@ -248,7 +465,7 @@ impl ConfigStore {
             ));
         }
         let mut config: AppConfig = serde_json::from_value(value)?;
-        config.preferences.zoom = clamp_zoom(config.preferences.zoom);
+        config.preferences = std::mem::take(&mut config.preferences).clamped();
         Ok(config)
     }
 
@@ -315,6 +532,112 @@ mod tests {
                 expected
             );
         }
+    }
+
+    fn load_text(text: &str) -> AppConfig {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, text).unwrap();
+        ConfigStore::at(&path).load().unwrap()
+    }
+
+    #[test]
+    fn old_config_gets_defaults() {
+        let cfg = load_text(r#"{"version": 1, "preferences": {"zoom": 130}}"#);
+        let expected = Preferences {
+            zoom: 130,
+            ..Preferences::default()
+        };
+        assert_eq!(cfg.preferences, expected);
+        assert_eq!(expected.font_size, 13);
+        assert!(expected.restore_session);
+        assert_eq!((expected.max_rows, expected.query_timeout_s), (100_000, 0));
+        assert_eq!(expected.run_log_days, 30);
+    }
+
+    #[test]
+    fn out_of_range_values_are_clamped() {
+        let cfg = load_text(
+            r#"{"version": 1, "preferences": {"zoom": 5, "fontSize": 99, "maxRows": 1,
+                "queryTimeoutS": 999999, "runLogDays": 9999}}"#,
+        );
+        let p = cfg.preferences;
+        assert_eq!((p.zoom, p.font_size, p.max_rows), (70, 24, 1_000));
+        assert_eq!((p.query_timeout_s, p.run_log_days), (86_400, 365));
+        let low = Preferences {
+            run_log_days: 0,
+            font_size: 1,
+            ..Preferences::default()
+        }
+        .clamped();
+        assert_eq!((low.run_log_days, low.font_size), (1, 10));
+    }
+
+    #[test]
+    fn wrong_types_fall_back_to_defaults_without_losing_connections() {
+        let conn = ConnectionConfig::new("A", "h", 1433, "u", Environment::Test);
+        let text = json!({
+            "version": 1,
+            "connections": [conn],
+            "preferences": {
+                "runLogDays": "abc", "zoom": null, "maxRows": [1], "copyNumbers": "weird",
+                "restoreSession": "yes", "environments": 7, "fontSize": 15
+            }
+        })
+        .to_string();
+        let cfg = load_text(&text);
+        assert_eq!(cfg.connections, vec![conn]);
+        let expected = Preferences {
+            font_size: 15,
+            ..Preferences::default()
+        };
+        assert_eq!(cfg.preferences, expected);
+        // A preferences section that is not an object at all is also tolerated.
+        let cfg = load_text(r#"{"version": 1, "connections": [], "preferences": "oops"}"#);
+        assert_eq!(cfg.preferences, Preferences::default());
+    }
+
+    #[test]
+    fn bad_env_color_falls_back() {
+        let cfg = load_text(
+            r##"{"version": 1, "preferences": {"environments": {
+                "production": {"color": "red", "guard": "block"},
+                "staging": {"color": "#12345", "guard": 3},
+                "test": {"color": "#ABCDEF"},
+                "local": "nope"}}}"##,
+        );
+        let e = cfg.preferences.environments;
+        assert_eq!(e.production.color, "#e5566f");
+        assert_eq!(e.production.guard, GuardLevel::Block);
+        assert_eq!(e.staging, EnvironmentStyle::factory(Environment::Staging));
+        assert_eq!(e.test.color, "#ABCDEF");
+        assert_eq!(e.local, EnvironmentStyle::factory(Environment::Local));
+        // Set programmatically, the color is also repaired by `clamped`.
+        let mut p = Preferences::default();
+        p.environments.test.color = "blue".into();
+        assert_eq!(p.clamped().environments.test.color, "#44a282");
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored() {
+        let cfg = load_text(
+            r##"{"version": 1, "futureThing": 1, "preferences": {"zoom": 120, "theme": "x",
+                "environments": {"local": {"color": "#112233", "icon": "x"}, "qa": {}}}}"##,
+        );
+        assert_eq!(cfg.preferences.zoom, 120);
+        assert_eq!(cfg.preferences.environments.local.color, "#112233");
+    }
+
+    #[test]
+    fn widened_preferences_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::at(dir.path().join("config.json"));
+        let mut cfg = AppConfig::default();
+        cfg.preferences.copy_numbers = NumberFormat::Invariant;
+        cfg.preferences.max_rows = 5_000;
+        cfg.preferences.environments.local.guard = GuardLevel::Block;
+        store.save(&cfg).unwrap();
+        assert_eq!(store.load().unwrap(), cfg);
     }
 
     #[test]
@@ -401,7 +724,16 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(AppConfig::default()).unwrap(),
-            json!({"version": 1, "connections": [], "folders": [], "expanded": [], "preferences": {"zoom": 100}})
+            json!({"version": 1, "connections": [], "folders": [], "expanded": [], "preferences": {
+                "zoom": 100, "fontSize": 13, "restoreSession": true, "maxRows": 100000,
+                "queryTimeoutS": 0, "copyNumbers": "system", "runLogDays": 30,
+                "environments": {
+                    "production": {"color": "#e5566f", "guard": "confirm"},
+                    "staging": {"color": "#d9a441", "guard": "off"},
+                    "test": {"color": "#44a282", "guard": "off"},
+                    "local": {"color": "#4a8ad6", "guard": "off"}
+                }
+            }})
         );
     }
 

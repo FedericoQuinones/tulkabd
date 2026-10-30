@@ -1,9 +1,9 @@
 //! `.sql` files opened from disk. The open dialog runs from Rust (the
-//! webview gets no dialog permission) and allows the paths picked in it.
-//! The UI allows the paths dropped on the window or restored with the
-//! session through `allow_dropped_paths`, which takes any `.sql` path: the
-//! allowed list keeps the UI to the files the user chose, it is not a
-//! security boundary against the webview.
+//! webview gets no dialog permission) and allows the paths picked in it;
+//! the window's drop event is read in Rust too (see `lib.rs`). Those are the
+//! only ways to add to the allowed list, and the webview has no command
+//! for it: a path is readable and writable only when the user picked or
+//! dropped it, in this run or an earlier one.
 
 use tauri::{State, Window};
 use tauri_plugin_dialog::DialogExt;
@@ -34,14 +34,6 @@ pub async fn pick_sql_files(
         .filter_map(|p| p.into_path().ok()?.into_os_string().into_string().ok())
         .collect();
     Ok(tulka_app::allow_paths(&state, paths))
-}
-
-/// Allows `.sql` paths dropped on the window or restored with the session.
-/// The backend cannot tell where they came from: any absolute `.sql` path
-/// is allowed.
-#[tauri::command]
-pub fn allow_dropped_paths(state: State<'_, AppState>, paths: Vec<String>) {
-    tulka_app::allow_paths(&state, paths);
 }
 
 /// For each path, whether it is allowed and its file still exists; `null`

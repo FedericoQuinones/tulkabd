@@ -2,6 +2,8 @@
   import { t } from "../i18n/t";
   import type { ConnectionConfig } from "../ipc";
   import { ENVIRONMENTS } from "../connections/env";
+  import { connections } from "../connections/store.svelte";
+  import GuardMenu from "../guard/GuardMenu.svelte";
   import type { PaneStatus } from "./pane.svelte";
 
   interface Props {
@@ -23,6 +25,9 @@
 
   const envShort = $derived(connection ? t(`env.short.${connection.environment}`) : "");
   const envColor = $derived(connection ? ENVIRONMENTS.find((e) => e.id === connection.environment)!.color : "var(--muted)");
+  const guardLabel = $derived(
+    !connection ? "" : connections.guardOff.includes(connection.id) ? t("guard.offSession") : t(`guard.${connection.guard}`),
+  );
   const canRun = $derived(status === "idle" && !switching && connection !== null);
 </script>
 
@@ -45,10 +50,7 @@
         {#each databases as db (db)}<option value={db}>{db}</option>{/each}
       </select>
     </div>
-    <div class="guard" class:confirm={connection.guard === "confirm"} class:block={connection.guard === "block"}>
-      <svg class="i" viewBox="0 0 16 16"><path d="M8 2l5 2v4c0 3-2.2 5-5 6-2.8-1-5-3-5-6V4z" /></svg>
-      {t(`guard.${connection.guard}`)}
-    </div>
+    <GuardMenu {connection} label={guardLabel} />
   {:else}
     <span class="hint">{t("pane.noConnection")}</span>
   {/if}
@@ -77,7 +79,6 @@
     border-bottom: 1px solid var(--border);
   }
   .pick,
-  .guard,
   .ghost,
   .reconnect {
     height: 32px;
@@ -110,18 +111,6 @@
   }
   select:disabled {
     cursor: default;
-  }
-  .guard {
-    gap: 7px;
-    color: var(--soft);
-    cursor: default;
-  }
-  .guard.confirm {
-    color: var(--warning);
-    border-color: #4a3d22;
-  }
-  .guard.block {
-    color: var(--negative);
   }
   .hint {
     color: var(--muted);

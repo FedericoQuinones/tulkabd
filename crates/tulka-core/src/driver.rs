@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Sender;
 
+use crate::guard::GuardFinding;
 use crate::meta::{DatabaseSnapshot, TableStructure};
 use crate::{DriverError, Value};
 
@@ -160,6 +161,15 @@ pub trait Session: Send {
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError>;
     /// A handle that cancels the running `execute` from another task.
     fn cancel_handle(&self) -> Box<dyn CancelHandle>;
+    /// How many transactions are open on this session (nested ones count).
+    /// A driver without transactions reports none.
+    async fn transaction_count(&mut self) -> Result<u32, DriverError> {
+        Ok(0)
+    }
+    /// Commits every open transaction, or rolls them all back.
+    async fn end_transactions(&mut self, _commit: bool) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 /// Cancels the request running on a session.
@@ -173,4 +183,10 @@ pub trait CancelHandle: Send + Sync {
 pub trait Driver: Send + Sync {
     fn id(&self) -> &'static str;
     async fn connect(&self, p: &ConnectParams) -> Result<Box<dyn Session>, DriverError>;
+
+    /// Finds the statements of `sql` that are dangerous to run unattended.
+    /// A driver without an analyzer finds nothing.
+    fn guard_findings(&self, _sql: &str) -> Vec<GuardFinding> {
+        Vec::new()
+    }
 }
