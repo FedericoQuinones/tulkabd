@@ -10,6 +10,7 @@
 //! asked for one.
 
 mod format;
+mod query;
 mod tools;
 
 use std::collections::HashMap;
@@ -19,7 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tulka_core::{
     AiAccess, ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, Driver, Folder,
-    KeyringStore, SecretStore, AI_APPLICATION_NAME,
+    KeyringStore, Preferences, SecretStore, AI_APPLICATION_NAME,
 };
 use tulka_mssql::MssqlDriver;
 use tulka_store::{MetaCache, SharedRunLog};
@@ -27,6 +28,7 @@ use tulka_store::{MetaCache, SharedRunLog};
 use crate::connections::{blocking, connect_params, saved_password};
 use crate::types::PASSWORD_REQUIRED;
 
+pub use query::{run_query, QueryRequest};
 pub use tools::{describe_table, list_connections, list_databases, search_objects, SearchRequest};
 
 /// Longest text of a table cell given to the assistant, in characters.
@@ -80,11 +82,9 @@ pub struct AiState {
     /// creates it the first time it runs).
     cache_path: Option<PathBuf>,
     /// Where queries are recorded.
-    #[allow(dead_code)]
     runlog: Arc<SharedRunLog>,
     slots: Semaphore,
     /// The MCP client's name, recorded with each run.
-    #[allow(dead_code)]
     client: Mutex<Option<String>>,
 }
 
@@ -144,6 +144,11 @@ impl AiState {
 
     /// The connections the assistant may use, read from the config file now.
     async fn visible(&self) -> Result<Vec<Visible>, ToolText> {
+        self.load().await.map(|(visible, _)| visible)
+    }
+
+    /// Like [`Self::visible`], with the preferences of the same read.
+    async fn load(&self) -> Result<(Vec<Visible>, Preferences), ToolText> {
         if let Some(e) = &self.config_error {
             return Err(ToolText::error(format::config_unreadable(e)));
         }
@@ -184,14 +189,15 @@ impl AiState {
                 label.push_str(&format!(" #{short}"));
             }
         }
-        Ok(connections
+        let visible = connections
             .into_iter()
             .zip(labels)
             .map(|(conn, label)| Visible {
                 label,
                 conn: conn.clone(),
             })
-            .collect())
+            .collect();
+        Ok((visible, config.preferences.clone()))
     }
 
     /// One of the connections of `visible` by its label (any letter case).
@@ -203,17 +209,21 @@ impl AiState {
             .ok_or_else(|| ToolText::error(format::not_available(name.trim())))
     }
 
+    /// The driver of `v`'s connection.
+    fn driver_for(&self, v: &Visible) -> Result<Arc<dyn Driver>, ToolText> {
+        self.drivers
+            .get(v.conn.driver.as_str())
+            .cloned()
+            .ok_or_else(|| ToolText::error(format!("unknown driver `{}`", v.conn.driver)))
+    }
+
     /// The driver and the login parameters for `v`, with the saved password.
     async fn prepare(
         &self,
         v: &Visible,
         database: Option<String>,
     ) -> Result<(Arc<dyn Driver>, ConnectParams), ToolText> {
-        let driver = self
-            .drivers
-            .get(v.conn.driver.as_str())
-            .cloned()
-            .ok_or_else(|| ToolText::error(format!("unknown driver `{}`", v.conn.driver)))?;
+        let driver = self.driver_for(v)?;
         let password = match saved_password(self.secrets.clone(), &v.conn).await {
             Ok(password) => password,
             Err(e) if e == PASSWORD_REQUIRED => {
@@ -224,6 +234,14 @@ impl AiState {
         let mut params = connect_params(&v.conn, password, database);
         params.application_name = AI_APPLICATION_NAME.to_string();
         Ok((driver, params))
+    }
+
+    /// The MCP client's name, as set by [`Self::set_client`].
+    fn client(&self) -> Option<String> {
+        self.client
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Waits for one of the slots that limit how many calls use servers.

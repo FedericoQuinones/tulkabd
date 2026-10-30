@@ -3,9 +3,15 @@
 mod common;
 
 use common::ai_fixture::*;
+use std::future::pending;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
 use tulka_app::ai::{
-    describe_table, list_connections, list_databases, search_objects, SearchRequest, ToolText,
+    describe_table, list_connections, list_databases, run_query, search_objects, QueryRequest,
+    SearchRequest, ToolText,
 };
+use tulka_app::tulka_store::{RunLogOutcome, RunSource};
 use tulka_core::SecretStore as _;
 use tulka_core::{
     AiAccess, ColumnInfo, DatabaseScope, DatabaseSnapshot, DbObject, Environment, Folder,
@@ -112,7 +118,12 @@ async fn no_access_and_missing_give_the_same_error() {
             describe_table(&f.state, name.into(), None, "dbo.t".into()).await,
             expected
         );
+        assert_eq!(
+            run_query(&f.state, query(name, "SELECT 1"), pending()).await,
+            expected
+        );
     }
+    assert!(f.runlog.list(None, 10).is_empty());
     assert!(f.driver.script.connects.lock().unwrap().is_empty());
 }
 
@@ -614,5 +625,269 @@ async fn a_hidden_namesake_does_not_rename_the_visible_connection() {
     assert_eq!(
         list_connections(&f.state).await.text,
         "connection|environment|databases\nLocal|local|all (not indexed)\n"
+    );
+}
+
+fn query(connection: &str, sql: &str) -> QueryRequest {
+    QueryRequest {
+        connection: connection.into(),
+        database: None,
+        sql: sql.into(),
+        max_rows: None,
+    }
+}
+
+async fn run(f: &Fixture, sql: &str) -> ToolText {
+    run_query(&f.state, query("Local", sql), pending()).await
+}
+
+#[tokio::test]
+async fn select_is_formatted_like_copy_for_ai() {
+    let f = Fixture::standard();
+    assert_eq!(
+        run(&f, "SELECT format").await,
+        ToolText {
+            text: "id|name|note\n1|Ana|\n2|\"\"|\"a|b\"\n".into(),
+            is_error: false,
+        }
+    );
+}
+
+#[tokio::test]
+async fn two_result_sets_and_messages_are_formatted() {
+    let f = Fixture::standard();
+    assert_eq!(
+        run(&f, "SELECT sets").await,
+        ToolText {
+            text: "Result set 1:\na\n1\n\nResult set 2:\nb\n2\n3\n\nInfo: hello\nWarning (line 3): careful\n"
+                .into(),
+            is_error: false,
+        }
+    );
+}
+
+#[tokio::test]
+async fn rows_are_capped_at_the_preference_and_marked() {
+    let f = Fixture::standard();
+    let mut req = query("Local", "SELECT big");
+    req.max_rows = Some(10_000);
+    let out = run_query(&f.state, req, pending()).await;
+    assert!(!out.is_error);
+    // Header, 500 rows and the mark.
+    assert_eq!(out.text.lines().count(), 502);
+    assert!(out
+        .text
+        .contains("Limit reached: only the first 500 rows are shown."));
+    assert!(out.text.contains("\n499\n") && !out.text.contains("\n500\n"));
+}
+
+#[tokio::test]
+async fn smaller_max_rows_is_honoured() {
+    let f = Fixture::standard();
+    let mut req = query("Local", "SELECT big");
+    req.max_rows = Some(10);
+    let out = run_query(&f.state, req, pending()).await;
+    assert_eq!(out.text.lines().count(), 12);
+    assert!(out.text.contains("first 10 rows"));
+    let mut req = query("Local", "SELECT big");
+    req.max_rows = Some(0);
+    assert_eq!(
+        run_query(&f.state, req, pending())
+            .await
+            .text
+            .lines()
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn long_cells_are_cut() {
+    let f = Fixture::standard();
+    let out = run(&f, "SELECT long").await;
+    assert_eq!(out.text, format!("t\n{}…\n", "é".repeat(2000)));
+}
+
+#[tokio::test]
+async fn output_is_cut_at_the_character_budget_and_the_query_cancelled() {
+    let f = Fixture::standard();
+    let out = run(&f, "SELECT wide").await;
+    assert!(!out.is_error);
+    assert!(out
+        .text
+        .ends_with("Output cut at 100,000 characters; narrow the query.\n"));
+    assert!(out.text.chars().count() < 100_100);
+    assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn rejected_sql_never_reaches_the_driver_and_is_logged_blocked() {
+    let f = Fixture::standard();
+    let cases = [
+        ("DELETE FROM t", "Not run: only SELECT queries (and WITH … SELECT) are allowed; line 1 starts with DELETE."),
+        ("SELECT 1\nSELECT * INTO x FROM t", "Not run: INTO is not allowed in a read-only query (line 2). If it is a column or table name, write it in [brackets]."),
+        ("SELECT * FROM a.b.c.d", "Not run: four-part names (linked servers) are not allowed (line 1)."),
+        ("", "Not run: the query is empty."),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(
+            run(&f, sql).await,
+            ToolText {
+                text: expected.into(),
+                is_error: true
+            },
+            "{sql}"
+        );
+    }
+    let unparsed = run(&f, "SELECT 'oops").await;
+    assert!(unparsed.is_error);
+    assert!(unparsed
+        .text
+        .starts_with("Not run: the query has an unclosed string, identifier or comment."));
+    assert!(unparsed.text.contains("[año]"));
+    assert!(f.driver.script.sqls.lock().unwrap().is_empty());
+    assert!(f.driver.script.connects.lock().unwrap().is_empty());
+    let log = f.runlog.list(None, 10);
+    assert_eq!(log.len(), 5);
+    assert!(log.iter().all(|e| e.outcome == RunLogOutcome::Blocked
+        && e.rows.is_none()
+        && e.elapsed_ms.is_none()
+        && e.source == RunSource::Ai));
+}
+
+#[tokio::test]
+async fn query_error_is_an_error_with_its_line() {
+    let f = Fixture::standard();
+    assert_eq!(
+        run(&f, "SELECT err").await,
+        ToolText {
+            text: "Error (line 2): Invalid column name 'nope'.".into(),
+            is_error: true,
+        }
+    );
+    assert_eq!(f.runlog.list(None, 1)[0].outcome, RunLogOutcome::Error);
+}
+
+#[tokio::test]
+async fn timeout_cancels_and_logs_cancelled() {
+    let f = Fixture::standard();
+    f.set_preferences(|p| p.ai_query_timeout_s = 1);
+    let started = std::time::Instant::now();
+    let out = run(&f, "SELECT slow").await;
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        out,
+        ToolText {
+            text: "Timeout (1 s) reached; the query was cancelled.".into(),
+            is_error: true,
+        }
+    );
+    let entry = &f.runlog.list(None, 1)[0];
+    assert_eq!(entry.outcome, RunLogOutcome::Cancelled);
+    assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn client_cancel_cancels_and_logs_cancelled() {
+    let f = Fixture::standard();
+    let out = run_query(
+        &f.state,
+        query("Local", "SELECT slow"),
+        tokio::time::sleep(Duration::from_millis(100)),
+    )
+    .await;
+    assert_eq!(
+        out,
+        ToolText {
+            text: "The query was cancelled.".into(),
+            is_error: true,
+        }
+    );
+    assert_eq!(f.runlog.list(None, 1)[0].outcome, RunLogOutcome::Cancelled);
+    assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn every_run_is_logged_as_ai_with_the_client_name() {
+    let mut nopass = connection("NoPass", Environment::Test, AiAccess::ReadOnly);
+    nopass.password_saved = false;
+    let local = connection("Local", Environment::Local, AiAccess::ReadOnly);
+    let f = Fixture::with(vec![local, nopass], Vec::new());
+    f.state.set_client(Some("claude-code".into()));
+    run(&f, "SELECT 1").await;
+    run(&f, "SELECT big").await;
+    run(&f, "DROP TABLE t").await;
+    run_query(&f.state, query("NoPass", "SELECT 1"), pending()).await;
+    let log = f.runlog.list(None, 10);
+    assert_eq!(log.len(), 4);
+    assert!(log
+        .iter()
+        .all(|e| e.source == RunSource::Ai && e.client.as_deref() == Some("claude-code")));
+    // Newest first.
+    let missing = &log[0];
+    assert_eq!(missing.connection_name, "NoPass");
+    assert_eq!(missing.outcome, RunLogOutcome::Error);
+    assert_eq!((missing.rows, missing.elapsed_ms), (None, None));
+    assert_eq!(log[1].outcome, RunLogOutcome::Blocked);
+    assert_eq!(log[1].sql, "DROP TABLE t");
+    assert_eq!(log[2].outcome, RunLogOutcome::Ok);
+    assert_eq!(log[2].rows, Some(501));
+    assert_eq!(log[3].outcome, RunLogOutcome::Ok);
+    assert_eq!(log[3].rows, Some(1));
+    assert!(log[3].elapsed_ms.is_some());
+    assert_eq!(log[3].database, "master");
+}
+
+#[tokio::test]
+async fn the_password_is_nowhere() {
+    let f = Fixture::standard();
+    let id = id_of(&f, "Local");
+    let mut outputs = vec![
+        list_connections(&f.state).await,
+        list_databases(&f.state, "Local".into()).await,
+        describe_table(&f.state, "Local".into(), None, "t".into()).await,
+        search_objects(&f.state, search("t")).await,
+        run(&f, "SELECT format").await,
+        run(&f, "SELECT err").await,
+        run(&f, "DROP TABLE t").await,
+    ];
+    f.secrets.set(&id, "another password").unwrap();
+    outputs.push(run(&f, "SELECT 1").await);
+    assert!(outputs.last().unwrap().is_error);
+    let logged = format!("{:?}", f.runlog.list(None, 50));
+    for text in outputs
+        .iter()
+        .map(|o| o.text.as_str())
+        .chain([logged.as_str()])
+    {
+        assert!(
+            !text.contains(PASSWORD) && !text.contains("another password"),
+            "{text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn at_most_four_calls_touch_servers_at_once() {
+    let f = Fixture::standard();
+    f.set_preferences(|p| p.ai_query_timeout_s = 1);
+    let one = || run(&f, "SELECT slow");
+    let outs = tokio::join!(one(), one(), one(), one(), one(), one());
+    assert!([&outs.0, &outs.1, &outs.2, &outs.3, &outs.4, &outs.5]
+        .iter()
+        .all(|o| o.is_error));
+    assert_eq!(f.driver.script.peak.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn describe_errors_after_connecting_name_the_connection() {
+    let f = Fixture::standard();
+    let out = describe_table(&f.state, "Local".into(), None, "lost".into()).await;
+    assert_eq!(
+        out,
+        ToolText {
+            text: "Local: the connection was lost.".into(),
+            is_error: true,
+        }
     );
 }

@@ -1,7 +1,7 @@
 //! The texts an AI assistant receives. They are plain English and never
 //! mention sentinels: the model reads them and acts on them.
 
-use tulka_core::{Column, DriverError, Value};
+use tulka_core::{Column, DriverError, MessageKind, ReadOnlyReason, ReadOnlyViolation, Value};
 
 /// Answer when no connection is shared with AI assistants.
 pub(crate) const NO_CONNECTIONS: &str =
@@ -67,6 +67,68 @@ pub(crate) fn driver_failure(error: &DriverError) -> String {
         DriverError::Disconnected(_) => "the connection was lost.".into(),
         DriverError::NoAccess(_) => "the login has no access to that database.".into(),
         DriverError::Other(_) => "the request failed.".into(),
+    }
+}
+
+/// A failure after the connection was made: a query error keeps its line and
+/// message, anything else says which connection it happened on.
+pub(crate) fn on_connection(connection: &str, error: &DriverError) -> String {
+    match error {
+        DriverError::Query { .. } => driver_failure(error),
+        _ => format!("{connection}: {}", driver_failure(error)),
+    }
+}
+
+/// Why a query was not run, for the assistant. `line` is shown 1-based.
+pub(crate) fn not_run(violation: &ReadOnlyViolation) -> String {
+    let line = violation.line + 1;
+    let word = violation.word.as_deref().unwrap_or("something else");
+    match violation.reason {
+        ReadOnlyReason::NotASelect => format!(
+            "Not run: only SELECT queries (and WITH … SELECT) are allowed; line {line} starts with {word}."
+        ),
+        ReadOnlyReason::Forbidden => format!(
+            "Not run: {word} is not allowed in a read-only query (line {line}). \
+             If it is a column or table name, write it in [brackets]."
+        ),
+        ReadOnlyReason::LinkedServer => {
+            format!("Not run: four-part names (linked servers) are not allowed (line {line}).")
+        }
+        ReadOnlyReason::Unparsed => "Not run: the query has an unclosed string, identifier or comment. \
+             Parentheses must balance too, and names with accents or other non-ASCII \
+             letters must be written in [brackets], for example [año]."
+            .into(),
+        ReadOnlyReason::Empty => "Not run: the query is empty.".into(),
+        ReadOnlyReason::Unsupported => {
+            "Not run: this connection's driver cannot run read-only queries.".into()
+        }
+    }
+}
+
+pub(crate) fn timed_out(seconds: u32) -> String {
+    format!("Timeout ({seconds} s) reached; the query was cancelled.")
+}
+
+pub(crate) const CANCELLED: &str = "The query was cancelled.";
+
+pub(crate) const OUTPUT_CUT: &str = "Output cut at 100,000 characters; narrow the query.";
+
+pub(crate) const NO_RESULTS: &str = "The query ran and returned no result sets.";
+
+pub(crate) fn limit_reached(max_rows: u32) -> String {
+    format!("Limit reached: only the first {max_rows} rows are shown.")
+}
+
+/// A server message as one line.
+pub(crate) fn message_line(kind: MessageKind, text: &str, line: Option<u32>) -> String {
+    let kind = match kind {
+        MessageKind::Info => "Info",
+        MessageKind::Warning => "Warning",
+        MessageKind::Error => "Error",
+    };
+    match line {
+        Some(line) => format!("{kind} (line {line}): {text}"),
+        None => format!("{kind}: {text}"),
     }
 }
 

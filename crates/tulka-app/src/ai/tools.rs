@@ -415,7 +415,7 @@ pub async fn describe_table(
         Some(db) => db,
         None => match session.current_database().await {
             Ok(db) => db,
-            Err(e) => return ToolText::error(format::driver_failure(&e)),
+            Err(e) => return ToolText::error(format::on_connection(&v.label, &e)),
         },
     };
 
@@ -425,7 +425,7 @@ pub async fn describe_table(
     };
     let structure = match session.structure(&database, &schema, &name).await {
         Ok(structure) => structure,
-        Err(e) => return ToolText::error(format::driver_failure(&e)),
+        Err(e) => return ToolText::error(format::on_connection(&v.label, &e)),
     };
     if structure.columns.is_empty() {
         return ToolText::error(format!(

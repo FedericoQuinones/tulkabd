@@ -15,8 +15,8 @@ use tulka_app::tulka_store::{MetaCache, SharedRunLog};
 use tulka_core::{
     AiAccess, AppConfig, CancelHandle, Column, ConfigStore, ConnectParams, ConnectionConfig,
     DatabaseScope, DatabaseSnapshot, DbObject, Driver, DriverError, Environment, ExecEvent, Folder,
-    MemoryStore, ObjectKind, Preferences, ReadOnlyViolation, SecretStore, ServerInfo, Session,
-    TableStructure, Value,
+    MemoryStore, MessageKind, ObjectKind, Preferences, ReadOnlyViolation, SecretStore, ServerInfo,
+    Session, TableStructure, Value,
 };
 
 /// The password every connection of the fixture has saved.
@@ -181,6 +181,11 @@ impl Session for FakeSession {
         schema: &str,
         name: &str,
     ) -> Result<TableStructure, DriverError> {
+        if name == "lost" {
+            return Err(DriverError::Disconnected(
+                "socket closed by db.example.com".into(),
+            ));
+        }
         let key = (database.to_string(), schema.to_string(), name.to_string());
         self.script
             .structures_asked
@@ -243,6 +248,89 @@ impl Session for FakeSession {
                 let total = 2000.min(max_rows.saturating_add(1));
                 let rows = (0..total).map(|n| vec![Value::Int(i64::from(n))]).collect();
                 send(ExecEvent::Rows { index: 0, rows }).await
+            }
+            "SELECT format" => {
+                send(ExecEvent::ResultStart {
+                    index: 0,
+                    columns: vec![column("id"), column("name"), column("note")],
+                })
+                .await?;
+                send(ExecEvent::Rows {
+                    index: 0,
+                    rows: vec![
+                        vec![Value::Int(1), Value::Text("Ana".into()), Value::Null],
+                        vec![
+                            Value::Int(2),
+                            Value::Text(String::new()),
+                            Value::Text("a|b".into()),
+                        ],
+                    ],
+                })
+                .await
+            }
+            "SELECT sets" => {
+                send(ExecEvent::ResultStart {
+                    index: 0,
+                    columns: vec![column("a")],
+                })
+                .await?;
+                send(ExecEvent::Rows {
+                    index: 0,
+                    rows: vec![vec![Value::Int(1)]],
+                })
+                .await?;
+                send(ExecEvent::Message {
+                    kind: MessageKind::Info,
+                    text: "hello".into(),
+                    line: None,
+                })
+                .await?;
+                send(ExecEvent::ResultStart {
+                    index: 1,
+                    columns: vec![column("b")],
+                })
+                .await?;
+                send(ExecEvent::Rows {
+                    index: 1,
+                    rows: vec![vec![Value::Int(2)], vec![Value::Int(3)]],
+                })
+                .await?;
+                send(ExecEvent::Message {
+                    kind: MessageKind::Warning,
+                    text: "careful".into(),
+                    line: Some(3),
+                })
+                .await
+            }
+            "SELECT long" => {
+                send(ExecEvent::ResultStart {
+                    index: 0,
+                    columns: vec![column("t")],
+                })
+                .await?;
+                send(ExecEvent::Rows {
+                    index: 0,
+                    rows: vec![vec![Value::Text("é".repeat(5000))]],
+                })
+                .await
+            }
+            "SELECT wide" => {
+                send(ExecEvent::ResultStart {
+                    index: 0,
+                    columns: vec![column("t")],
+                })
+                .await?;
+                for _ in 0..100 {
+                    send(ExecEvent::Rows {
+                        index: 0,
+                        rows: vec![vec![Value::Text("x".repeat(1900))]],
+                    })
+                    .await?;
+                    if self.cancelled.load(Ordering::SeqCst) {
+                        return Err(DriverError::Cancelled);
+                    }
+                }
+                Ok(())
             }
             _ => {
                 send(ExecEvent::ResultStart {
@@ -340,6 +428,13 @@ impl Fixture {
                 preferences: Preferences::default(),
             })
             .unwrap();
+    }
+
+    /// Changes the preferences in `config.json`.
+    pub fn set_preferences(&self, change: impl FnOnce(&mut Preferences)) {
+        let mut config = self.config.load().unwrap();
+        change(&mut config.preferences);
+        self.config.save(&config).unwrap();
     }
 
     /// The connections now in `config.json`.
