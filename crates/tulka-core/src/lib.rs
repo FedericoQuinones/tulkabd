@@ -25,7 +25,7 @@ pub use connstr::{
 };
 pub use driver::{
     CancelHandle, Column, ConnectParams, Driver, ExecEvent, MessageKind, ServerInfo, Session,
-    APPLICATION_NAME,
+    AI_APPLICATION_NAME, APPLICATION_NAME,
 };
 pub use error::DriverError;
 pub use export::{estimate_tokens, to_ai, to_excel_tsv};

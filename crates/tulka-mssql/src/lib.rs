@@ -8,6 +8,10 @@ mod meta;
 pub mod readonly;
 mod session;
 
+// Lets the shared test support code name this crate the way integration tests do.
+#[cfg(test)]
+extern crate self as tulka_mssql;
+
 use async_trait::async_trait;
 use tulka_core::{ConnectParams, Driver, DriverError, GuardFinding, ReadOnlyViolation, Session};
 

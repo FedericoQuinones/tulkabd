@@ -11,6 +11,8 @@ use crate::{DriverError, Value};
 
 /// Application name reported to the server at login.
 pub const APPLICATION_NAME: &str = "tulkabd";
+/// Application name reported by sessions opened for AI assistants.
+pub const AI_APPLICATION_NAME: &str = "tulkabd-ai";
 
 /// A result-set column.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -160,6 +162,19 @@ pub trait Session: Send {
     /// Runs a script, streaming its events to `tx`. Returns once the script
     /// finished, failed, was cancelled or the connection was lost.
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError>;
+    /// Runs a script that must only read: refused unless the driver's read-only
+    /// check passes, with at most `max_rows + 1` rows per result set, inside a
+    /// transaction that is always rolled back. Do not reuse the session afterwards.
+    async fn execute_read_only(
+        &mut self,
+        _sql: &str,
+        _max_rows: u32,
+        _tx: Sender<ExecEvent>,
+    ) -> Result<(), DriverError> {
+        Err(DriverError::Other(
+            "read-only execution is not supported by this driver".into(),
+        ))
+    }
     /// A handle that cancels the running `execute` from another task.
     fn cancel_handle(&self) -> Box<dyn CancelHandle>;
     /// How many transactions are open on this session (nested ones count).
