@@ -568,7 +568,7 @@ pub async fn saved_query_path(
     .await?
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
