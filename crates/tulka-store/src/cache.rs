@@ -5,6 +5,8 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use tulka_core::{ColumnInfo, DatabaseSnapshot, DbObject, ObjectKind};
 
+use crate::private_file;
+
 /// Bump when the table layout changes; a mismatching file is discarded and
 /// rebuilt (it is only a cache).
 pub const SCHEMA_VERSION: i64 = 1;
@@ -81,6 +83,9 @@ fn kind_from(s: &str) -> ObjectKind {
 /// Opens `path` and makes sure it holds a current-version schema. Err means
 /// the file is unusable (corrupt, foreign or another version).
 fn try_open(path: &Path) -> rusqlite::Result<Connection> {
+    // Created before SQLite opens it, so it never exists with the default umask.
+    let _ = private_file::create_private(path);
+    private_file::restrict_permissions(path);
     let conn = Connection::open(path)?;
     // The first read fails with "not a database" on garbage files.
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -93,6 +98,8 @@ fn try_open(path: &Path) -> rusqlite::Result<Connection> {
         init(&conn)?;
     }
     configure(&conn)?;
+    // The WAL sidecars exist only once the journal mode is set.
+    private_file::restrict_permissions(path);
     Ok(conn)
 }
 
@@ -143,7 +150,10 @@ impl MetaCache {
     /// there is no data dir or the file cannot be used.
     pub fn open_default() -> MetaCache {
         match directories::ProjectDirs::from("dev", "tulkabd", "tulkabd") {
-            Some(dirs) => Self::open(&dirs.data_dir().join("tulkabd.db")),
+            Some(dirs) => {
+                private_file::ensure_private_dir(dirs.data_dir());
+                Self::open(&dirs.data_dir().join("tulkabd.db"))
+            }
             None => Self::in_memory(),
         }
     }
@@ -552,6 +562,43 @@ mod tests {
         c.replace_database("c1", "db", &snap(), 1).unwrap();
         drop(c);
         assert_eq!(MetaCache::open(&p).all_objects().len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let c = MetaCache::open(&path);
+        c.replace_database("c1", "db", &snap(), 1).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        for suffix in ["-wal", "-shm"] {
+            let mut s = path.as_os_str().to_owned();
+            s.push(suffix);
+            let side = PathBuf::from(s);
+            if side.exists() {
+                assert_eq!(mode(&side), 0o600, "{suffix}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_file_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        {
+            let c = MetaCache::open(&path);
+            c.replace_database("c1", "db", &snap(), 1).unwrap();
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let c = MetaCache::open(&path);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!c.all_objects().is_empty());
     }
 
     #[test]

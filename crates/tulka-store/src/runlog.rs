@@ -216,7 +216,10 @@ impl RunLogStore {
     /// `<data dir>/runlog.db`; in memory when there is no data dir.
     pub fn open_default() -> RunLogStore {
         match directories::ProjectDirs::from("dev", "tulkabd", "tulkabd") {
-            Some(dirs) => Self::open(&dirs.data_dir().join("runlog.db")),
+            Some(dirs) => {
+                private_file::ensure_private_dir(dirs.data_dir());
+                Self::open(&dirs.data_dir().join("runlog.db"))
+            }
             None => Self::in_memory(),
         }
     }

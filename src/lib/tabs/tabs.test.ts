@@ -13,8 +13,10 @@ vi.mock("../ipc", () => ({
   startupError: vi.fn(),
   transactionCount: vi.fn(),
   endTransactions: vi.fn(),
+  onQuitRequested: vi.fn(),
 }));
 
+let quitRequested: (() => void) | null = null;
 let closeRequested: ((event: { preventDefault: () => void }) => Promise<void>) | null = null;
 const destroy = vi.fn(async () => {});
 vi.mock("@tauri-apps/api/window", () => ({
@@ -47,8 +49,13 @@ beforeEach(async () => {
   vi.mocked(ipc.transactionCount).mockResolvedValue(0);
   vi.mocked(ipc.endTransactions).mockResolvedValue();
   vi.mocked(ipc.cancelQuery).mockResolvedValue();
+  vi.mocked(ipc.onQuitRequested).mockImplementation(async (cb) => {
+    quitRequested = cb;
+    return () => {};
+  });
   destroy.mockClear();
   closeRequested = null;
+  quitRequested = null;
   connections.list = [conn, nopw];
   await tabs.reset();
   vi.mocked(ipc.closeSession).mockClear();
@@ -210,13 +217,88 @@ test("unbindConnection leaves the tabs of that connection without a session and 
   const a = tabs.open({ kind: "query", connectionId: "c1" });
   const b = tabs.open({ kind: "query" });
   await flush();
-  tabs.unbindConnection("c1");
+  await tabs.unbindConnection("c1");
   const pa = tabs.list.find((x) => x.id === a)!.pane!;
   expect(pa.connectionId).toBeNull();
   expect(pa.session).toBeNull();
   expect(pa.notice).toBe("This connection was deleted.");
   expect(tabs.list.find((x) => x.id === b)!.pane!.notice).toBeNull();
   expect(ipc.closeSession).toHaveBeenCalledWith(a);
+  expect(tabs.closePrompt).toBeNull();
+});
+
+test("unbindConnection asks before ending a session with an open transaction", async () => {
+  const busy = await liveTab();
+  const quiet = await liveTab();
+  vi.mocked(ipc.transactionCount).mockImplementation(async (id) => (id === busy ? 2 : 0));
+  await tabs.unbindConnection("c1");
+  // The quiet tab is unbound at once; the other waits for the answer, session intact.
+  expect(tabs.list.find((x) => x.id === quiet)!.pane!.connectionId).toBeNull();
+  const pane = tabs.list.find((x) => x.id === busy)!.pane!;
+  expect(pane.connectionId).toBe("c1");
+  expect(tabs.closePrompt?.scope).toBe("unbind");
+  expect(tabs.closePrompt?.items.map((x) => x.tabId)).toEqual([busy]);
+  expect(ipc.closeSession).not.toHaveBeenCalledWith(busy);
+  expect(ipc.endTransactions).not.toHaveBeenCalled();
+
+  await tabs.answerClose(true);
+  expect(ipc.endTransactions).toHaveBeenCalledWith(busy, true);
+  expect(pane.connectionId).toBeNull();
+  expect(pane.session).toBeNull();
+  expect(pane.notice).toBe("This connection was deleted.");
+  expect(tabs.list.some((x) => x.id === busy)).toBe(true);
+  expect(tabs.closePrompt).toBeNull();
+});
+
+test("cancelling the unbind prompt keeps the session and its transaction", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await tabs.unbindConnection("c1");
+  tabs.cancelClose();
+  const pane = tabs.list.find((x) => x.id === id)!.pane!;
+  expect(tabs.closePrompt).toBeNull();
+  expect(pane.session).not.toBeNull();
+  expect(ipc.endTransactions).not.toHaveBeenCalled();
+  expect(ipc.closeSession).not.toHaveBeenCalledWith(id);
+});
+
+test("unbindConnection waits for a prompt that is already open", async () => {
+  const first = await liveTab();
+  const second = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await tabs.requestClose(first);
+  expect(tabs.closePrompt?.scope).toBe("tab");
+  const unbinding = tabs.unbindConnection("c1");
+  await flush();
+  expect(tabs.closePrompt?.scope).toBe("tab");
+  await tabs.answerClose(false);
+  await unbinding.then(() => flush());
+  expect(tabs.closePrompt?.scope).toBe("unbind");
+  expect(tabs.closePrompt?.items.map((x) => x.tabId)).toEqual([second]);
+});
+
+test("closing a tab that is still connecting asks when its session holds a transaction", async () => {
+  const id = await liveTab();
+  // A reconnect is in flight and the previous session still answers with a transaction.
+  vi.mocked(ipc.openSession).mockReturnValue(new Promise(() => {}));
+  tabs.reconnect(id);
+  await flush();
+  expect(tabs.list.find((x) => x.id === id)!.pane!.status).toBe("connecting");
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await tabs.requestClose(id);
+  expect(tabs.closePrompt?.items[0]).toMatchObject({ tabId: id, state: "open" });
+  expect(tabs.list.some((x) => x.id === id)).toBe(true);
+});
+
+test("closing a tab that is connecting for the first time closes without asking", async () => {
+  vi.mocked(ipc.openSession).mockReturnValue(new Promise(() => {}));
+  const id = tabs.open({ kind: "query", connectionId: "c1" });
+  await flush();
+  expect(tabs.list.find((x) => x.id === id)!.pane!.status).toBe("connecting");
+  await tabs.requestClose(id);
+  expect(tabs.closePrompt).toBeNull();
+  expect(tabs.list.some((x) => x.id === id)).toBe(false);
+  expect(ipc.closeSession).toHaveBeenCalledWith(id);
 });
 
 test("splitActive opens a tab bound like the active one in a new active group beside it", async () => {
@@ -454,6 +536,40 @@ test("window close with two open tabs asks once", async () => {
   expect(ipc.endTransactions).toHaveBeenCalledWith(b, true);
   expect(ipc.endTransactions).toHaveBeenCalledTimes(2);
   expect(destroy).toHaveBeenCalledTimes(1);
+});
+
+test("a quit request with an open transaction asks and keeps the app running", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await armWindowClose();
+  expect(quitRequested).not.toBeNull();
+  quitRequested!();
+  await flush();
+  expect(tabs.closePrompt?.scope).toBe("window");
+  expect(tabs.closePrompt?.items.map((x) => x.tabId)).toEqual([id]);
+  expect(destroy).not.toHaveBeenCalled();
+  await tabs.answerClose(false);
+  expect(destroy).toHaveBeenCalledTimes(1);
+});
+
+test("a quit request with nothing to ask closes the window, which ends the app", async () => {
+  await liveTab();
+  await armWindowClose();
+  quitRequested!();
+  await flush();
+  expect(tabs.closePrompt).toBeNull();
+  expect(destroy).toHaveBeenCalledTimes(1);
+});
+
+test("a quit request while a prompt is open leaves the window alone", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await tabs.requestClose(id);
+  await armWindowClose();
+  quitRequested!();
+  await flush();
+  expect(tabs.closePrompt?.scope).toBe("tab");
+  expect(destroy).not.toHaveBeenCalled();
 });
 
 test("Cancel keeps the window open", async () => {

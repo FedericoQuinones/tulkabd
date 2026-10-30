@@ -6,7 +6,7 @@ use commands::{
 };
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
-use tauri::{DragDropEvent, Emitter, Manager, WindowEvent};
+use tauri::{DragDropEvent, Emitter, Manager, RunEvent, WindowEvent};
 use tulka_app::AppState;
 
 static STARTED: OnceLock<Instant> = OnceLock::new();
@@ -32,6 +32,19 @@ fn probe_log(msg: String) -> bool {
         println!("{msg}");
     }
     on
+}
+
+/// Event telling the UI that the user asked to quit the app (Cmd+Q on macOS).
+pub const QUIT_REQUESTED: &str = "quit-requested";
+
+/// Whether an exit request must wait for the UI. Only macOS needs it: Cmd+Q
+/// quits without a close request on the window, so a transaction left open
+/// would be dropped silently. A request with an exit code (`app.exit`), or
+/// one made after the last window is gone, is the end of an exit the UI
+/// already approved (it destroys the window when the user has answered), and
+/// is never held back; otherwise the app could not quit.
+fn hold_exit(macos: bool, code: Option<i32>, windows: usize) -> bool {
+    macos && code.is_none() && windows > 0
 }
 
 /// Every command the webview can invoke. The list is the one place to add a
@@ -169,12 +182,32 @@ pub fn run() {
             }
         })
         .invoke_handler(handler())
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let RunEvent::ExitRequested { code, api, .. } = event
+                && hold_exit(cfg!(target_os = "macos"), code, app.webview_windows().len())
+            {
+                api.prevent_exit();
+                let _ = app.emit(QUIT_REQUESTED, ());
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
+    use super::hold_exit;
+
+    #[test]
+    fn quit_waits_for_the_ui_only_on_macos_with_a_window_open() {
+        assert!(hold_exit(true, None, 1));
+        // Other systems close the window first, which the UI already handles.
+        assert!(!hold_exit(false, None, 1));
+        // An exit with a code is explicit, and no window means the UI is done.
+        assert!(!hold_exit(true, Some(0), 1));
+        assert!(!hold_exit(true, None, 0));
+    }
+
     /// The commands the webview may call. Adding one means editing this list
     /// on purpose: none may add to the allowed `.sql` files (that is done only
     /// from the native dialog and drop events).
