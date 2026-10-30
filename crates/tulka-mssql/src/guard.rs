@@ -893,7 +893,8 @@ impl Scan<'_> {
                     j = k;
                 } else if self.toks[j].kind == Kind::Word
                     && self.is_any_kw(j, OPENERS)
-                    && !self.is_kw(j - 1, "THEN")
+                    && !self.is_any_kw(j - 1, &["THEN", "AS"])
+                    && !self.is_punct(j + 1, '.')
                     && self.starts_statement(j)
                 {
                     return (j, deletes_all);
@@ -1795,6 +1796,14 @@ mod tests {
             kinds("INSERT INTO dbo.Log SELECT act, id FROM (MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE OUTPUT $action, deleted.id) AS c (act, id);"),
             want(&[(GuardKind::DeleteWithoutWhere, Some("dbo.T"))])
         );
+    }
+
+    #[test]
+    fn a_source_alias_named_like_an_opener_does_not_end_the_merge() {
+        for alias in ["send", "close", "open", "move", "get"] {
+            let sql = format!("MERGE dbo.T AS t USING dbo.S AS {alias} ON t.id = {alias}.id WHEN NOT MATCHED BY SOURCE THEN DELETE;");
+            assert_eq!(kinds(&sql).len(), 1, "{sql}");
+        }
     }
 
     #[test]
