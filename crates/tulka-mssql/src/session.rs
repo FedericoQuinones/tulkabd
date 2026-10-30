@@ -213,13 +213,23 @@ async fn open(
 /// Maps a failed SQL Browser lookup or connection to a named instance.
 fn browser_error(target: &str, e: TdsError) -> DriverError {
     match e {
+        // Windows reports a closed UDP 1434 as a reset connection: the Browser
+        // did not answer, so the hint applies there too.
+        TdsError::Io {
+            kind: std::io::ErrorKind::ConnectionReset,
+            ..
+        } => browser_hint(target),
         TdsError::Io { message, .. } => DriverError::Unreachable(format!("{target}: {message}")),
-        _ => DriverError::Unreachable(format!(
-            "{target}: SQL Server Browser (UDP 1434) did not return the instance's port. \
-             Check the instance name and that the SQL Server Browser service is running, \
-             or enter the instance's TCP port."
-        )),
+        _ => browser_hint(target),
     }
+}
+
+fn browser_hint(target: &str) -> DriverError {
+    DriverError::Unreachable(format!(
+        "{target}: SQL Server Browser (UDP 1434) did not return the instance's port. \
+         Check the instance name and that the SQL Server Browser service is running, \
+         or enter the instance's TCP port."
+    ))
 }
 
 fn login_error(e: TdsError) -> DriverError {
@@ -722,6 +732,27 @@ async fn resend_cancel_while<F: Future>(request: F, out: &Emitter) -> F::Output 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reset_browser_lookup_gets_the_browser_hint() {
+        let io = |kind, message: &str| TdsError::Io {
+            kind,
+            message: message.into(),
+        };
+        let reset = io(
+            std::io::ErrorKind::ConnectionReset,
+            "forcibly closed (os error 10054)",
+        );
+        assert!(matches!(
+            browser_error("db01\\NOPE", reset),
+            DriverError::Unreachable(m) if m.contains("SQL Server Browser") && m.starts_with("db01\\NOPE")
+        ));
+        let dns = io(std::io::ErrorKind::Other, "no such host");
+        assert!(matches!(
+            browser_error("db01\\NOPE", dns),
+            DriverError::Unreachable(m) if m == "db01\\NOPE: no such host"
+        ));
+    }
 
     fn target(host: &str, instance: Option<&str>, port: Option<u16>) -> Target {
         Target {
