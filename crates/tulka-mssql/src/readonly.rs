@@ -276,6 +276,54 @@ fn is_forbidden(word: &str) -> bool {
         .is_ok()
 }
 
+/// SQL Server reads numbers more greedily than the lexer: `1eDELETE`,
+/// `1.e5DELETE`, `1E-DELETE` and `$1DELETE` are a number followed by a
+/// keyword, but the lexer sees one word. Refuse any token that touches the end
+/// of a number (or a `.` that touches it) without a gap, and money literals
+/// (`$` followed by a digit, `.` or sign).
+fn glued_to_number(text: &str, tokens: &[Token], i: usize) -> bool {
+    let t = &tokens[i];
+    if i > 0 {
+        let p = &tokens[i - 1];
+        if p.end == t.start {
+            if p.kind == Kind::Num && t.kind != Kind::Punct {
+                return true;
+            }
+            // `1.e5DELETE`: a number, a dot, then a word with no gap.
+            if t.kind == Kind::Word
+                && is_punct(text, p, ".")
+                && i > 1
+                && tokens[i - 2].kind == Kind::Num
+                && tokens[i - 2].end == p.start
+            {
+                return true;
+            }
+        }
+    }
+    if t.kind == Kind::Num {
+        let n = lexer::src(text, t);
+        let last = n.as_bytes()[n.len() - 1];
+        // An exponent without digits, or a dot right before a letter.
+        if !n.starts_with("0x") && !n.starts_with("0X") && matches!(last, b'e' | b'E' | b'+' | b'-')
+        {
+            return true;
+        }
+    }
+    if t.kind == Kind::Word {
+        let w = lexer::src(text, t).as_bytes();
+        if w[0] == b'$' {
+            let next = w
+                .get(1)
+                .copied()
+                .or_else(|| text.as_bytes().get(t.end).copied());
+            if next.is_some_and(|c| c.is_ascii_digit() || matches!(c, b'.' | b'+' | b'-')) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn check_batch(
     text: &str,
     tokens: &[Token],
@@ -297,6 +345,9 @@ fn check_batch(
             return Some(found(ReadOnlyReason::Unparsed, None, line));
         }
         let line = base + t.line;
+        if glued_to_number(text, tokens, i) {
+            return Some(found(ReadOnlyReason::Unparsed, None, line));
+        }
         let is_dot = is_punct(text, t, ".");
 
         if is_punct(text, t, ";") {
@@ -428,6 +479,8 @@ mod tests {
     fn accepts_reading_queries() {
         for sql in [
             "SELECT 1",
+            "SELECT 1e5, 1.5E-3, 0x1F, 1.5, .5, 1 + 2, (1), $partition.pf(1), $action",
+            "SELECT TOP 10 a FROM t WHERE a IN (1,2) AND b=1.",
             "select * from dbo.Pedidos where id = 4",
             "WITH c AS (SELECT id FROM t) SELECT * FROM c",
             "WITH a AS (SELECT 1 x), b AS (SELECT x FROM a) SELECT * FROM b;",
@@ -523,6 +576,26 @@ mod tests {
             ("(DELETE FROM t)", (NotASelect, Some("DELETE"))),
             ("SELECT 1 IF 1 = 1 SELECT 2", (Forbidden, Some("IF"))),
             ("SELECT 'unclosed", (Unparsed, None)),
+            // Keywords glued to numbers: SQL Server splits these differently
+            // from the lexer.
+            ("SELECT 1eDELETE FROM t", (Unparsed, None)),
+            ("SELECT 1eCOMMIT", (Unparsed, None)),
+            ("SELECT 1eEXEC('x')", (Unparsed, None)),
+            ("SELECT $1DELETE FROM t", (Unparsed, None)),
+            ("SELECT $1SELECT 5", (Unparsed, None)),
+            ("SELECT $1.50", (Unparsed, None)),
+            ("SELECT $-1", (Unparsed, None)),
+            ("SELECT 1.e5DELETE FROM t", (Unparsed, None)),
+            ("SELECT 1.e5SELECT 6", (Unparsed, None)),
+            ("SELECT 1.5eSELECT 7", (Unparsed, None)),
+            ("SELECT .5eDELETE FROM t", (Unparsed, None)),
+            ("SELECT 1E-DELETE FROM t", (Unparsed, None)),
+            ("SELECT 0x1FDELETE FROM t", (Unparsed, None)),
+            ("SELECT 1'x'", (Unparsed, None)),
+            (
+                "SELECT 1eDELETE FROM dbo.T SELECT 1eCOMMIT",
+                (Unparsed, None),
+            ),
             ("SELECT 1 /* unclosed", (Unparsed, None)),
             ("SELECT [unclosed FROM t", (Unparsed, None)),
             // Beyond the table: parentheses must balance, a `;` cannot sit

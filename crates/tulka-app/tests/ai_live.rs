@@ -234,6 +234,17 @@ async fn live_attempted_writes_change_nothing() {
         "DBCC CHECKDB",
         "sp_who",
         "SELECT * FROM OPENQUERY(x, 'SELECT 1')",
+        "SELECT 1eDELETE FROM dbo.clientes",
+        "SELECT 1eCOMMIT",
+        "SELECT 1eEXEC('DELETE FROM dbo.clientes')",
+        "SELECT $1DELETE FROM dbo.clientes",
+        "SELECT $1SELECT 5",
+        "SELECT 1.e5DELETE FROM dbo.clientes",
+        "SELECT 1.e5SELECT 6",
+        "SELECT 1.5eSELECT 7",
+        "SELECT .5eDELETE FROM dbo.clientes",
+        "SELECT 1E-DELETE FROM dbo.clientes",
+        "SELECT 1eDELETE FROM dbo.clientes SELECT 1eCOMMIT",
     ];
     for sql in attempts {
         let out = l.run(sql, None).await;
