@@ -297,7 +297,9 @@ async fn a_file_tab_in_the_saved_session_does_not_allow_its_path() {
         save_session(&st, json.to_string()).await.unwrap();
     }
     let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
-    assert!(load_session(&st).await.unwrap().contains(&path));
+    // The session is JSON text, so backslashes in a Windows path are escaped.
+    let quoted = serde_json::to_string(&path).unwrap();
+    assert!(load_session(&st).await.unwrap().contains(&quoted));
     assert_eq!(read_sql_file(&st, path).await.unwrap_err(), NOT_ALLOWED);
 }
 
