@@ -7,8 +7,11 @@
 //! cannot finish (an unclosed string, identifier or comment) the batch falls
 //! back to a keyword search, so a dangerous word is never silently missed.
 //!
-//! Known limits: `MERGE` is not inspected, and dynamic SQL built from
-//! variables (`EXEC(@sql)`) cannot be known ahead of time.
+//! A `MERGE` is flagged like a `DELETE` without `WHERE` when one of its
+//! `WHEN ... THEN DELETE` clauses has no `AND <condition>`.
+//!
+//! Known limit: dynamic SQL built from variables (`EXEC(@sql)`) cannot be
+//! known ahead of time.
 
 use tulka_core::{GuardFinding, GuardKind};
 
@@ -833,6 +836,59 @@ impl Scan<'_> {
         true
     }
 
+    /// Finds where the `MERGE` at `from` ends (its `;`, the word that opens
+    /// the next statement or the token count) and whether one of its
+    /// `WHEN ... THEN DELETE` clauses has no `AND <condition>`.
+    fn merge_end(&self, from: usize) -> (usize, bool) {
+        let mut depth = 0i32;
+        let mut deletes_all = false;
+        let mut j = from + 1;
+        while j < self.toks.len() {
+            if self.is_punct(j, '(') {
+                depth += 1;
+            } else if self.is_punct(j, ')') {
+                if depth == 0 {
+                    return (j, deletes_all);
+                }
+                depth -= 1;
+            } else if depth == 0 {
+                if self.is_punct(j, ';') {
+                    return (j, deletes_all);
+                }
+                if self.is_kw(j, "WHEN") {
+                    // The clause runs to its THEN; an AND in between is its condition.
+                    let mut k = j + 1;
+                    let mut inner = 0i32;
+                    let mut conditioned = false;
+                    while k < self.toks.len() {
+                        if self.is_punct(k, '(') {
+                            inner += 1;
+                        } else if self.is_punct(k, ')') {
+                            inner -= 1;
+                        } else if inner == 0 && self.is_kw(k, "THEN") {
+                            break;
+                        } else if inner == 0 && self.is_kw(k, "AND") {
+                            conditioned = true;
+                        }
+                        k += 1;
+                    }
+                    if self.is_kw(k + 1, "DELETE") && !conditioned {
+                        deletes_all = true;
+                    }
+                    j = k;
+                } else if self.toks[j].kind == Kind::Word
+                    && self.is_any_kw(j, OPENERS)
+                    && !self.is_kw(j - 1, "THEN")
+                    && self.starts_statement(j)
+                {
+                    return (j, deletes_all);
+                }
+            }
+            j += 1;
+        }
+        (self.toks.len(), deletes_all)
+    }
+
     /// Finds where the statement that starts at `from` ends: the index of the
     /// `;` or of the word that opens the next statement, or the token count.
     /// The statement is an `UPDATE` when `is_update`, whose first `SET` is
@@ -1096,6 +1152,28 @@ fn analyze_batch(text: &str, base_line: u32, level: u8, out: &mut Vec<GuardFindi
 
         if sc.is_kw(i, "EXEC") || sc.is_kw(i, "EXECUTE") {
             dynamic_call(&sc, i + 1, false, base_line + sc.toks[i].line, level, out);
+            i += 1;
+            continue;
+        }
+
+        // `MERGE ... WHEN MATCHED THEN DELETE` with no condition can empty the
+        // target. The MERGE is not skipped, so statements nested in it are still read.
+        if sc.is_kw(i, "MERGE") && !sc.is_kw(i + 1, "JOIN") {
+            let (end, deletes_all) = sc.merge_end(i);
+            let mut j = sc.skip_top(i + 1);
+            if sc.is_kw(j, "INTO") {
+                j += 1;
+            }
+            let target = sc.name(j);
+            if deletes_all && !target.as_ref().is_some_and(|n| n.1) {
+                let last = end.saturating_sub(1).max(i);
+                out.push(GuardFinding {
+                    kind: GuardKind::DeleteWithoutWhere,
+                    object: target.map(|n| n.0),
+                    statement: truncate_statement(&text[sc.toks[i].start..sc.toks[last].end]),
+                    line: base_line + sc.toks[i].line,
+                });
+            }
             i += 1;
             continue;
         }
@@ -1615,7 +1693,7 @@ mod tests {
             "DROP TABLE IF EXISTS #tmp",
             "TRUNCATE TABLE #tmp; DELETE FROM @t; UPDATE ##g SET a = 1",
             "ALTER TABLE t DROP CONSTRAINT fk_a",
-            "MERGE t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = s.a WHEN NOT MATCHED BY SOURCE THEN DELETE;",
+            "MERGE t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = s.a WHEN NOT MATCHED BY SOURCE AND t.old = 1 THEN DELETE;",
             "EXEC(@sql)",
             "ALTER ROLE r DROP MEMBER bob",
             "ALTER TABLE t ALTER COLUMN c DROP MASKED",
@@ -1627,6 +1705,48 @@ mod tests {
             "ALTER TABLE t DROP CONSTRAINT a, b",
             "ALTER TABLE t ADD CONSTRAINT f FOREIGN KEY (a) REFERENCES u(id) ON DELETE SET NULL ON UPDATE NO ACTION",
             "CREATE SECURITY POLICY p ADD BLOCK PREDICATE f(a) ON t BEFORE DELETE",
+        ] {
+            assert_eq!(kinds(sql), vec![], "{sql}");
+        }
+    }
+
+    #[test]
+    fn merge_deleting_without_a_condition_is_flagged() {
+        let delete_t: &[(GuardKind, Option<&str>)] = &[(GuardKind::DeleteWithoutWhere, Some("dbo.T"))];
+        for sql in [
+            "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.a = s.a WHEN NOT MATCHED BY SOURCE THEN DELETE;",
+            "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.a = s.a WHEN NOT MATCHED BY SOURCE THEN DELETE",
+            "MERGE INTO dbo.T AS t\nUSING dbo.S AS s ON t.id = s.id\nWHEN MATCHED THEN DELETE;",
+            "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE OUTPUT $action, deleted.id;",
+            "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN NOT MATCHED BY TARGET THEN INSERT (id) VALUES (s.id) WHEN NOT MATCHED BY SOURCE THEN DELETE OUTPUT deleted.* INTO #log;",
+            "WITH src AS (SELECT id FROM dbo.S) MERGE INTO dbo.T AS t USING src ON t.id = src.id WHEN NOT MATCHED BY SOURCE THEN DELETE;",
+            ";WITH src AS (SELECT id FROM dbo.S)\nMERGE dbo.T AS t USING src ON t.id = src.id WHEN MATCHED THEN DELETE;",
+            "MERGE TOP (10) dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED THEN DELETE;",
+            "MERGE dbo.T AS t USING (SELECT id FROM dbo.S WHERE ok = 1) AS s ON t.id = s.id WHEN MATCHED AND s.id > 5 THEN UPDATE SET t.a = 1 WHEN NOT MATCHED BY SOURCE THEN DELETE;",
+        ] {
+            assert_eq!(kinds(sql), want(delete_t), "{sql}");
+        }
+        // One finding per MERGE, and statements around it are still read.
+        assert_eq!(
+            kinds("MERGE dbo.T t USING dbo.S s ON t.id = s.id WHEN MATCHED THEN DELETE WHEN NOT MATCHED BY SOURCE THEN DELETE; DELETE FROM dbo.U"),
+            want(&[(GuardKind::DeleteWithoutWhere, Some("dbo.T")), (GuardKind::DeleteWithoutWhere, Some("dbo.U"))])
+        );
+        let f = findings("SELECT 1;\nMERGE dbo.T t USING dbo.S s ON t.id = s.id WHEN MATCHED THEN DELETE;\nSELECT 2;");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].line, 1);
+        assert!(f[0].statement.starts_with("MERGE dbo.T") && f[0].statement.ends_with("DELETE"), "{}", f[0].statement);
+    }
+
+    #[test]
+    fn merge_that_conditions_its_deletes_or_does_not_delete_is_left_alone() {
+        for sql in [
+            "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED AND s.deleted = 1 THEN DELETE;",
+            "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN NOT MATCHED BY SOURCE AND t.active = 1 THEN DELETE",
+            "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED AND (s.a = 1 OR s.b = 2) THEN DELETE OUTPUT deleted.id;",
+            "MERGE dbo.T AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.a = s.a WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id);",
+            "WITH src AS (SELECT id FROM dbo.S) MERGE dbo.T AS t USING src ON t.id = src.id WHEN NOT MATCHED THEN INSERT (id) VALUES (src.id) OUTPUT inserted.id;",
+            "MERGE #t AS t USING dbo.S AS s ON t.id = s.id WHEN MATCHED THEN DELETE;",
+            "SELECT * FROM a INNER MERGE JOIN b ON a.id = b.id OPTION (MERGE JOIN)",
         ] {
             assert_eq!(kinds(sql), vec![], "{sql}");
         }
