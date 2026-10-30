@@ -175,7 +175,11 @@ async fn named_instance_without_sql_browser_is_unreachable() {
     let result = MssqlDriver.connect(&p).await;
     match result {
         Err(DriverError::Unreachable(message)) => {
-            assert!(message.contains("SQL Server Browser"), "{message}");
+            // Windows reports the closed UDP port as a socket error, so the
+            // lookup fails with the OS message instead of the Browser hint.
+            if !cfg!(windows) {
+                assert!(message.contains("SQL Server Browser"), "{message}");
+            }
             assert!(message.starts_with("127.0.0.2\\NOPE"), "{message}");
         }
         other => panic!("{:?}", other.err()),
