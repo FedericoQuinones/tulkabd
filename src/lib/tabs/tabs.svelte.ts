@@ -675,14 +675,33 @@ export class TabsStore {
     void this.askThenReconnect(id);
   }
 
+  private reconnecting = new Set<string>();
+
+  /** Waits for any open close prompt, counts the tab's transactions and asks or reconnects. */
   private async askThenReconnect(id: string): Promise<void> {
-    const tab = this.list.find((x) => x.id === id);
-    if (!tab || this.closePrompt) return;
-    const plan = closePlan([await this.checkTab(tab)]);
-    // Closed meanwhile, or another prompt took over while counting.
-    if (!this.list.some((x) => x.id === id) || this.closePrompt) return;
-    if (plan.ask) this.closePrompt = { scope: "reconnect", items: this.itemsOf(plan.tabs), busy: false, error: null };
-    else this.reconnectNow(id);
+    // A second press while one is already waiting would only queue a second prompt.
+    if (this.reconnecting.has(id)) return;
+    this.reconnecting.add(id);
+    try {
+      let check: CloseCheck;
+      for (;;) {
+        await this.promptIdle();
+        const tab = this.list.find((x) => x.id === id);
+        if (!tab) return;
+        check = await this.checkTab(tab);
+        // Another prompt took over while counting: wait for it and count again.
+        if (!this.closePrompt) break;
+      }
+      const pane = this.list.find((x) => x.id === id)?.pane;
+      // Closed meanwhile.
+      if (!pane) return;
+      const plan = closePlan([check]);
+      if (!pane.session || pane.status !== "idle") this.reconnectNow(id);
+      else if (plan.ask) this.closePrompt = { scope: "reconnect", items: this.itemsOf(plan.tabs), busy: false, error: null };
+      else this.reconnectNow(id);
+    } finally {
+      this.reconnecting.delete(id);
+    }
   }
 
   private reconnectNow(id: string): void {
