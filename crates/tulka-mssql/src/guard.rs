@@ -2230,11 +2230,8 @@ mod tests {
             kinds("DECLARE @s nvarchar(max) = N'MERGE dbo.Orders t USING dbo.X s ON 1=1 WHEN MATCHED THEN DELETE;'; EXEC(@s)"),
             want(&[(DeleteWithoutWhere, Some("dbo.Orders"))])
         );
-        for sql in [
-            "DECLARE @s nvarchar(max) = N'MERGE dbo.Orders t USING ' + @src + N' s ON 1=1 WHEN MATCHED THEN DELETE;'; EXEC(@s)",
-        ] {
-            assert_eq!(kinds(sql), want(&[(Unparsed, None)]), "{sql}");
-        }
+        let sql = "DECLARE @s nvarchar(max) = N'MERGE dbo.Orders t USING ' + @src + N' s ON 1=1 WHEN MATCHED THEN DELETE;'; EXEC(@s)";
+        assert_eq!(kinds(sql), want(&[(Unparsed, None)]), "{sql}");
     }
 
     #[test]
