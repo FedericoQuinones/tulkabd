@@ -14,6 +14,7 @@ vi.mock("../ipc", () => ({
   transactionCount: vi.fn(),
   endTransactions: vi.fn(),
   onQuitRequested: vi.fn(),
+  logCancelledRun: vi.fn(),
 }));
 
 let quitRequested: (() => void) | null = null;
@@ -44,6 +45,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 beforeEach(async () => {
   vi.resetAllMocks();
   vi.mocked(ipc.closeSession).mockResolvedValue();
+  vi.mocked(ipc.logCancelledRun).mockResolvedValue();
   vi.mocked(ipc.openSession).mockResolvedValue(info);
   vi.mocked(ipc.runQuery).mockResolvedValue(ok);
   vi.mocked(ipc.transactionCount).mockResolvedValue(0);
@@ -718,4 +720,79 @@ test("a window close while a tab prompt is open keeps the window", async () => {
   await closeRequested!({ preventDefault });
   expect(preventDefault).toHaveBeenCalledTimes(1);
   expect(destroy).not.toHaveBeenCalled();
+});
+
+test("reconnecting a live tab with an open transaction asks first and leaves the session alone", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.openSession).mockClear();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  tabs.reconnect(id);
+  await flush();
+  expect(tabs.closePrompt?.scope).toBe("reconnect");
+  expect(tabs.closePrompt?.items[0]).toMatchObject({ tabId: id, state: "open", count: 1 });
+  expect(ipc.closeSession).not.toHaveBeenCalled();
+  expect(ipc.openSession).not.toHaveBeenCalled();
+  tabs.cancelClose();
+  await flush();
+  expect(tabs.closePrompt).toBeNull();
+  expect(ipc.endTransactions).not.toHaveBeenCalled();
+  expect(ipc.closeSession).not.toHaveBeenCalled();
+  expect(ipc.openSession).not.toHaveBeenCalled();
+});
+
+test("answering the reconnect prompt ends the transaction, then reopens the session", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.openSession).mockClear();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  tabs.reconnect(id);
+  await flush();
+  await tabs.answerClose(false);
+  await flush();
+  expect(ipc.endTransactions).toHaveBeenCalledWith(id, false);
+  expect(tabs.closePrompt).toBeNull();
+  expect(tabs.list.some((x) => x.id === id)).toBe(true);
+  expect(ipc.openSession).toHaveBeenCalledTimes(1);
+});
+
+test("reconnecting a live tab without a transaction reopens at once", async () => {
+  const id = await liveTab();
+  vi.mocked(ipc.openSession).mockClear();
+  tabs.reconnect(id);
+  await flush();
+  expect(tabs.closePrompt).toBeNull();
+  expect(ipc.openSession).toHaveBeenCalledTimes(1);
+});
+
+test("closing the window with the guard dialog open logs a cancelled run", async () => {
+  const id = await liveTab();
+  const pane = tabs.list.find((x) => x.id === id)!.pane!;
+  vi.mocked(ipc.logCancelledRun).mockResolvedValue();
+  pane.guardPrompt = { sql: "DELETE FROM dbo.T", lineOffset: 0, findings: [] };
+  await armWindowClose();
+  await closeRequested!({ preventDefault: vi.fn() });
+  expect(ipc.logCancelledRun).toHaveBeenCalledWith(id, "DELETE FROM dbo.T");
+});
+
+test("a guard dialog is kept while a transaction prompt holds the window open", async () => {
+  const id = await liveTab();
+  const pane = tabs.list.find((x) => x.id === id)!.pane!;
+  vi.mocked(ipc.logCancelledRun).mockResolvedValue();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  pane.guardPrompt = { sql: "DELETE FROM dbo.T", lineOffset: 0, findings: [] };
+  await armWindowClose();
+  await closeRequested!({ preventDefault: vi.fn() });
+  expect(ipc.logCancelledRun).not.toHaveBeenCalled();
+  tabs.cancelClose();
+  expect(pane.guardPrompt).not.toBeNull();
+});
+
+test("a stuck log does not hold the window close for long", async () => {
+  const id = await liveTab();
+  const pane = tabs.list.find((x) => x.id === id)!.pane!;
+  vi.mocked(ipc.logCancelledRun).mockReturnValue(new Promise(() => {}));
+  pane.guardPrompt = { sql: "DELETE FROM dbo.T", lineOffset: 0, findings: [] };
+  await armWindowClose();
+  const t0 = Date.now();
+  await closeRequested!({ preventDefault: vi.fn() });
+  expect(Date.now() - t0).toBeLessThan(2000);
 });

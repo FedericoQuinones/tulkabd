@@ -125,10 +125,17 @@ export class PaneState {
    * flight makes the backend reject that open, so it never lands after a newer one.
    */
   async close(): Promise<void> {
-    this.runId++;
+    const token = ++this.runId;
+    // A confirmation that is still open is discarded with the tab: record it like Cancel does,
+    // while the session the log entry is read from still exists.
+    const held = this.guardPrompt;
     this.clearGuard();
-    if (!this.hasSession && this.status !== "connecting") return;
+    const owned = this.hasSession || this.status === "connecting";
     this.hasSession = false;
+    if (held) await ipc.logCancelledRun(this.tabId, held.sql).catch(() => {});
+    // A newer open began while logging: it replaces this session, and a close sent now would
+    // hit the new one.
+    if (!owned || token !== this.runId) return;
     await ipc.closeSession(this.tabId).catch(() => {});
   }
 
@@ -163,6 +170,8 @@ export class PaneState {
     const token = ++this.runId;
     this.status = "connecting";
     try {
+      // The confirmation belongs to the session being replaced: record it before that goes.
+      await this.discardGuard();
       if (this.hasSession) {
         this.hasSession = false;
         await ipc.closeSession(this.tabId).catch(() => {});
@@ -242,10 +251,15 @@ export class PaneState {
 
   /** Drops the held script and records that the user backed out. */
   cancelGuard(): void {
+    void this.discardGuard();
+  }
+
+  /** Like `cancelGuard`, resolving once the entry is written (or could not be). */
+  discardGuard(): Promise<void> {
     const prompt = this.guardPrompt;
-    if (!prompt) return;
+    if (!prompt) return Promise.resolve();
     this.guardPrompt = null;
-    void ipc.logCancelledRun(this.tabId, prompt.sql).catch(() => {});
+    return ipc.logCancelledRun(this.tabId, prompt.sql).catch(() => {});
   }
 
   /** Puts back the guard level that "don't ask again" replaced. */
