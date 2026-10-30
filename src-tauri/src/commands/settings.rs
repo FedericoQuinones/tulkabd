@@ -26,3 +26,16 @@ pub async fn clear_metadata_cache(state: State<'_, AppState>) -> Result<(), Stri
     tulka_app::clear_metadata_cache(&state).await;
     Ok(())
 }
+
+#[tauri::command]
+pub fn mcp_setup() -> tulka_app::ai::setup::McpSetup {
+    tulka_app::ai::setup::mcp_setup()
+}
+
+/// Copies one of the MCP setups (`claude`, `json`, `vscode`) to the clipboard.
+#[tauri::command]
+pub fn copy_mcp_setup(app: tauri::AppHandle, kind: String) -> Result<(), String> {
+    let clipboard: std::sync::Arc<dyn tulka_app::Clipboard> =
+        std::sync::Arc::new(super::PluginClipboard(app));
+    tulka_app::ai::setup::copy_mcp_setup(&kind, clipboard)
+}

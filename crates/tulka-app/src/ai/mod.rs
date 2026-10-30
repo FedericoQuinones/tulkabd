@@ -9,6 +9,8 @@
 //! to servers at once. The assistant never sees a password and is never
 //! asked for one.
 
+pub mod setup;
+
 mod format;
 mod query;
 mod tools;
