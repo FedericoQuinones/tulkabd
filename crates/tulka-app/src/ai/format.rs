@@ -113,11 +113,9 @@ pub(crate) const CANCELLED: &str = "The query was cancelled.";
 
 pub(crate) const OUTPUT_CUT: &str = "Output cut at 100,000 characters; narrow the query.";
 
-pub(crate) const NO_RESULTS: &str = "The query ran and returned no result sets.";
-
-pub(crate) fn limit_reached(max_rows: u32) -> String {
-    format!("Limit reached: only the first {max_rows} rows are shown.")
-}
+/// Marks a result set that has more rows than were returned.
+pub(crate) const LIMIT_REACHED: &str =
+    "limit reached: more rows exist; narrow the query or use TOP";
 
 /// A server message as one line.
 pub(crate) fn message_line(kind: MessageKind, text: &str, line: Option<u32>) -> String {

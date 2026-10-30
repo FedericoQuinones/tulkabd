@@ -127,11 +127,17 @@ mod tests {
             "/home/u/tulkabd.AppImage"
         );
         assert_eq!(exe_for(cur.clone(), None), "/tmp/.mount_x/usr/bin/tulkabd");
-        assert_eq!(exe_for(cur, Some(String::new())), "/tmp/.mount_x/usr/bin/tulkabd");
+        assert_eq!(
+            exe_for(cur, Some(String::new())),
+            "/tmp/.mount_x/usr/bin/tulkabd"
+        );
     }
 
     #[test]
     fn copy_unknown_kind_is_not_found() {
-        assert_eq!(copy_mcp_setup("nope", Arc::new(Nop)), Err("not_found".into()));
+        assert_eq!(
+            copy_mcp_setup("nope", Arc::new(Nop)),
+            Err("not_found".into())
+        );
     }
 }

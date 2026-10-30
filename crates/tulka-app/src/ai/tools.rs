@@ -13,7 +13,7 @@ fn is_indexed(d: &CachedDatabase) -> bool {
     !d.no_access && d.indexed_at.is_some()
 }
 
-fn environment_name(v: &Visible) -> String {
+pub(super) fn environment_name(v: &Visible) -> String {
     serde_json::to_value(v.conn.environment)
         .ok()
         .and_then(|j| j.as_str().map(str::to_string))

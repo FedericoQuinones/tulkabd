@@ -637,6 +637,24 @@ fn query(connection: &str, sql: &str) -> QueryRequest {
     }
 }
 
+/// The text with the elapsed time of every header-like line replaced by `N ms`.
+fn masked(text: &str) -> String {
+    text.lines()
+        .map(|line| match line.rsplit_once(" · ") {
+            Some((rest, tail))
+                if tail
+                    .strip_suffix(" ms")
+                    .is_some_and(|n| n.parse::<u64>().is_ok()) =>
+            {
+                format!("{rest} · N ms")
+            }
+            _ => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
 async fn run(f: &Fixture, sql: &str) -> ToolText {
     run_query(&f.state, query("Local", sql), pending()).await
 }
@@ -644,25 +662,28 @@ async fn run(f: &Fixture, sql: &str) -> ToolText {
 #[tokio::test]
 async fn select_is_formatted_like_copy_for_ai() {
     let f = Fixture::standard();
+    let out = run(&f, "SELECT format").await;
+    assert!(!out.is_error);
     assert_eq!(
-        run(&f, "SELECT format").await,
-        ToolText {
-            text: "id|name|note\n1|Ana|\n2|\"\"|\"a|b\"\n".into(),
-            is_error: false,
-        }
+        masked(&out.text),
+        "Local · LOCAL › master · 2 rows · N ms\nid|name|note\n1|Ana|\n2|\"\"|\"a|b\"\n"
     );
 }
 
 #[tokio::test]
 async fn two_result_sets_and_messages_are_formatted() {
     let f = Fixture::standard();
+    let out = run(&f, "SELECT sets").await;
+    assert!(!out.is_error);
     assert_eq!(
-        run(&f, "SELECT sets").await,
-        ToolText {
-            text: "Result set 1:\na\n1\n\nResult set 2:\nb\n2\n3\n\nInfo: hello\nWarning (line 3): careful\n"
-                .into(),
-            is_error: false,
-        }
+        masked(&out.text),
+        "Local · LOCAL › master · 2 result sets · N ms\n#1 · 1 row\na\n1\n#2 · 2 rows\nb\n2\n3\n\
+         Messages:\nInfo: hello\nWarning (line 3): careful\n"
+    );
+    let none = run(&f, "SELECT none").await;
+    assert_eq!(
+        masked(&none.text),
+        "Local · LOCAL › master · no rows returned · N ms\n"
     );
 }
 
@@ -675,9 +696,9 @@ async fn rows_are_capped_at_the_preference_and_marked() {
     assert!(!out.is_error);
     // Header, 500 rows and the mark.
     assert_eq!(out.text.lines().count(), 502);
-    assert!(out
-        .text
-        .contains("Limit reached: only the first 500 rows are shown."));
+    assert!(masked(&out.text).starts_with(
+        "Local · LOCAL › master · 500 rows (limit reached: more rows exist; narrow the query or use TOP) · N ms\nn\n0\n"
+    ));
     assert!(out.text.contains("\n499\n") && !out.text.contains("\n500\n"));
 }
 
@@ -688,7 +709,7 @@ async fn smaller_max_rows_is_honoured() {
     req.max_rows = Some(10);
     let out = run_query(&f.state, req, pending()).await;
     assert_eq!(out.text.lines().count(), 12);
-    assert!(out.text.contains("first 10 rows"));
+    assert!(out.text.contains("· 10 rows (limit reached"));
     let mut req = query("Local", "SELECT big");
     req.max_rows = Some(0);
     assert_eq!(
@@ -705,7 +726,13 @@ async fn smaller_max_rows_is_honoured() {
 async fn long_cells_are_cut() {
     let f = Fixture::standard();
     let out = run(&f, "SELECT long").await;
-    assert_eq!(out.text, format!("t\n{}…\n", "é".repeat(2000)));
+    assert_eq!(
+        masked(&out.text),
+        format!(
+            "Local · LOCAL › master · 1 row · N ms\nt\n{}…\n",
+            "é".repeat(2000)
+        )
+    );
 }
 
 #[tokio::test]
@@ -782,6 +809,7 @@ async fn timeout_cancels_and_logs_cancelled() {
             is_error: true,
         }
     );
+    assert_eq!(f.runlog.list(None, 1)[0].rows, Some(0));
     let entry = &f.runlog.list(None, 1)[0];
     assert_eq!(entry.outcome, RunLogOutcome::Cancelled);
     assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
@@ -831,7 +859,7 @@ async fn every_run_is_logged_as_ai_with_the_client_name() {
     assert_eq!(log[1].outcome, RunLogOutcome::Blocked);
     assert_eq!(log[1].sql, "DROP TABLE t");
     assert_eq!(log[2].outcome, RunLogOutcome::Ok);
-    assert_eq!(log[2].rows, Some(501));
+    assert_eq!(log[2].rows, Some(500));
     assert_eq!(log[3].outcome, RunLogOutcome::Ok);
     assert_eq!(log[3].rows, Some(1));
     assert!(log[3].elapsed_ms.is_some());
@@ -890,4 +918,68 @@ async fn describe_errors_after_connecting_name_the_connection() {
             is_error: true,
         }
     );
+}
+
+#[tokio::test]
+async fn many_narrow_rows_are_never_silently_dropped() {
+    let f = Fixture::standard();
+    f.set_preferences(|p| p.ai_max_rows = 10_000);
+    let mut req = query("Local", "SELECT many");
+    req.max_rows = Some(10_000);
+    let out = run_query(&f.state, req, pending()).await;
+    let shown = out.text.lines().count() - 2;
+    let cut = out.text.ends_with("narrow the query.\n");
+    assert!(cut || shown == 10_000, "{shown} rows without a notice");
+    assert!(out.text.chars().count() <= 100_000);
+}
+
+#[tokio::test]
+async fn a_timeout_keeps_the_rows_received_before_it() {
+    let f = Fixture::standard();
+    f.set_preferences(|p| p.ai_query_timeout_s = 1);
+    let out = run(&f, "SELECT partial then slow").await;
+    assert!(out.is_error);
+    assert_eq!(
+        masked(&out.text),
+        "Local · LOCAL › master · 1 row · N ms\nn\n7\nTimeout (1 s) reached; the query was cancelled.\n"
+    );
+    let entry = &f.runlog.list(None, 1)[0];
+    assert_eq!(
+        (entry.outcome, entry.rows),
+        (RunLogOutcome::Cancelled, Some(1))
+    );
+}
+
+#[tokio::test]
+async fn cancelling_while_waiting_for_a_slot_is_logged_cancelled() {
+    let f = Fixture::standard();
+    let one = || {
+        run_query(
+            &f.state,
+            query("Local", "SELECT slow"),
+            tokio::time::sleep(Duration::from_millis(300)),
+        )
+    };
+    let outs = tokio::join!(one(), one(), one(), one(), one());
+    assert!([&outs.0, &outs.1, &outs.2, &outs.3, &outs.4]
+        .iter()
+        .all(|o| o.is_error && o.text == "The query was cancelled."));
+    let log = f.runlog.list(None, 10);
+    assert_eq!(log.len(), 5);
+    assert!(log.iter().all(|e| e.outcome == RunLogOutcome::Cancelled));
+    // Four started; the fifth never got a slot.
+    assert_eq!(log.iter().filter(|e| e.elapsed_ms.is_none()).count(), 1);
+    assert_eq!(f.driver.script.connects.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn an_unknown_driver_is_logged_as_an_error() {
+    let mut local = connection("Local", Environment::Local, AiAccess::ReadOnly);
+    local.driver = "nope".into();
+    let f = Fixture::with(vec![local], Vec::new());
+    let out = run(&f, "SELECT 1").await;
+    assert!(out.is_error);
+    let log = f.runlog.list(None, 5);
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].outcome, RunLogOutcome::Error);
 }

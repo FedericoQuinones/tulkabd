@@ -42,6 +42,8 @@ pub struct Script {
     /// Sessions alive now, and the most there ever were at once.
     pub live: AtomicUsize,
     pub peak: AtomicUsize,
+    /// Times a running script was cancelled.
+    pub cancels: AtomicUsize,
 }
 
 pub struct FakeDriver {
@@ -108,6 +110,7 @@ impl Drop for FakeSession {
 }
 
 struct FakeCancel {
+    script: Arc<Script>,
     cancelled: Arc<AtomicBool>,
     wake: Arc<Notify>,
 }
@@ -115,6 +118,7 @@ struct FakeCancel {
 #[async_trait]
 impl CancelHandle for FakeCancel {
     async fn cancel(&self) -> Result<(), DriverError> {
+        self.script.cancels.fetch_add(1, Ordering::SeqCst);
         self.cancelled.store(true, Ordering::SeqCst);
         self.wake.notify_waiters();
         Ok(())
@@ -227,6 +231,42 @@ impl Session for FakeSession {
         let send = |event| async { tx.send(event).await.map_err(|_| DriverError::Cancelled) };
         match sql.trim() {
             "SELECT slow" => {
+                let woken = self.wake.notified();
+                tokio::pin!(woken);
+                woken.as_mut().enable();
+                if !self.cancelled.load(Ordering::SeqCst) {
+                    woken.await;
+                }
+                Err(DriverError::Cancelled)
+            }
+            "SELECT none" => Ok(()),
+            "SELECT many" => {
+                send(ExecEvent::ResultStart {
+                    index: 0,
+                    columns: vec![column("n")],
+                })
+                .await?;
+                let total = 20_000.min(max_rows.saturating_add(1));
+                for chunk in (0..total).collect::<Vec<_>>().chunks(1000) {
+                    let rows = chunk
+                        .iter()
+                        .map(|n| vec![Value::Int(i64::from(*n))])
+                        .collect();
+                    send(ExecEvent::Rows { index: 0, rows }).await?;
+                }
+                Ok(())
+            }
+            "SELECT partial then slow" => {
+                send(ExecEvent::ResultStart {
+                    index: 0,
+                    columns: vec![column("n")],
+                })
+                .await?;
+                send(ExecEvent::Rows {
+                    index: 0,
+                    rows: vec![vec![Value::Int(7)]],
+                })
+                .await?;
                 let woken = self.wake.notified();
                 tokio::pin!(woken);
                 woken.as_mut().enable();
@@ -349,6 +389,7 @@ impl Session for FakeSession {
 
     fn cancel_handle(&self) -> Box<dyn CancelHandle> {
         Box::new(FakeCancel {
+            script: self.script.clone(),
             cancelled: self.cancelled.clone(),
             wake: self.wake.clone(),
         })
