@@ -502,10 +502,19 @@ pub(crate) async fn resolve_password(
     if let Some(password) = given {
         return Ok(password);
     }
+    saved_password(state.secrets.clone(), conn).await
+}
+
+/// The password saved for `conn` in the keychain. Fails with
+/// [`PASSWORD_REQUIRED`] when there is none (not saved, missing, or a
+/// keychain that is unavailable).
+pub(crate) async fn saved_password(
+    secrets: Arc<dyn SecretStore>,
+    conn: &ConnectionConfig,
+) -> Result<String, String> {
     if !conn.password_saved {
         return Err(PASSWORD_REQUIRED.into());
     }
-    let secrets = state.secrets.clone();
     let id = conn.id.clone();
     match blocking(move || secrets.get(&id)).await? {
         Ok(Some(password)) => Ok(password),
