@@ -13,7 +13,7 @@
   import { explorer } from "./lib/explorer/tree.svelte";
   import { clampWidth, loadLayout, saveLayout, MAX_WIDTH, MIN_WIDTH } from "./lib/shell/layout";
   import Palette from "./lib/palette/Palette.svelte";
-  import { palette } from "./lib/palette/palette.svelte";
+  import { palette } from "./lib/palette/paletteState.svelte";
   import NameDialog from "./lib/queries/NameDialog.svelte";
   import SavedQueriesPanel from "./lib/queries/SavedQueriesPanel.svelte";
   import { queries } from "./lib/queries/queries.svelte";
