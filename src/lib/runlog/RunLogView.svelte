@@ -108,7 +108,9 @@
               <td role="gridcell" class="where">
                 <span class="w"><span class="dot" style:background={e.color}></span><span class="wt">{e.connectionName} · {e.database}</span></span>
               </td>
-              <td role="gridcell" class="stmt">{oneLine(e.sql)}</td>
+              <td role="gridcell" class="stmt">
+                {#if e.source === "ai"}<span class="ai" title={e.client ? t("runlog.aiBy", { client: e.client }) : t("runlog.aiByUnknown")}>{t("runlog.ai")}</span>{/if}{oneLine(e.sql)}
+              </td>
               <td role="gridcell" class="out" class:no={out.failed}>{out.text}</td>
               <td role="gridcell" class="ms">{time(e.elapsedMs)}</td>
             </tr>
@@ -220,6 +222,16 @@
     font-family: var(--mono);
     font-size: 12px;
     color: var(--soft);
+  }
+  .ai {
+    margin-right: 8px;
+    padding: 1px 5px;
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    color: var(--accent);
+    font-family: var(--font);
+    font-size: 10px;
+    letter-spacing: 0.04em;
   }
   td.out,
   td.ms {

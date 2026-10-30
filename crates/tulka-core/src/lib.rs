@@ -10,20 +10,22 @@ pub mod export;
 pub mod guard;
 pub mod locale;
 pub mod meta;
+pub mod readonly;
 pub mod secrets;
 pub mod value;
 
 pub use config::{
-    clamp_zoom, AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope, Environment,
-    EnvironmentDefaults, EnvironmentStyle, Folder, GuardLevel, NumberFormat, Preferences,
-    MAX_ROWS_DEFAULT,
+    clamp_zoom, AiAccess, AppConfig, ConfigError, ConfigStore, ConnectionConfig, DatabaseScope,
+    Environment, EnvironmentDefaults, EnvironmentStyle, Folder, GuardLevel, NumberFormat,
+    Preferences, AI_MAX_ROWS_DEFAULT, AI_MAX_ROWS_MAX, AI_MAX_ROWS_MIN, AI_TIMEOUT_DEFAULT_S,
+    AI_TIMEOUT_MAX_S, AI_TIMEOUT_MIN_S, MAX_ROWS_DEFAULT,
 };
 pub use connstr::{
     format_connection_string, parse_connection_string, ConnStrError, ParsedConnection,
 };
 pub use driver::{
     CancelHandle, Column, ConnectParams, Driver, ExecEvent, MessageKind, ServerInfo, Session,
-    APPLICATION_NAME,
+    AI_APPLICATION_NAME, APPLICATION_NAME,
 };
 pub use error::DriverError;
 pub use export::{estimate_tokens, to_ai, to_excel_tsv};
@@ -33,6 +35,7 @@ pub use meta::{
     qualified, quote_ident, ColumnInfo, DatabaseSnapshot, DbObject, ForeignKey, IndexInfo,
     ObjectKind, TableStructure,
 };
+pub use readonly::{ReadOnlyReason, ReadOnlyViolation};
 pub use secrets::{KeyringStore, MemoryStore, SecretError, SecretStore, UnavailableStore};
 pub use value::Value;
 

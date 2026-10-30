@@ -2,7 +2,7 @@
   import { onMount, untrack } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
-  import type { ConnectionConfig, DatabaseScope, GuardLevel, ParsedConnection } from "../ipc";
+  import type { AiAccess, ConnectionConfig, DatabaseScope, GuardLevel, ParsedConnection } from "../ipc";
   import { connStrErrorText, fillFrom, ignoredText, proposeName } from "./connstr";
   import { applyEnvironment, ENVIRONMENTS, initialEnvState, type EnvState } from "./env";
   import { explorer } from "../explorer/tree.svelte";
@@ -161,6 +161,7 @@
       environment: env.environment,
       color: env.color,
       guard: env.guard,
+      aiAccess: env.aiAccess,
       encrypt,
       trustServerCertificate: trust,
       // Only called after validate(), which rejects an empty timeout.
@@ -222,6 +223,7 @@
   }
 
   const guards: GuardLevel[] = ["off", "confirm", "block"];
+  const aiLevels: AiAccess[] = ["none", "readOnly"];
   const authOptions = [
     { key: "connection.auth.windows", disabled: true },
     { key: "connection.auth.ad", disabled: true },
@@ -336,7 +338,7 @@
                 role="radio"
                 aria-checked={env.environment === e.id}
                 class:on={env.environment === e.id}
-                onclick={() => (env = applyEnvironment(env, e.id, prefs.environments))}
+                onclick={() => (env = applyEnvironment(env, e.id, prefs.environments, startsEdit))}
               >
                 <span class="dot" style:background={`var(${e.token})`}></span>{t(e.label)}
               </button>
@@ -374,6 +376,23 @@
           </div>
         </div>
         <div class="hint">{t("connection.guard.hint")}</div>
+        <div class="fl">
+          <span class="lbl" id="c-ai">{t("connection.field.ai")}</span>
+          <div class="seg" role="radiogroup" aria-labelledby="c-ai">
+            {#each aiLevels as a (a)}
+              <button
+                type="button"
+                role="radio"
+                aria-checked={env.aiAccess === a}
+                class:on={env.aiAccess === a}
+                onclick={() => (env = { ...env, aiAccess: a, aiTouched: true })}
+              >
+                {t(`ai.${a}`)}
+              </button>
+            {/each}
+          </div>
+        </div>
+        <div class="hint">{t("connection.ai.hint")}</div>
         <details class="adv" bind:open={advancedOpen}>
           <summary>{t("connection.advanced")}</summary>
           <label class="chk"><input type="checkbox" bind:checked={encrypt} />{t("connection.field.encrypt")}</label>

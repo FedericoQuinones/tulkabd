@@ -29,10 +29,14 @@ export class RunLogStore {
     return this.entries.filter((e) => sameDay(new Date(e.atMs), now)).length;
   }
 
-  /** A run that just finished. Newer than everything held. */
+  /**
+   * A run that just finished, placed by id. Usually it is the newest, but an AI run is noticed up
+   * to a couple of seconds after it happened, so it can belong below a run held already.
+   */
   prepend(entry: RunLogEntry): void {
     if (this.entries.some((e) => e.id === entry.id)) return;
-    this.entries.unshift(entry);
+    const at = this.entries.findIndex((e) => e.id < entry.id);
+    this.entries.splice(at === -1 ? this.entries.length : at, 0, entry);
   }
 
   async ensureLoaded(): Promise<void> {

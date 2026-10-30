@@ -32,6 +32,8 @@ export type Environment = "production" | "staging" | "test" | "local";
 export type GuardLevel = "off" | "confirm" | "block";
 export type DatabaseScope = { kind: "all" } | { kind: "selected"; names: string[] };
 
+/** What AI assistants (through `tulkabd mcp`) may do on a connection. */
+export type AiAccess = "none" | "readOnly";
 export interface ConnectionConfig {
   id: string;
   name: string;
@@ -43,6 +45,7 @@ export interface ConnectionConfig {
   environment: Environment;
   color: string;
   guard: GuardLevel;
+  aiAccess: AiAccess;
   encrypt: boolean;
   trustServerCertificate: boolean;
   connectTimeoutS: number;
@@ -255,6 +258,10 @@ export interface RunLogEntry {
   outcome: RunLogOutcome;
   /** Rows received, else rows affected; null when neither applies. */
   rows: number | null;
+  /** Who ran it: the user in this app, or an AI assistant through the MCP server. */
+  source: "app" | "ai";
+  /** Name of the AI client, when `source` is "ai". */
+  client: string | null;
   /** Null for a blocked statement and for a cancelled confirmation. */
   elapsedMs: number | null;
 }
@@ -382,6 +389,7 @@ export interface EnvironmentStyle {
   /** `#rrggbb`. */
   color: string;
   guard: GuardLevel;
+  aiAccess: AiAccess;
 }
 /** Preferences kept in `config.json`; the backend brings every value into its range. */
 export interface Preferences {
@@ -400,6 +408,10 @@ export interface Preferences {
   runLogDays: number;
   /** Color and guard level new connections start with. */
   environments: Record<Environment, EnvironmentStyle>;
+  /** Rows an AI assistant gets per query (1 to 10,000). */
+  aiMaxRows: number;
+  /** Seconds after which an AI query is cancelled (1 to 3,600). */
+  aiQueryTimeoutS: number;
 }
 export const getPreferences = () => invoke<Preferences>("get_preferences");
 /** Stores all preferences; resolves to what was kept, brought into range. */
@@ -533,3 +545,16 @@ export type DataLocationKey = "config" | "queries" | "data";
 export const revealDataLocation = (which: DataLocationKey) => invoke<void>("reveal_data_location", { which });
 /** Empties the metadata cache and the search index; connected servers are indexed again. */
 export const clearMetadataCache = () => invoke<void>("clear_metadata_cache");
+
+/** What to paste into each AI assistant to register tulkabd as an MCP server. */
+export interface McpSetup {
+  command: string;
+  args: string[];
+  claudeCode: string;
+  mcpServersJson: string;
+  vscodeJson: string;
+}
+export const mcpSetup = () => invoke<McpSetup>("mcp_setup");
+/** Copies one of the setups to the clipboard. */
+export type McpSetupKind = "claude" | "json" | "vscode";
+export const copyMcpSetup = (kind: McpSetupKind) => invoke<void>("copy_mcp_setup", { kind });

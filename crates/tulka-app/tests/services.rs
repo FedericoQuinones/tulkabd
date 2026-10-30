@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 use tulka_app::tulka_store::RunLogOutcome;
 use tulka_app::*;
 use tulka_core::{
-    estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, CancelHandle, Column,
+    estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, AiAccess, CancelHandle, Column,
     ColumnInfo, ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, DatabaseSnapshot,
     DbObject, Driver, DriverError, Environment, ExecEvent, MemoryStore, MessageKind, NumberFormat,
     ObjectKind, Preferences, SecretStore, ServerInfo, Session, TableStructure, UnavailableStore,
@@ -1818,6 +1818,28 @@ async fn duplicate_copies_the_connection_and_its_password() {
 }
 
 #[tokio::test]
+async fn duplicate_keeps_ai_access() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let mut conn = new_conn();
+    conn.ai_access = AiAccess::None;
+    let original = save_connection(&f.state, conn, None)
+        .await
+        .unwrap()
+        .connection;
+    let copy = duplicate_connection(&f.state, original.id).await.unwrap();
+    assert_eq!(copy.ai_access, AiAccess::None);
+
+    let mut conn = new_conn();
+    conn.ai_access = AiAccess::ReadOnly;
+    let original = save_connection(&f.state, conn, None)
+        .await
+        .unwrap()
+        .connection;
+    let copy = duplicate_connection(&f.state, original.id).await.unwrap();
+    assert_eq!(copy.ai_access, AiAccess::ReadOnly);
+}
+
+#[tokio::test]
 async fn duplicate_without_saved_password_and_unknown_id() {
     let f = fixture(Arc::new(MemoryStore::default()));
     let original = save_connection(&f.state, new_conn(), None)
@@ -2205,6 +2227,8 @@ async fn pruning_uses_the_run_log_days_preference() {
                 outcome: RunLogOutcome::Ok,
                 rows: None,
                 elapsed_ms: None,
+                source: tulka_app::tulka_store::RunSource::App,
+                client: None,
             })
             .unwrap();
     }
@@ -2240,6 +2264,8 @@ async fn running_a_query_does_not_prune_the_run_log() {
             outcome: RunLogOutcome::Ok,
             rows: None,
             elapsed_ms: None,
+            source: tulka_app::tulka_store::RunSource::App,
+            client: None,
         })
         .unwrap();
     with_prefs(&state, |p| p.run_log_days = 30).await;

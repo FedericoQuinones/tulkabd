@@ -12,6 +12,7 @@
 //! [`NOT_ALLOWED`], [`NOT_TEXT`] and [`TOO_LARGE`].
 //! Background events go to [`AppEvents`].
 
+pub mod ai;
 pub mod connections;
 pub mod explorer;
 pub mod files;
@@ -57,7 +58,7 @@ pub use results::{
     SortSpec, ViewSpec, CELLS_CAPPED_WARNING, DISPLAY_BYTES, DISPLAY_TEXT_CHARS, MAX_CELL_BYTES,
     MAX_ROWS,
 };
-pub use runlog::{clear_run_log, list_run_log, log_cancelled_run, prune_run_log};
+pub use runlog::{clear_run_log, list_run_log, log_cancelled_run, poll_ai_runs, prune_run_log};
 pub use session::{load_session, save_session};
 pub use settings::{
     data_locations, data_locations_in, reveal_target, reveal_target_in, DataLocations,

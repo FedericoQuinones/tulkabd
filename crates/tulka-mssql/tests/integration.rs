@@ -6,60 +6,15 @@
 
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
 use tulka_core::{ConnectParams, Driver, DriverError, ExecEvent, MessageKind, Session, Value};
 use tulka_mssql::MssqlDriver;
 
-/// Connection parameters from `TULKA_MSSQL_TEST`, or `None` (after printing
-/// "skipped") when it is not set.
-fn test_params() -> Option<ConnectParams> {
-    let Ok(raw) = std::env::var("TULKA_MSSQL_TEST") else {
-        println!("skipped (TULKA_MSSQL_TEST not set)");
-        return None;
-    };
-
-    let mut p = ConnectParams {
-        server: "127.0.0.1".into(),
-        port: 1433,
-        encrypt: true,
-        trust_server_certificate: true,
-        connect_timeout_s: 15,
-        ..ConnectParams::default()
-    };
-    for part in raw.split(';').filter(|s| !s.trim().is_empty()) {
-        let (key, value) = part
-            .split_once('=')
-            .expect("TULKA_MSSQL_TEST entries must be key=value");
-        match key.trim().to_lowercase().as_str() {
-            "server" => p.server = value.trim().to_string(),
-            "port" => p.port = value.trim().parse().expect("port must be a number"),
-            "user" => p.user = value.to_string(),
-            "password" => p.password = value.to_string(),
-            _ => {}
-        }
-    }
-    Some(p)
-}
+#[path = "support/params.rs"]
+mod params;
+use params::{collect, test_params};
 
 async fn connect(p: &ConnectParams) -> Box<dyn Session> {
     MssqlDriver.connect(p).await.expect("connect")
-}
-
-/// Runs `sql` and returns its result together with every emitted event.
-async fn collect(
-    session: &mut dyn Session,
-    sql: &str,
-) -> (Result<(), DriverError>, Vec<ExecEvent>) {
-    let (tx, mut rx) = mpsc::channel(16);
-    let collector = tokio::spawn(async move {
-        let mut events = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            events.push(ev);
-        }
-        events
-    });
-    let result = session.execute(sql, tx).await;
-    (result, collector.await.unwrap())
 }
 
 fn rows(events: &[ExecEvent]) -> Vec<Vec<Value>> {
@@ -577,4 +532,103 @@ async fn end_transactions_on_a_lost_connection_is_disconnected() {
         s.end_transactions(true).await,
         Err(DriverError::Disconnected(_))
     ));
+}
+
+// Read-only execution. Each test uses a temporary database with `dbo.w`.
+
+/// Runs `sql` with `execute_read_only` and returns the result with the events.
+async fn collect_read_only(
+    session: &mut dyn Session,
+    sql: &str,
+    max_rows: u32,
+) -> (Result<(), DriverError>, Vec<ExecEvent>) {
+    params::collect_with(|tx| session.execute_read_only(sql, max_rows, tx)).await
+}
+
+/// `SELECT @@TRANCOUNT` on `session`.
+async fn trancount(session: &mut dyn Session) -> Value {
+    let (result, events) = collect(session, "SELECT @@TRANCOUNT").await;
+    result.unwrap();
+    rows(&events).remove(0).remove(0)
+}
+
+#[tokio::test]
+async fn read_only_returns_rows_and_caps_with_rowcount() {
+    let Some(admin) = test_params() else { return };
+    params::with_temp_db(admin, |p| async move {
+        let mut s = connect(&p).await;
+        let (result, events) =
+            collect_read_only(s.as_mut(), "SELECT * FROM sys.all_objects", 10).await;
+        result.unwrap();
+        assert_eq!(rows(&events).len(), 11);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn read_only_runs_inside_one_transaction() {
+    let Some(admin) = test_params() else { return };
+    params::with_temp_db(admin, |p| async move {
+        let mut s = connect(&p).await;
+        let (result, events) =
+            collect_read_only(s.as_mut(), "SELECT @@TRANCOUNT, @@LOCK_TIMEOUT", 10).await;
+        result.unwrap();
+        assert_eq!(rows(&events), vec![vec![Value::Int(1), Value::Int(5000)]]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn read_only_refuses_writes_without_touching_the_server() {
+    let Some(admin) = test_params() else { return };
+    params::with_temp_db(admin, |p| async move {
+        let mut s = connect(&p).await;
+        let (result, events) = collect_read_only(s.as_mut(), "DELETE FROM dbo.w", 10).await;
+        assert!(matches!(result, Err(DriverError::Other(_))), "{result:?}");
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(params::count_w(&p).await, 3);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn query_error_is_reported_and_rolled_back() {
+    let Some(admin) = test_params() else { return };
+    params::with_temp_db(admin, |p| async move {
+        let mut s = connect(&p).await;
+        let (result, _) = collect_read_only(s.as_mut(), "SELECT 1/0", 10).await;
+        assert!(
+            matches!(result, Err(DriverError::Query { .. })),
+            "{result:?}"
+        );
+        // The closing statement ran and left no transaction open.
+        assert_eq!(trancount(s.as_mut()).await, Value::Int(0));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn cancel_during_read_only_is_cancelled() {
+    let Some(admin) = test_params() else { return };
+    params::with_temp_db(admin, |p| async move {
+        let mut s = connect(&p).await;
+        let cancel = s.cancel_handle();
+        // The sort has to read every row before it can emit the first, so the
+        // row cap of the transaction does not make it finish early.
+        let sql = "SELECT a.object_id FROM sys.all_objects a CROSS JOIN sys.all_objects b \
+                   CROSS JOIN sys.all_objects c ORDER BY NEWID()";
+        let (result, _) = tokio::join!(collect_read_only(s.as_mut(), sql, 10), async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            cancel.cancel().await.unwrap();
+        });
+        assert!(
+            matches!(result.0, Err(DriverError::Cancelled)),
+            "{:?}",
+            result.0
+        );
+        // The closing batch ran after the cancel: the session is usable and
+        // has no transaction left.
+        assert_eq!(trancount(s.as_mut()).await, Value::Int(0));
+    })
+    .await;
 }

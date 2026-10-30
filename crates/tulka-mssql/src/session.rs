@@ -18,12 +18,14 @@ use tokio::time::Instant;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tulka_core::{
     quote_ident, CancelHandle, Column, ColumnInfo, ConnectParams, DatabaseSnapshot, DriverError,
-    ExecEvent, MessageKind, ServerInfo, Session, TableStructure, Value,
+    ExecEvent, MessageKind, ReadOnlyReason, ReadOnlyViolation, ServerInfo, Session, TableStructure,
+    Value,
 };
 
 use crate::batches::{split_batches, Batch};
 use crate::convert::{to_value, type_name};
 use crate::meta;
+use crate::readonly;
 
 type Client = tiberius::Client<Compat<TcpStream>>;
 
@@ -40,6 +42,43 @@ const AUTH_ERRORS: [u32; 6] = [18456, 18452, 18470, 18486, 18487, 18488];
 
 /// Errors of this severity or higher close the connection.
 const FATAL_SEVERITY: u8 = 20;
+
+/// The batch that opens the transaction a read-only script runs in. Rows are
+/// capped one past `max_rows`, so the caller can tell a result was cut.
+fn read_only_preamble(max_rows: u32) -> String {
+    format!(
+        "SET NOCOUNT ON; SET XACT_ABORT ON; SET IMPLICIT_TRANSACTIONS OFF; \
+         SET QUOTED_IDENTIFIER ON; SET ANSI_NULLS ON; \
+         SET TRANSACTION ISOLATION LEVEL READ COMMITTED; SET LOCK_TIMEOUT 5000; \
+         SET DEADLOCK_PRIORITY LOW; SET ROWCOUNT {}; BEGIN TRANSACTION;",
+        max_rows.saturating_add(1)
+    )
+}
+
+/// Ends a read-only script: reports how many transactions were open, then
+/// rolls back whatever is left.
+const READ_ONLY_END: &str =
+    "DECLARE @n int = @@TRANCOUNT; IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; SELECT @n;";
+
+/// The error for a script the read-only check refused.
+fn refusal(v: &ReadOnlyViolation) -> DriverError {
+    let why = match v.reason {
+        ReadOnlyReason::Empty => "there is nothing to run".to_string(),
+        ReadOnlyReason::NotASelect => "only queries are allowed".to_string(),
+        ReadOnlyReason::Forbidden => {
+            "it contains a statement or word that can change data or state".to_string()
+        }
+        ReadOnlyReason::LinkedServer => "it reaches through a linked server".to_string(),
+        ReadOnlyReason::Unparsed => "it could not be read with certainty".to_string(),
+        ReadOnlyReason::Unsupported => "this driver cannot check it".to_string(),
+    };
+    let at = match &v.word {
+        Some(word) => format!(" (`{word}` at line {})", v.line + 1),
+        None if v.reason == ReadOnlyReason::Empty => String::new(),
+        None => format!(" (line {})", v.line + 1),
+    };
+    DriverError::Other(format!("refused: not a read-only query: {why}{at}"))
+}
 
 pub struct MssqlSession {
     /// `None` once the connection is lost.
@@ -327,6 +366,108 @@ impl MssqlSession {
             .ok_or_else(|| DriverError::Other(format!("no value returned by `{sql}`")))
     }
 
+    /// Runs `sql` inside a transaction that is rolled back whatever happens,
+    /// without checking that it only reads. Callers must have checked it.
+    ///
+    /// The session must not be used afterwards: row limits stay in force, and
+    /// it is closed if the script left the transaction in an unexpected state.
+    async fn run_rolled_back(
+        &mut self,
+        sql: &str,
+        max_rows: u32,
+        tx: Sender<ExecEvent>,
+    ) -> Result<(), DriverError> {
+        // Cleared once, before the preamble: a cancel from here on stops the
+        // script, even one that lands between the preamble and its first batch.
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        if let Err(e) = self.query_rows(&read_only_preamble(max_rows)).await {
+            // Unknown whether the transaction opened: do not keep the session.
+            self.client = None;
+            return Err(e);
+        }
+        let result = self.run_events(sql, tx).await;
+        if matches!(result, Err(DriverError::Disconnected(_))) {
+            // The server rolls back when the connection goes away.
+            return result;
+        }
+        let open = match self.query_rows(READ_ONLY_END).await {
+            Ok(rows) => rows.first().and_then(|r| r.get::<i32, _>(0)),
+            Err(e) => {
+                self.client = None;
+                return result.and(Err(e));
+            }
+        };
+        // One transaction is open after a script that ran to the end. After a
+        // failure or a cancel, XACT_ABORT or the Attention may have ended it.
+        let expected = if result.is_ok() {
+            open == Some(1)
+        } else {
+            matches!(open, Some(0 | 1))
+        };
+        if !expected {
+            self.client = None;
+            return Err(DriverError::Other(
+                "the query changed the transaction state; the session was closed".into(),
+            ));
+        }
+        result
+    }
+
+    /// [`Session::execute_read_only`] without the read-only check, to test
+    /// that the rollback undoes a write that got through.
+    #[cfg(test)]
+    async fn execute_in_rolled_back_transaction(
+        &mut self,
+        sql: &str,
+        max_rows: u32,
+        tx: Sender<ExecEvent>,
+    ) -> Result<(), DriverError> {
+        self.run_rolled_back(sql, max_rows, tx).await
+    }
+
+    /// Runs the script and reports how it ended, leaving the cancel flag as it is.
+    async fn run_events(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError> {
+        let mut out = Emitter {
+            tx,
+            receiver_gone: false,
+            cancel: self.cancel.clone(),
+            cancel_requested: self.cancel_requested.clone(),
+        };
+
+        let result = match self.client.as_mut() {
+            None => Err(closed()),
+            Some(client) => run_script(client, sql, &mut out).await,
+        };
+        let Err(e) = result else { return Ok(()) };
+
+        match &e {
+            DriverError::Query { message, line } => {
+                out.send(ExecEvent::Message {
+                    kind: MessageKind::Error,
+                    text: message.clone(),
+                    line: *line,
+                })
+                .await;
+            }
+            DriverError::Disconnected(reason) => {
+                out.send(ExecEvent::Disconnected {
+                    reason: reason.clone(),
+                })
+                .await;
+            }
+            DriverError::Other(text) => {
+                out.send(ExecEvent::Message {
+                    kind: MessageKind::Error,
+                    text: text.clone(),
+                    line: None,
+                })
+                .await;
+            }
+            _ => {}
+        }
+        Err(self.fail(e))
+    }
+
     /// Drops the connection when `e` means it was lost.
     fn fail(&mut self, e: DriverError) -> DriverError {
         if matches!(e, DriverError::Disconnected(_)) {
@@ -465,45 +606,21 @@ impl Session for MssqlSession {
 
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError> {
         self.cancel_requested.store(false, Ordering::SeqCst);
-        let mut out = Emitter {
-            tx,
-            receiver_gone: false,
-            cancel: self.cancel.clone(),
-            cancel_requested: self.cancel_requested.clone(),
-        };
+        self.run_events(sql, tx).await
+    }
 
-        let result = match self.client.as_mut() {
-            None => Err(closed()),
-            Some(client) => run_script(client, sql, &mut out).await,
-        };
-        let Err(e) = result else { return Ok(()) };
-
-        match &e {
-            DriverError::Query { message, line } => {
-                out.send(ExecEvent::Message {
-                    kind: MessageKind::Error,
-                    text: message.clone(),
-                    line: *line,
-                })
-                .await;
-            }
-            DriverError::Disconnected(reason) => {
-                out.send(ExecEvent::Disconnected {
-                    reason: reason.clone(),
-                })
-                .await;
-            }
-            DriverError::Other(text) => {
-                out.send(ExecEvent::Message {
-                    kind: MessageKind::Error,
-                    text: text.clone(),
-                    line: None,
-                })
-                .await;
-            }
-            _ => {}
+    async fn execute_read_only(
+        &mut self,
+        sql: &str,
+        max_rows: u32,
+        tx: Sender<ExecEvent>,
+    ) -> Result<(), DriverError> {
+        // The text that was checked is the text that runs: `execute` splits
+        // it into batches with the same `split_batches` the check used.
+        if let Some(v) = readonly::violation(sql) {
+            return Err(refusal(&v));
         }
-        Err(self.fail(e))
+        self.run_rolled_back(sql, max_rows, tx).await
     }
 
     async fn transaction_count(&mut self) -> Result<u32, DriverError> {
@@ -729,6 +846,11 @@ async fn resend_cancel_while<F: Future>(request: F, out: &Emitter) -> F::Output 
     }
 }
 
+// A path on a module nested inside `tests` would not resolve, so it lives here.
+#[cfg(test)]
+#[path = "../tests/support/params.rs"]
+mod params;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,5 +932,68 @@ mod tests {
         assert_eq!(named.get_addr(), "db01:1434");
         let direct = config(&p, &Target::parse("db01\\SQLEXPRESS", 50123).unwrap(), None);
         assert_eq!(direct.get_addr(), "db01:50123");
+    }
+
+    #[test]
+    fn preamble_text_is_exact() {
+        assert_eq!(
+            read_only_preamble(500),
+            "SET NOCOUNT ON; SET XACT_ABORT ON; SET IMPLICIT_TRANSACTIONS OFF; \
+             SET QUOTED_IDENTIFIER ON; SET ANSI_NULLS ON; \
+             SET TRANSACTION ISOLATION LEVEL READ COMMITTED; SET LOCK_TIMEOUT 5000; \
+             SET DEADLOCK_PRIORITY LOW; SET ROWCOUNT 501; BEGIN TRANSACTION;"
+        );
+        assert!(read_only_preamble(u32::MAX).contains("SET ROWCOUNT 4294967295;"));
+    }
+
+    use super::params;
+
+    #[tokio::test]
+    async fn rollback_undoes_a_write_that_slipped_through() {
+        let Some(admin) = params::test_params() else {
+            return;
+        };
+        params::with_temp_db(admin, |p| async move {
+            let mut s = connect(&p).await.unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+            let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+            let result = s
+                .execute_in_rolled_back_transaction(
+                    "INSERT INTO dbo.w VALUES (4); SELECT 1",
+                    10,
+                    tx,
+                )
+                .await;
+            drain.await.unwrap();
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(params::count_w(&p).await, 3);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn commit_inside_is_detected_and_closes_the_session() {
+        let Some(admin) = params::test_params() else {
+            return;
+        };
+        params::with_temp_db(admin, |p| async move {
+            let mut s = connect(&p).await.unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+            let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+            let result = s
+                .execute_in_rolled_back_transaction("SELECT 1; COMMIT", 10, tx)
+                .await;
+            drain.await.unwrap();
+            assert!(
+                matches!(&result, Err(DriverError::Other(m)) if m.contains("transaction state")),
+                "{result:?}"
+            );
+            let (next, _) = params::collect(&mut s, "SELECT 1").await;
+            assert!(
+                matches!(next, Err(DriverError::Disconnected(_))),
+                "{next:?}"
+            );
+        })
+        .await;
     }
 }

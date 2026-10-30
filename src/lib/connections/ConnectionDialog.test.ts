@@ -32,6 +32,7 @@ const base: ConnectionConfig = {
   environment: "local",
   color: "#3b82f6",
   guard: "off",
+  aiAccess: "none",
   encrypt: true,
   trustServerCertificate: true,
   connectTimeoutS: 15,
@@ -350,4 +351,74 @@ test("saving keeps the guard level saved meanwhile, not a stale copy of the conn
   document.querySelector("form")!.requestSubmit();
   await settle();
   expect(vi.mocked(ipc.saveConnection).mock.calls[0][0].guard).toBe("block");
+});
+
+const radio = (group: string, text: string) =>
+  [...document.querySelectorAll<HTMLButtonElement>(`[aria-labelledby="${group}"] button`)].find((b) => b.textContent?.trim() === text)!;
+
+test("AI access is saved with the connection", async () => {
+  vi.mocked(ipc.saveConnection).mockResolvedValue({ connection: base, keyringUnavailable: false });
+  open({ initial: base });
+  expect(radio("c-ai", "No access").getAttribute("aria-checked")).toBe("true");
+  radio("c-ai", "Read only").click();
+  flushSync();
+  document.querySelector("form")!.requestSubmit();
+  await settle();
+  expect(vi.mocked(ipc.saveConnection).mock.calls[0][0].aiAccess).toBe("readOnly");
+});
+
+test("new production connection defaults to No access", async () => {
+  vi.mocked(ipc.saveConnection).mockResolvedValue({ connection: base, keyringUnavailable: false });
+  open({});
+  // A new local connection starts with Read only.
+  expect(radio("c-ai", "Read only").getAttribute("aria-checked")).toBe("true");
+  [...document.querySelectorAll<HTMLButtonElement>('[aria-labelledby="c-env"] button')].find((b) => b.textContent?.trim() === "Production")!.click();
+  flushSync();
+  expect(radio("c-ai", "No access").getAttribute("aria-checked")).toBe("true");
+  for (const [id, value] of [["c-name", "Prod"], ["c-server", "db.example.com"]]) {
+    const input = document.getElementById(id) as HTMLInputElement;
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  flushSync();
+  document.querySelector("form")!.requestSubmit();
+  await settle();
+  expect(vi.mocked(ipc.saveConnection).mock.calls[0][0].aiAccess).toBe("none");
+});
+
+const envButton = (label: string) =>
+  [...document.querySelectorAll<HTMLButtonElement>('[aria-labelledby="c-env"] button')].find((b) => b.textContent?.trim() === label)!;
+
+async function savedAiAfterSwitching(from: "production" | "local" | "staging", ai: "none" | "readOnly", to: string) {
+  vi.mocked(ipc.saveConnection).mockResolvedValue({ connection: base, keyringUnavailable: false });
+  const conn = { ...base, environment: from, aiAccess: ai };
+  connections.list = [conn];
+  open({ initial: conn });
+  envButton(to).click();
+  flushSync();
+  document.querySelector("form")!.requestSubmit();
+  await settle();
+  return vi.mocked(ipc.saveConnection).mock.calls[0][0].aiAccess;
+}
+
+test("existing Production none switched to Staging stays none", async () => {
+  expect(await savedAiAfterSwitching("production", "none", "Staging")).toBe("none");
+});
+
+test("existing Local readOnly switched to Production becomes none", async () => {
+  expect(await savedAiAfterSwitching("local", "readOnly", "Production")).toBe("none");
+});
+
+test("existing Staging readOnly switched to Test stays readOnly", async () => {
+  expect(await savedAiAfterSwitching("staging", "readOnly", "Test")).toBe("readOnly");
+});
+
+test("new connection follows the environment default both ways", () => {
+  open({});
+  envButton("Production").click();
+  flushSync();
+  expect(radio("c-ai", "No access").getAttribute("aria-checked")).toBe("true");
+  envButton("Staging").click();
+  flushSync();
+  expect(radio("c-ai", "Read only").getAttribute("aria-checked")).toBe("true");
 });
