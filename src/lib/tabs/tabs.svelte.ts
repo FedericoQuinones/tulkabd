@@ -90,6 +90,7 @@ export const END_RETRIES = 100;
 
 /** Longest wait for a tab to say how many transactions it holds before it counts as unknown. */
 export const CHECK_TIMEOUT_MS = 3000;
+const GUARD_LOG_WAIT_MS = 500;
 
 /** A rejection of the transaction commands as user text: sentinels become words. */
 function txErrorText(e: unknown): string {
@@ -110,7 +111,7 @@ export interface CloseItem {
 
 /** The dialog asking whether to commit or roll back before a tab, or the window, closes. */
 export interface ClosePrompt {
-  scope: "tab" | "window" | "unbind";
+  scope: "tab" | "window" | "unbind" | "reconnect";
   items: CloseItem[];
   /** An answer is being carried out. */
   busy: boolean;
@@ -435,6 +436,21 @@ export class TabsStore {
     });
   }
 
+  /**
+   * The window is about to go: confirmations still open are recorded as cancelled. Best effort,
+   * with a short cap so a stuck backend never keeps the window open.
+   */
+  private async logHeldGuards(): Promise<void> {
+    const logs = this.list.flatMap((x) => (x.pane?.guardPrompt ? [x.pane.discardGuard()] : []));
+    if (logs.length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cap = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, GUARD_LOG_WAIT_MS);
+    });
+    await Promise.race([Promise.all(logs), cap]);
+    clearTimeout(timer);
+  }
+
   /** The window is being closed: ask once for every tab that holds, or may hold, a transaction. */
   private async confirmWindowClose(event: { preventDefault: () => void }): Promise<void> {
     if (this.closePrompt) {
@@ -444,7 +460,10 @@ export class TabsStore {
     }
     const checks = await Promise.all(this.list.map((x) => this.checkTab(x)));
     const plan = closePlan(checks);
-    if (!plan.ask) return;
+    if (!plan.ask) {
+      await this.logHeldGuards();
+      return;
+    }
     event.preventDefault();
     this.closePrompt = { scope: "window", items: this.itemsOf(plan.tabs), busy: false, error: null };
   }
@@ -500,7 +519,11 @@ export class TabsStore {
       }
     }
     this.endPrompt();
-    if (prompt.scope === "window") await getCurrentWindow().destroy();
+    if (prompt.scope === "window") {
+      await this.logHeldGuards();
+      await getCurrentWindow().destroy();
+    }
+    if (prompt.scope === "reconnect") this.reconnectNow(prompt.items[0].tabId);
   }
 
   /** Leaves the transactions alone and keeps the tab (or the window) open. */
@@ -637,13 +660,36 @@ export class TabsStore {
     void this.connectTab(id, conn, undefined, pane.database ?? undefined);
   }
 
-  /** Reopens a query tab's session on the connection and database it was bound to. */
+  /**
+   * Reopens a query tab's session on the connection and database it was bound to. A live session
+   * is replaced, so a transaction it holds is asked about first, like when the tab closes;
+   * cancelling leaves the session as it was.
+   */
   reconnect(id: string): void {
+    const pane = this.list.find((x) => x.id === id)?.pane;
+    if (!pane) return;
+    if (!pane.session || pane.status !== "idle") {
+      this.reconnectNow(id);
+      return;
+    }
+    void this.askThenReconnect(id);
+  }
+
+  private async askThenReconnect(id: string): Promise<void> {
     const tab = this.list.find((x) => x.id === id);
-    const pane = tab?.pane;
-    if (!tab || !pane) return;
+    if (!tab || this.closePrompt) return;
+    const plan = closePlan([await this.checkTab(tab)]);
+    // Closed meanwhile, or another prompt took over while counting.
+    if (!this.list.some((x) => x.id === id) || this.closePrompt) return;
+    if (plan.ask) this.closePrompt = { scope: "reconnect", items: this.itemsOf(plan.tabs), busy: false, error: null };
+    else this.reconnectNow(id);
+  }
+
+  private reconnectNow(id: string): void {
+    const pane = this.list.find((x) => x.id === id)?.pane;
+    if (!pane) return;
     const conn = connections.list.find((c) => c.id === pane.connectionId);
-    if (conn) void this.connectTab(tab.id, conn, undefined, pane.database ?? undefined);
+    if (conn) void this.connectTab(id, conn, undefined, pane.database ?? undefined);
   }
 
   /** Loads (or reloads) a definition tab's text; needs the Explorer session. */
