@@ -13,8 +13,14 @@
 //! - Unbracketed columns named like non-reserved forbidden words (`Send`,
 //!   `Get`, `Move`, `Open`, `Close`, `Save`, `Load`) are refused; bracket
 //!   them.
-//! - `MERGE` is refused as a word, but the `MERGE` join hint
-//!   (`INNER MERGE JOIN`) is a read-only hint that is refused with it.
+//! - The `MERGE` join hint (`INNER MERGE JOIN`) is read-only but is refused
+//!   too, because `MERGE` is a forbidden word.
+//! - A dotted name with three or more dots is taken as a linked-server name,
+//!   so `db.dbo.t.col` and `dbo.t.xmlcol.value(...)` are refused (an accepted
+//!   false positive).
+//! - Anything the check cannot read with certainty is refused as unparsed:
+//!   control characters, a bare `\r`, symbols outside T-SQL's operator set,
+//!   Unicode spaces and non-ASCII letters outside bracketed names.
 
 use tulka_core::{ReadOnlyReason, ReadOnlyViolation};
 
@@ -39,11 +45,17 @@ use crate::lexer::{self, Kind, Token};
 ///   `CHECKPOINT`.
 /// - Service Broker: `SEND`, `RECEIVE`, `GET`, `MOVE`, `CONVERSATION`;
 ///   `RECEIVE` removes messages from a queue.
-/// - Lock hints that take write locks: `HOLDLOCK`, `UPDLOCK`, `XLOCK`,
-///   `TABLOCKX`.
-/// - `LOAD` restores from a dump in legacy syntax.
+/// - Lock hints: `UPDLOCK`, `XLOCK`, `TABLOCKX` take write locks;
+///   `HOLDLOCK`, `SERIALIZABLE`, `REPEATABLEREAD`, `TABLOCK`, `PAGLOCK` hold
+///   shared locks to the end of the transaction. They have no place in a
+///   query an assistant sends.
+/// - `LOAD` and `DUMP` are legacy backup syntax; `ENABLE`/`DISABLE` switch
+///   triggers and the like; `REVERT` changes the execution context; `TRAN`,
+///   `TRANSACTION` and `CURSOR` open transactions and cursors.
 ///
-/// `NEXT` is handled apart (`NEXT VALUE FOR` advances a sequence).
+/// `NEXT` and `FETCH` are handled apart: `NEXT VALUE FOR` advances a
+/// sequence, and `FETCH` is only valid in `OFFSET n ROWS FETCH NEXT|FIRST`.
+/// `END` and `ELSE` are allowed because `CASE` uses them.
 const FORBIDDEN: &[&str] = &[
     "ADD",
     "ALTER",
@@ -57,12 +69,16 @@ const FORBIDDEN: &[&str] = &[
     "CONTINUE",
     "CONVERSATION",
     "CREATE",
+    "CURSOR",
     "DBCC",
     "DEALLOCATE",
     "DECLARE",
     "DELETE",
     "DENY",
+    "DISABLE",
     "DROP",
+    "DUMP",
+    "ENABLE",
     "EXEC",
     "EXECUTE",
     "GET",
@@ -80,22 +96,29 @@ const FORBIDDEN: &[&str] = &[
     "OPENDATASOURCE",
     "OPENQUERY",
     "OPENROWSET",
+    "PAGLOCK",
     "PRINT",
     "RAISERROR",
     "READTEXT",
     "RECEIVE",
     "RECONFIGURE",
+    "REPEATABLEREAD",
     "RESTORE",
     "RETURN",
+    "REVERT",
     "REVOKE",
     "ROLLBACK",
     "SAVE",
     "SEND",
+    "SERIALIZABLE",
     "SET",
     "SETUSER",
     "SHUTDOWN",
+    "TABLOCK",
     "TABLOCKX",
     "THROW",
+    "TRAN",
+    "TRANSACTION",
     "TRIGGER",
     "TRUNCATE",
     "UPDATE",
@@ -124,13 +147,17 @@ pub fn violation(sql: &str) -> Option<ReadOnlyViolation> {
     let mut any = false;
     for batch in split_batches(sql) {
         let base = batch.start_line - 1;
+        if let Some(offset) = suspicious_char(&batch.text) {
+            return Some(found(
+                ReadOnlyReason::Unparsed,
+                None,
+                base + line_of(&batch.text, offset),
+            ));
+        }
         let tokens = match lexer::lex(&batch.text) {
             Ok(t) => t,
             Err(offset) => {
-                let line = batch.text.as_bytes()[..offset]
-                    .iter()
-                    .filter(|&&b| b == b'\n')
-                    .count() as u32;
+                let line = line_of(&batch.text, offset);
                 return Some(found(ReadOnlyReason::Unparsed, None, base + line));
             }
         };
@@ -143,6 +170,56 @@ pub fn violation(sql: &str) -> Option<ReadOnlyViolation> {
     } else {
         Some(found(ReadOnlyReason::Empty, None, 0))
     }
+}
+
+fn line_of(text: &str, offset: usize) -> u32 {
+    text.as_bytes()[..offset]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count() as u32
+}
+
+/// Offset of the first character the server may read differently from the
+/// lexer: an ASCII control character other than tab, newline and carriage
+/// return, or a carriage return not followed by a newline (the server may
+/// end a `--` comment there).
+fn suspicious_char(text: &str) -> Option<usize> {
+    let b = text.as_bytes();
+    b.iter().enumerate().find_map(|(i, &c)| {
+        let bad = match c {
+            b'\t' | b'\n' => false,
+            b'\r' => b.get(i + 1) != Some(&b'\n'),
+            c => c < 0x20 || c == 0x7f,
+        };
+        bad.then_some(i)
+    })
+}
+
+/// The symbols T-SQL uses outside strings and names. Anything else the lexer
+/// emits as punctuation (control characters, Unicode spaces, combining
+/// marks) is not understood and is refused.
+fn is_known_symbol(text: &str) -> bool {
+    matches!(
+        text,
+        "(" | ")"
+            | ","
+            | "."
+            | ";"
+            | "="
+            | "<"
+            | ">"
+            | "!"
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "&"
+            | "|"
+            | "^"
+            | "~"
+            | ":"
+    )
 }
 
 fn found(reason: ReadOnlyReason, word: Option<String>, line: u32) -> ReadOnlyViolation {
@@ -203,6 +280,10 @@ fn check_batch(
         }
         *any = true;
 
+        if t.kind == Kind::Punct && !is_known_symbol(lexer::src(text, t)) {
+            return Some(found(ReadOnlyReason::Unparsed, None, line));
+        }
+
         if at_head {
             if is_punct(text, t, "(") {
                 depth += 1;
@@ -225,6 +306,9 @@ fn check_batch(
             }
             Kind::Word => {
                 let w = lexer::src(text, t);
+                if !w.is_ascii() {
+                    return Some(found(ReadOnlyReason::Unparsed, word_of(text, t), line));
+                }
                 if is_forbidden(w) {
                     return Some(found(ReadOnlyReason::Forbidden, word_of(text, t), line));
                 }
@@ -234,6 +318,18 @@ fn check_batch(
                         .is_some_and(|n| is_keyword(text, n, "VALUE"))
                 {
                     return Some(found(ReadOnlyReason::Forbidden, word_of(text, t), line));
+                }
+                // `FETCH` is valid only as `ROWS FETCH NEXT|FIRST`.
+                if w.eq_ignore_ascii_case("FETCH") {
+                    let after_rows = i > 0
+                        && (is_keyword(text, &tokens[i - 1], "ROW")
+                            || is_keyword(text, &tokens[i - 1], "ROWS"));
+                    let then_next = tokens.get(i + 1).is_some_and(|n| {
+                        is_keyword(text, n, "NEXT") || is_keyword(text, n, "FIRST")
+                    });
+                    if !(after_rows && then_next) {
+                        return Some(found(ReadOnlyReason::Forbidden, word_of(text, t), line));
+                    }
                 }
             }
             _ => {}
@@ -398,6 +494,89 @@ mod tests {
         ];
         for (sql, want) in cases {
             check(sql, Some(*want));
+        }
+    }
+
+    #[test]
+    fn every_statement_keyword_is_refused_inside_a_query() {
+        // The statement keywords of T-SQL (SQL Server 2016+ and Azure SQL)
+        // that are not part of a query.
+        let words = "INSERT UPDATE DELETE MERGE DROP TRUNCATE CREATE ALTER EXEC EXECUTE \
+            DECLARE SET USE GRANT DENY REVOKE BEGIN COMMIT ROLLBACK SAVE TRAN TRANSACTION \
+            WAITFOR IF WHILE RETURN GOTO BREAK CONTINUE PRINT RAISERROR THROW CURSOR OPEN \
+            CLOSE DEALLOCATE FETCH RECEIVE SEND MOVE GET DBCC KILL CHECKPOINT BACKUP RESTORE \
+            SHUTDOWN RECONFIGURE DUMP LOAD BULK WRITETEXT UPDATETEXT READTEXT OPENQUERY \
+            OPENROWSET OPENDATASOURCE INTO ENABLE DISABLE SETUSER REVERT UPDLOCK XLOCK \
+            TABLOCK TABLOCKX HOLDLOCK PAGLOCK SERIALIZABLE REPEATABLEREAD ADD TRIGGER \
+            CONVERSATION";
+        for w in words.split_whitespace() {
+            for sql in [
+                format!("SELECT 1 {w}"),
+                format!("SELECT 1 {}", w.to_lowercase()),
+                format!("SELECT 1 /* x */ {w} -- y"),
+            ] {
+                let v = violation(&sql).unwrap_or_else(|| panic!("{sql}"));
+                assert_eq!(v.reason, Forbidden, "{sql}");
+                assert_eq!(v.word.as_deref().map(str::to_uppercase), Some(w.into()));
+            }
+        }
+    }
+
+    #[test]
+    fn fetch_is_only_valid_after_rows() {
+        check(
+            "SELECT 1 FETCH NEXT FROM c",
+            Some((Forbidden, Some("FETCH"))),
+        );
+        check(
+            "SELECT 1 ORDER BY a OFFSET 1 ROW FETCH FIRST 1 ROW ONLY",
+            None,
+        );
+        check(
+            "SELECT 1 ORDER BY a OFFSET 1 ROWS FETCH FROM c",
+            Some((Forbidden, Some("FETCH"))),
+        );
+    }
+
+    #[test]
+    fn four_part_column_names_are_refused() {
+        check(
+            "SELECT db.dbo.t.col FROM db.dbo.t",
+            Some((LinkedServer, None)),
+        );
+        check(
+            "SELECT dbo.t.xmlcol.value('x', 'int') FROM dbo.t",
+            Some((LinkedServer, None)),
+        );
+    }
+
+    #[test]
+    fn refuses_what_it_cannot_read_with_certainty() {
+        for sql in [
+            // A control or Unicode space between name parts could hide dots.
+            "SELECT * FROM srv.db.\u{1}dbo.t",
+            "SELECT * FROM srv.db.\u{1f}.t",
+            "SELECT * FROM srv.db.\u{a0}dbo.t",
+            "SELECT * FROM srv.db.\u{2003}dbo.t",
+            "SELECT * FROM srv.db.\u{301}dbo.t",
+            "SELECT 1 \u{0b} DELETE FROM t",
+            "SELECT 1 -- c\rDELETE FROM t",
+            "SELECT 'a\u{0}b'",
+            "SELECT 1 {fn NOW()}",
+            "SELECT 1 \\ 2",
+            // Non-ASCII letters in an unquoted word.
+            "SELECT 1 \u{131}NSERT",
+            "SELECT * FROM taé",
+        ] {
+            let v = violation(sql).unwrap_or_else(|| panic!("{sql:?}"));
+            assert_eq!(v.reason, Unparsed, "{sql:?}");
+        }
+        // Bracketed and quoted names, strings and CRLF line ends stay fine.
+        for sql in [
+            "SELECT [taé], \"ñ\", 'é\u{a0}' FROM [ü]",
+            "SELECT 1 -- c\r\nFROM t",
+        ] {
+            check(sql, None);
         }
     }
 
