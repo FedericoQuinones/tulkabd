@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
-use tulka_app::tulka_store::{MetaCache, RunLogOutcome};
+use tulka_app::tulka_store::{
+    MetaCache, NewRun, RunLogOutcome, RunLogStore, RunSource, SharedRunLog,
+};
 use tulka_app::*;
 use tulka_core::guard::GuardFinding;
 use tulka_core::{
@@ -278,4 +280,65 @@ async fn list_run_log_caps_the_limit() {
     let f = fixture(GuardLevel::Off).await;
     run(&f, "rows3").await;
     assert_eq!(list_run_log(&f.state, None, u32::MAX).await.len(), 1);
+}
+
+fn new_run(sql: &str, source: RunSource) -> NewRun {
+    NewRun {
+        at_ms: 1,
+        connection_id: "c1".into(),
+        connection_name: "Prod".into(),
+        color: "#123456".into(),
+        database: "master".into(),
+        sql: sql.into(),
+        outcome: RunLogOutcome::Ok,
+        rows: Some(1),
+        elapsed_ms: Some(1),
+        source,
+        client: (source == RunSource::Ai).then(|| "claude".to_string()),
+    }
+}
+
+/// A state over a run log file, plus a second handle on the same file like
+/// the MCP process has.
+fn shared_fixture() -> (AppState, SharedRunLog, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runlog.db");
+    let state = AppState::new(
+        ConfigStore::at(dir.path().join("config.json")),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakeDriver)],
+    )
+    .unwrap()
+    .with_runlog(Arc::new(RunLogStore::open(&path)));
+    (state, SharedRunLog::open(&path), dir)
+}
+
+#[tokio::test]
+async fn poll_ai_runs_skips_history_then_returns_new_ai_entries() {
+    let (state, shared, _dir) = shared_fixture();
+    shared.insert(&new_run("old", RunSource::Ai)).unwrap();
+    assert!(poll_ai_runs(&state).await.is_empty());
+    assert!(poll_ai_runs(&state).await.is_empty());
+    shared.insert(&new_run("a", RunSource::Ai)).unwrap();
+    shared.insert(&new_run("b", RunSource::Ai)).unwrap();
+    let got = poll_ai_runs(&state).await;
+    assert_eq!(
+        got.iter().map(|e| e.sql.as_str()).collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert_eq!(got[0].client.as_deref(), Some("claude"));
+    assert!(poll_ai_runs(&state).await.is_empty());
+}
+
+#[tokio::test]
+async fn poll_ai_runs_ignores_app_entries() {
+    let (state, shared, _dir) = shared_fixture();
+    assert!(poll_ai_runs(&state).await.is_empty());
+    shared.insert(&new_run("mine", RunSource::App)).unwrap();
+    shared.insert(&new_run("theirs", RunSource::Ai)).unwrap();
+    shared.insert(&new_run("mine2", RunSource::App)).unwrap();
+    let got = poll_ai_runs(&state).await;
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].sql, "theirs");
+    assert!(poll_ai_runs(&state).await.is_empty());
 }

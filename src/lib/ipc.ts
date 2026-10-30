@@ -258,6 +258,10 @@ export interface RunLogEntry {
   outcome: RunLogOutcome;
   /** Rows received, else rows affected; null when neither applies. */
   rows: number | null;
+  /** Who ran it: the user in this app, or an AI assistant through the MCP server. */
+  source: "app" | "ai";
+  /** Name of the AI client, when `source` is "ai". */
+  client: string | null;
   /** Null for a blocked statement and for a cancelled confirmation. */
   elapsedMs: number | null;
 }

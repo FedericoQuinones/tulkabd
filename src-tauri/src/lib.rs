@@ -7,7 +7,7 @@ use commands::{
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tauri::{DragDropEvent, Emitter, Manager, RunEvent, WindowEvent};
-use tulka_app::AppState;
+use tulka_app::{AppEvents, AppState};
 
 static STARTED: OnceLock<Instant> = OnceLock::new();
 
@@ -154,6 +154,22 @@ pub fn run() {
                         tulka_app::prune_run_log(&handle.state::<AppState>()).await;
                     });
                     std::thread::sleep(std::time::Duration::from_secs(60 * 60));
+                }
+            });
+            // Queries run by AI assistants are written to the shared run log by
+            // another process: look for new ones now and every 2 seconds, on
+            // this thread so nothing waits for it.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let events = events::TauriEvents(handle.clone());
+                loop {
+                    let entries = tauri::async_runtime::block_on(tulka_app::poll_ai_runs(
+                        &handle.state::<AppState>(),
+                    ));
+                    for entry in entries {
+                        events.emit(tulka_app::AppEvent::RunLogged { entry });
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(2));
                 }
             });
             Ok(())
