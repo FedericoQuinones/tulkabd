@@ -170,6 +170,8 @@ export class PaneState {
     const token = ++this.runId;
     this.status = "connecting";
     try {
+      // The confirmation belongs to the session being replaced: record it before that goes.
+      await this.discardGuard();
       if (this.hasSession) {
         this.hasSession = false;
         await ipc.closeSession(this.tabId).catch(() => {});
@@ -249,10 +251,15 @@ export class PaneState {
 
   /** Drops the held script and records that the user backed out. */
   cancelGuard(): void {
+    void this.discardGuard();
+  }
+
+  /** Like `cancelGuard`, resolving once the entry is written (or could not be). */
+  discardGuard(): Promise<void> {
     const prompt = this.guardPrompt;
-    if (!prompt) return;
+    if (!prompt) return Promise.resolve();
     this.guardPrompt = null;
-    void ipc.logCancelledRun(this.tabId, prompt.sql).catch(() => {});
+    return ipc.logCancelledRun(this.tabId, prompt.sql).catch(() => {});
   }
 
   /** Puts back the guard level that "don't ask again" replaced. */
