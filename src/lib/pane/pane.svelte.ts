@@ -126,7 +126,11 @@ export class PaneState {
    */
   async close(): Promise<void> {
     this.runId++;
+    // A confirmation that is still open is discarded with the tab: record it like Cancel does,
+    // while the session the log entry is read from still exists.
+    const held = this.guardPrompt;
     this.clearGuard();
+    if (held) await ipc.logCancelledRun(this.tabId, held.sql).catch(() => {});
     if (!this.hasSession && this.status !== "connecting") return;
     this.hasSession = false;
     await ipc.closeSession(this.tabId).catch(() => {});

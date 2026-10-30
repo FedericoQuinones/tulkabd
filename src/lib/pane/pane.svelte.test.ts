@@ -265,6 +265,7 @@ test("the editor is focused as soon as the dialog closes, before the query ends"
 });
 
 test("unbind and close drop the guard prompt, the blocked list and the toast", async () => {
+  vi.mocked(ipc.logCancelledRun).mockResolvedValue();
   for (const drop of [() => pane.unbind(), () => pane.close()]) {
     pane.guardPrompt = { sql: "x", lineOffset: 0, findings: [] };
     pane.blocked = [];
@@ -300,4 +301,22 @@ test("a write in flight does not change the limit of a new run", async () => {
   expect(pane.runMaxRows).toBe(1_000);
   r.d.resolve(ok);
   await r.done;
+});
+
+test("closing the pane with the guard dialog open logs a cancelled run before the session goes", async () => {
+  vi.mocked(ipc.logCancelledRun).mockResolvedValue();
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(needs);
+  await pane.run("DELETE FROM dbo.T", 0);
+  await pane.close();
+  expect(ipc.logCancelledRun).toHaveBeenCalledWith("t1", "DELETE FROM dbo.T");
+  expect(pane.guardPrompt).toBeNull();
+  expect(vi.mocked(ipc.logCancelledRun).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(ipc.closeSession).mock.invocationCallOrder.at(-1)!);
+});
+
+test("unbinding the pane with the guard dialog open logs a cancelled run too", async () => {
+  vi.mocked(ipc.logCancelledRun).mockResolvedValue();
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(needs);
+  await pane.run("DELETE FROM dbo.T", 0);
+  pane.unbind();
+  expect(ipc.logCancelledRun).toHaveBeenCalledWith("t1", "DELETE FROM dbo.T");
 });
