@@ -67,3 +67,12 @@ describe("AI access", () => {
     expect(initialEnvState({ environment: "local", color: "#4a8ad6", guard: "off", aiAccess: "readOnly" }).aiTouched).toBe(false);
   });
 });
+
+describe("AI access of a saved connection", () => {
+  it("never moves toward readOnly by itself, but Production sets none", () => {
+    const prod = initialEnvState({ environment: "production", color: "#e5566f", guard: "confirm", aiAccess: "none" });
+    expect(applyEnvironment(prod, "staging", undefined, true).aiAccess).toBe("none");
+    const local = initialEnvState({ environment: "local", color: "#4a8ad6", guard: "off", aiAccess: "readOnly" });
+    expect(applyEnvironment(local, "production", undefined, true).aiAccess).toBe("none");
+  });
+});

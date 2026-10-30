@@ -338,7 +338,7 @@
                 role="radio"
                 aria-checked={env.environment === e.id}
                 class:on={env.environment === e.id}
-                onclick={() => (env = applyEnvironment(env, e.id, prefs.environments))}
+                onclick={() => (env = applyEnvironment(env, e.id, prefs.environments, startsEdit))}
               >
                 <span class="dot" style:background={`var(${e.token})`}></span>{t(e.label)}
               </button>

@@ -28,15 +28,31 @@ export interface EnvState {
   aiTouched: boolean;
 }
 
+/**
+ * AI access after an environment change. Production always drops to "none" (the safe
+ * direction). Otherwise a saved connection keeps what it has, so a change of environment
+ * never grants access the user did not choose; a new one follows the default until edited.
+ */
+function nextAiAccess(state: EnvState, environment: Environment, fallback: AiAccess, existing: boolean): AiAccess {
+  if (environment === "production") return "none";
+  if (existing || state.aiTouched) return state.aiAccess;
+  return fallback;
+}
+
 /** Changes the environment; color, guard and AI access follow its defaults unless edited by hand. */
-export function applyEnvironment(state: EnvState, environment: Environment, defaults?: EnvironmentDefaults): EnvState {
+export function applyEnvironment(
+  state: EnvState,
+  environment: Environment,
+  defaults?: EnvironmentDefaults,
+  existing = false,
+): EnvState {
   const def = defaults?.[environment] ?? ENVIRONMENTS.find((e) => e.id === environment)!;
   return {
     ...state,
     environment,
     color: state.colorTouched ? state.color : def.color,
     guard: state.guardTouched ? state.guard : def.guard,
-    aiAccess: state.aiTouched ? state.aiAccess : def.aiAccess,
+    aiAccess: nextAiAccess(state, environment, def.aiAccess, existing),
   };
 }
 
