@@ -125,14 +125,17 @@ export class PaneState {
    * flight makes the backend reject that open, so it never lands after a newer one.
    */
   async close(): Promise<void> {
-    this.runId++;
+    const token = ++this.runId;
     // A confirmation that is still open is discarded with the tab: record it like Cancel does,
     // while the session the log entry is read from still exists.
     const held = this.guardPrompt;
     this.clearGuard();
-    if (held) await ipc.logCancelledRun(this.tabId, held.sql).catch(() => {});
-    if (!this.hasSession && this.status !== "connecting") return;
+    const owned = this.hasSession || this.status === "connecting";
     this.hasSession = false;
+    if (held) await ipc.logCancelledRun(this.tabId, held.sql).catch(() => {});
+    // A newer open began while logging: it replaces this session, and a close sent now would
+    // hit the new one.
+    if (!owned || token !== this.runId) return;
     await ipc.closeSession(this.tabId).catch(() => {});
   }
 

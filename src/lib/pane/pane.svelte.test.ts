@@ -332,3 +332,17 @@ test("Run anyway after the level became Block shows the blocked state, not an er
   expect(pane.messages.filter((m) => m.kind === "error")).toEqual([]);
   expect(pane.status).toBe("idle");
 });
+
+test("a rebind while close() is still logging does not close the new session", async () => {
+  const log = deferred<void>();
+  vi.mocked(ipc.logCancelledRun).mockReturnValue(log.promise);
+  vi.mocked(ipc.runQuery).mockResolvedValueOnce(needs);
+  await pane.run("DELETE FROM dbo.T", 0);
+  vi.mocked(ipc.closeSession).mockClear();
+  pane.unbind();
+  await pane.open(conn);
+  log.resolve();
+  await new Promise((r) => setTimeout(r, 0));
+  expect(ipc.closeSession).not.toHaveBeenCalled();
+  expect(pane.session).not.toBeNull();
+});
