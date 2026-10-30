@@ -3,6 +3,7 @@
 mod batches;
 mod convert;
 pub mod guard;
+mod lexer;
 mod meta;
 mod session;
 
