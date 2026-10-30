@@ -6,6 +6,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::guard::GuardFinding;
 use crate::meta::{DatabaseSnapshot, TableStructure};
+use crate::readonly::{ReadOnlyReason, ReadOnlyViolation};
 use crate::{DriverError, Value};
 
 /// Application name reported to the server at login.
@@ -188,5 +189,16 @@ pub trait Driver: Send + Sync {
     /// A driver without an analyzer finds nothing.
     fn guard_findings(&self, _sql: &str) -> Vec<GuardFinding> {
         Vec::new()
+    }
+
+    /// Tells why `sql` is not a plain read-only query, or `None` when it is.
+    /// A driver without a classifier refuses everything, so nothing it runs
+    /// is ever considered safe.
+    fn read_only_violation(&self, _sql: &str) -> Option<ReadOnlyViolation> {
+        Some(ReadOnlyViolation {
+            reason: ReadOnlyReason::Unsupported,
+            word: None,
+            line: 0,
+        })
     }
 }

@@ -5,10 +5,11 @@ mod convert;
 pub mod guard;
 mod lexer;
 mod meta;
+pub mod readonly;
 mod session;
 
 use async_trait::async_trait;
-use tulka_core::{ConnectParams, Driver, DriverError, GuardFinding, Session};
+use tulka_core::{ConnectParams, Driver, DriverError, GuardFinding, ReadOnlyViolation, Session};
 
 pub use batches::{split_batches, Batch};
 
@@ -27,5 +28,9 @@ impl Driver for MssqlDriver {
 
     fn guard_findings(&self, sql: &str) -> Vec<GuardFinding> {
         guard::findings(sql)
+    }
+
+    fn read_only_violation(&self, sql: &str) -> Option<ReadOnlyViolation> {
+        readonly::violation(sql)
     }
 }

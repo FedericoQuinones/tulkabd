@@ -10,6 +10,7 @@ pub mod export;
 pub mod guard;
 pub mod locale;
 pub mod meta;
+pub mod readonly;
 pub mod secrets;
 pub mod value;
 
@@ -33,6 +34,7 @@ pub use meta::{
     qualified, quote_ident, ColumnInfo, DatabaseSnapshot, DbObject, ForeignKey, IndexInfo,
     ObjectKind, TableStructure,
 };
+pub use readonly::{ReadOnlyReason, ReadOnlyViolation};
 pub use secrets::{KeyringStore, MemoryStore, SecretError, SecretStore, UnavailableStore};
 pub use value::Value;
 
