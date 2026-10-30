@@ -2205,6 +2205,8 @@ async fn pruning_uses_the_run_log_days_preference() {
                 outcome: RunLogOutcome::Ok,
                 rows: None,
                 elapsed_ms: None,
+                source: tulka_app::tulka_store::RunSource::App,
+                client: None,
             })
             .unwrap();
     }
@@ -2240,6 +2242,8 @@ async fn running_a_query_does_not_prune_the_run_log() {
             outcome: RunLogOutcome::Ok,
             rows: None,
             elapsed_ms: None,
+            source: tulka_app::tulka_store::RunSource::App,
+            client: None,
         })
         .unwrap();
     with_prefs(&state, |p| p.run_log_days = 30).await;
