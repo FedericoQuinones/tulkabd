@@ -779,7 +779,8 @@ fn contains_ignoring_case(haystack: &str, needle_lower: &str) -> bool {
     }
 }
 
-/// The `Equals` filter: the cell's text is exactly `text`.
+/// The `Equals` filter: the cell's text is exactly `text`, ignoring case
+/// (SQL Server's default collation does; `0xab` finds `0xAB`).
 /// Besides the full value, a long text or binary cell also matches the
 /// shortened form the grid shows (see [`display_cell`]): its first
 /// [`DISPLAY_TEXT_CHARS`] characters, or `0x` and its first [`DISPLAY_BYTES`]
@@ -788,20 +789,33 @@ fn cell_equals(value: &Value, text: &str) -> bool {
     let Some(plain) = plain_text(value) else {
         return false;
     };
-    if plain == text {
+    if equals_ignoring_case(&plain, text) {
         return true;
     }
     match value {
-        Value::Int(_) | Value::Float(_) | Value::Decimal(_) => group_digits(&plain) == text,
+        Value::Int(_) | Value::Float(_) | Value::Decimal(_) => {
+            equals_ignoring_case(&group_digits(&plain), text)
+        }
         Value::Text(full) => text.strip_suffix('…').is_some_and(|shown| {
             full.char_indices()
                 .nth(DISPLAY_TEXT_CHARS)
-                .is_some_and(|(end, _)| &full[..end] == shown)
+                .is_some_and(|(end, _)| equals_ignoring_case(&full[..end], shown))
         }),
         Value::Bytes(bytes) => text.strip_suffix('…').is_some_and(|shown| {
-            bytes.len() > DISPLAY_BYTES && hex(&bytes[..DISPLAY_BYTES], true) == shown
+            bytes.len() > DISPLAY_BYTES
+                && equals_ignoring_case(&hex(&bytes[..DISPLAY_BYTES], true), shown)
         }),
         _ => false,
+    }
+}
+
+fn equals_ignoring_case(a: &str, b: &str) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a.chars()
+            .flat_map(char::to_lowercase)
+            .eq(b.chars().flat_map(char::to_lowercase))
     }
 }
 
@@ -1062,6 +1076,16 @@ mod tests {
         ] {
             assert_eq!(js_number_text(f), want);
         }
+    }
+
+    #[test]
+    fn equals_ignores_case_for_text_binary_and_guids() {
+        assert!(cell_equals(&Value::Text("Hello".into()), "hELLO"));
+        assert!(cell_equals(&Value::Text("Ávila".into()), "ÁVILA"));
+        assert!(!cell_equals(&Value::Text("Hello".into()), "Hell"));
+        assert!(cell_equals(&Value::Bytes(vec![0xAB, 0x01]), "0xab01"));
+        let guid = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
+        assert!(cell_equals(&Value::Uuid(guid.into()), &guid.to_lowercase()));
     }
 
     #[test]
@@ -1380,7 +1404,7 @@ mod tests {
             ..ViewSpec::default()
         });
         assert_eq!(first_cells(&b), vec![Value::Int(3)]);
-        // Equals is exact text; numbers also match their grouped form.
+        // Equals is exact text ignoring case; numbers also match their grouped form.
         let mut b = buffer_of(vec![
             vec![text("X")],
             vec![dec("1234.50")],
@@ -1394,6 +1418,8 @@ mod tests {
             ..ViewSpec::default()
         };
         b.set_view(&equals("x"));
+        assert_eq!(b.visible_len(), 1);
+        b.set_view(&equals("xx"));
         assert_eq!(b.visible_len(), 0);
         b.set_view(&equals("1,234.50"));
         assert_eq!(first_cells(&b), vec![dec("1234.50")]);
