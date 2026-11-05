@@ -162,5 +162,104 @@ test("after Don't save an open transaction is still asked about", async () => {
   expect(tabs.list.some((x) => x.id === id)).toBe(false);
 });
 
-void SAVE_TIMEOUT_MS;
-void closeRequested;
+
+async function armWindowClose(save: (json: string) => Promise<void> = async () => {}) {
+  tabs.startAutosave(save);
+  await flush();
+  expect(closeRequested).not.toBeNull();
+}
+
+const fileSpec = { path: "/a/b.sql", name: "b.sql", encoding: "utf8" as const, lineEnding: "lf" as const };
+
+test("with the last session off, closing the window asks about unsaved tabs", async () => {
+  prefs.value = { ...DEFAULT_PREFERENCES, restoreSession: false };
+  const a = edited("SELECT 1");
+  edited("", { kind: "query" });
+  await armWindowClose();
+  const preventDefault = vi.fn();
+  await closeRequested!({ preventDefault });
+  expect(preventDefault).toHaveBeenCalled();
+  expect(tabs.unsavedPrompt?.scope).toBe("window");
+  expect(tabs.unsavedPrompt?.tabs.map((x) => x.tabId)).toEqual([a]);
+  expect(destroy).not.toHaveBeenCalled();
+});
+
+test("Discard all closes the window", async () => {
+  prefs.value = { ...DEFAULT_PREFERENCES, restoreSession: false };
+  edited("SELECT 1");
+  await armWindowClose();
+  await closeRequested!({ preventDefault: vi.fn() });
+  await tabs.answerUnsaved(false);
+  expect(destroy).toHaveBeenCalledTimes(1);
+});
+
+test("Save all writes the tabs that have a place and closes the window", async () => {
+  prefs.value = { ...DEFAULT_PREFERENCES, restoreSession: false };
+  edited("SELECT 2", { kind: "query", sql: "SELECT 1", file: fileSpec });
+  edited("SELECT 4", { kind: "query", sql: "SELECT 3", savedQuery: { database: "Sales", name: "Q" } });
+  await armWindowClose();
+  await closeRequested!({ preventDefault: vi.fn() });
+  await tabs.answerUnsaved(true);
+  expect(ipc.writeSqlFile).toHaveBeenCalledTimes(1);
+  expect(ipc.saveQuery).toHaveBeenCalledTimes(1);
+  expect(destroy).toHaveBeenCalledTimes(1);
+});
+
+test("Save all with an untitled tab keeps the window open and says why", async () => {
+  prefs.value = { ...DEFAULT_PREFERENCES, restoreSession: false };
+  edited("SELECT 2", { kind: "query", sql: "SELECT 1", file: fileSpec });
+  const untitled = edited("SELECT 9");
+  await armWindowClose();
+  await closeRequested!({ preventDefault: vi.fn() });
+  await tabs.answerUnsaved(true);
+  expect(destroy).not.toHaveBeenCalled();
+  expect(tabs.unsavedPrompt?.error).toContain("1");
+  expect(tabs.unsavedPrompt?.tabs.map((x) => x.tabId)).toEqual([untitled]);
+});
+
+test("Cancel keeps the window open", async () => {
+  prefs.value = { ...DEFAULT_PREFERENCES, restoreSession: false };
+  edited("SELECT 1");
+  await armWindowClose();
+  await closeRequested!({ preventDefault: vi.fn() });
+  tabs.cancelUnsaved();
+  expect(tabs.unsavedPrompt).toBeNull();
+  expect(destroy).not.toHaveBeenCalled();
+});
+
+test("with the last session on and saved, the window closes without asking", async () => {
+  edited("SELECT 1");
+  await armWindowClose();
+  const preventDefault = vi.fn();
+  await closeRequested!({ preventDefault });
+  expect(preventDefault).not.toHaveBeenCalled();
+  expect(tabs.unsavedPrompt).toBeNull();
+});
+
+test("with the last session on, a failed session save makes the window ask", async () => {
+  edited("SELECT 1");
+  await armWindowClose(async () => {
+    throw new Error("disk");
+  });
+  const preventDefault = vi.fn();
+  await closeRequested!({ preventDefault });
+  expect(preventDefault).toHaveBeenCalled();
+  expect(tabs.unsavedPrompt?.scope).toBe("window");
+});
+
+test("a session save that hits the timeout makes the window ask", async () => {
+  vi.useFakeTimers();
+  try {
+    edited("SELECT 1");
+    tabs.startAutosave(() => new Promise(() => {}));
+    await vi.advanceTimersByTimeAsync(0);
+    const preventDefault = vi.fn();
+    const closing = closeRequested!({ preventDefault });
+    await vi.advanceTimersByTimeAsync(SAVE_TIMEOUT_MS + 10);
+    await closing;
+    expect(preventDefault).toHaveBeenCalled();
+    expect(tabs.unsavedPrompt?.scope).toBe("window");
+  } finally {
+    vi.useRealTimers();
+  }
+});

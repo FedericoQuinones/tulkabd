@@ -7,6 +7,7 @@ import { ENVIRONMENTS } from "../connections/env";
 import { PaneState } from "../pane/pane.svelte";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { groups, removeGroup, split, type Layout } from "../workspace/layout";
+import { prefs } from "../settings/prefs.svelte";
 import { snapshot, watchSession } from "../workspace/session";
 import { checkFrom, closePlan, errorText, type CloseCheck } from "./closeFlow";
 
@@ -186,6 +187,8 @@ export class TabsStore {
 
   /** Grows whenever a tab is added or brought forward, so the shell can leave a screen covering the tabs. */
   shown = $state(0);
+  /** The last session save failed or ran out of time: closing the window may lose unsaved text. */
+  private sessionSaveFailed = false;
   private counter = 0;
   private pending = new Map<string, Pending>();
   private saveNotices = new WeakMap<PaneState, string>();
@@ -450,6 +453,7 @@ export class TabsStore {
   async answerUnsaved(save: boolean): Promise<void> {
     const prompt = this.unsavedPrompt;
     if (!prompt || prompt.busy) return;
+    if (prompt.scope === "window") return this.answerUnsavedWindow(prompt, save);
     const id = prompt.tabs[0].tabId;
     const tab = this.list.find((x) => x.id === id);
     if (!tab || !save) {
@@ -472,6 +476,36 @@ export class TabsStore {
     } else {
       this.unsavedPrompt = { ...prompt, busy: false, error: t("unsaved.failed", { title: tab.title }) };
     }
+  }
+
+  /**
+   * The window is closing with unsaved tabs. Save all writes the ones that have a saved query or a
+   * file; one with neither needs a name, so it stays and the prompt says so. Whatever fails stops
+   * there and the window stays open.
+   */
+  private async answerUnsavedWindow(prompt: UnsavedPrompt, save: boolean): Promise<void> {
+    if (save) {
+      this.unsavedPrompt = { ...prompt, busy: true, error: null };
+      let nameless = 0;
+      let failed: string | null = null;
+      for (const { tabId } of prompt.tabs) {
+        const tab = this.list.find((x) => x.id === tabId);
+        if (!tab || !this.isDirty(tab)) continue;
+        if (!tab.savedQuery && !tab.file) nameless++;
+        else if (!(await this.saveTab(tab)) || tab.dirty) failed ??= t("unsaved.failed", { title: tab.title });
+      }
+      if (this.unsavedPrompt?.scope !== "window") return;
+      const left = this.list.filter((x) => this.isDirty(x));
+      if (failed || nameless > 0) {
+        const error = failed ?? t("unsaved.needsName", { count: nameless });
+        this.unsavedPrompt = { ...prompt, tabs: left.map((x) => ({ tabId: x.id, title: x.title })), busy: false, error };
+        return;
+      }
+    }
+    this.unsavedPrompt = null;
+    let kept = false;
+    await this.confirmTransactions({ preventDefault: () => (kept = true) });
+    if (!kept) await getCurrentWindow().destroy();
   }
 
   /** Keeps the tab (or the window) open with its unsaved changes. */
@@ -520,13 +554,37 @@ export class TabsStore {
     clearTimeout(timer);
   }
 
-  /** The window is being closed: ask once for every tab that holds, or may hold, a transaction. */
+  /**
+   * Tabs the window close would lose: with "open with the last session" off, every unsaved tab;
+   * with it on, only when the last session save did not land.
+   */
+  private unsavedForWindow(): Tab[] {
+    if (prefs.value.restoreSession && !this.sessionSaveFailed) return [];
+    return this.list.filter((x) => this.isDirty(x));
+  }
+
+  /** The window is being closed: ask about unsaved tabs, then once for every tab that holds, or may hold, a transaction. */
   private async confirmWindowClose(event: { preventDefault: () => void }): Promise<void> {
-    if (this.closePrompt) {
+    if (this.closePrompt || this.unsavedPrompt) {
       // Answering an earlier prompt: the window stays until that is done.
       event.preventDefault();
       return;
     }
+    const dirty = this.unsavedForWindow();
+    if (dirty.length > 0) {
+      event.preventDefault();
+      this.unsavedPrompt = {
+        scope: "window",
+        tabs: dirty.map((x) => ({ tabId: x.id, title: x.title })),
+        busy: false,
+        error: null,
+      };
+      return;
+    }
+    await this.confirmTransactions(event);
+  }
+
+  private async confirmTransactions(event: { preventDefault: () => void }): Promise<void> {
     const checks = await Promise.all(this.list.map((x) => this.checkTab(x)));
     const plan = closePlan(checks);
     if (!plan.ask) {
@@ -1082,14 +1140,27 @@ export class TabsStore {
     let maxTimer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
     let unlisten: (() => void) | null = null;
-    const write = (json: string): Promise<void> => {
+    const write = async (json: string): Promise<void> => {
       let saving: Promise<unknown>;
       try {
-        saving = save(json);
+        saving = Promise.resolve(save(json));
       } catch {
-        return Promise.resolve();
+        this.sessionSaveFailed = true;
+        return;
       }
-      return settleWithin(saving, SAVE_TIMEOUT_MS);
+      let settled = false;
+      const tracked = saving.then(
+        () => {
+          settled = true;
+          this.sessionSaveFailed = false;
+        },
+        () => {
+          settled = true;
+          this.sessionSaveFailed = true;
+        },
+      );
+      await settleWithin(tracked, SAVE_TIMEOUT_MS);
+      if (!settled) this.sessionSaveFailed = true;
     };
     // Saves run one after another, so an older one never lands after a newer one.
     let queue: Promise<void> | null = null;
@@ -1102,6 +1173,7 @@ export class TabsStore {
       try {
         json = JSON.stringify(snapshot(this));
       } catch {
+        this.sessionSaveFailed = true;
         return queue ?? Promise.resolve();
       }
       const next: Promise<void> = queue ? queue.then(() => write(json)) : write(json);
