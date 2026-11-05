@@ -114,14 +114,88 @@ function tokenize(sql: string): Tok[] {
   return out;
 }
 
-/** Tokens of the statement around `cursor`: statements end at `;` or a `GO` line. */
+// ---- batches ----------------------------------------------------------------
+
+/** Lexical state at the start of a line, as in `split_batches` (Rust). */
+type LineState = "normal" | "string" | "bracket" | "quoted" | number;
+
+/** The state at the end of `line`; a number is the depth of nested block comments. */
+function scanLine(line: string, state: LineState): LineState {
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (typeof state === "number") {
+      if (c === "*" && line[i + 1] === "/") {
+        i++;
+        state = state === 1 ? "normal" : state - 1;
+      } else if (c === "/" && line[i + 1] === "*") {
+        i++;
+        state++;
+      }
+    } else if (state === "normal") {
+      if (c === "'") state = "string";
+      else if (c === "[") state = "bracket";
+      else if (c === '"') state = "quoted";
+      else if (c === "/" && line[i + 1] === "*") {
+        i++;
+        state = 1;
+      } else if (c === "-" && line[i + 1] === "-") return "normal";
+    } else if ((state === "string" && c === "'") || (state === "bracket" && c === "]") || (state === "quoted" && c === '"')) {
+      state = "normal";
+    }
+  }
+  return state;
+}
+
+/** `GO` alone on a line: any case, blanks around, an optional trailing `--` comment; `GO 5` is not one. */
+function isGoLine(line: string): boolean {
+  const t = line.trim();
+  if (t.slice(0, 2).toUpperCase() !== "GO") return false;
+  const rest = t.slice(2);
+  return rest === "" || rest.startsWith("--") || (/^\s/.test(rest) && rest.trimStart().startsWith("--"));
+}
+
+const SPECIAL = /['"[/*-]/;
+
+/**
+ * The `[start, end)` text range of the batch around `cursor`: batches are separated by `GO` lines, which
+ * belong to none (a cursor on one gets only that line). Only this range needs tokenizing.
+ */
+export function batchRange(sql: string, cursor: number): [number, number] {
+  let start = 0;
+  let state: LineState = "normal";
+  let at = 0;
+  while (at <= sql.length) {
+    const nl = sql.indexOf("\n", at);
+    const lineEnd = nl < 0 ? sql.length : nl;
+    const line = sql.slice(at, lineEnd);
+    if (state === "normal" && isGoLine(line)) {
+      // A cursor on the GO line gets just that line, so a `--` comment after GO is still seen.
+      if (at <= cursor && cursor <= lineEnd) return [at, lineEnd];
+      // The batch ends where this line starts (keeping the newline before it out of the batch).
+      if (at > cursor) return [start, Math.max(start, at - 1)];
+      start = lineEnd + 1;
+    } else if (state !== "normal" || SPECIAL.test(line)) state = scanLine(line, state);
+    if (nl < 0) break;
+    at = nl + 1;
+  }
+  return [Math.min(start, sql.length), sql.length];
+}
+
+/** Tokens of the batch around `cursor`, with offsets into `sql`. */
+function tokensAround(sql: string, cursor: number): Tok[] {
+  const [from, to] = batchRange(sql, cursor);
+  const toks = tokenize(sql.slice(from, to));
+  if (from > 0) for (const t of toks) (t.from += from), (t.to += from);
+  return toks;
+}
+
+/** Tokens of the statement around `cursor` in `toks`, which are of one batch: statements end at `;`. */
 function statementAt(toks: Tok[], cursor: number): Tok[] {
   let start = 0;
   let end = toks.length;
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i];
-    const sep = t.kind === "semi" || (t.kind === "word" && t.value.toUpperCase() === "GO");
-    if (!sep) continue;
+    if (t.kind !== "semi") continue;
     if (t.to <= cursor) start = i + 1;
     else {
       end = i;
@@ -150,8 +224,13 @@ function resolveSchema(name: string, meta?: CompletionMetadata): string {
  * else `dbo`. When an alias repeats, the one nearest the cursor wins.
  */
 export function aliasMap(sql: string, cursor: number, meta?: CompletionMetadata): Record<string, string> {
+  return aliasesIn(tokensAround(sql, cursor), cursor, meta);
+}
+
+/** `aliasMap` over the tokens of the batch around `cursor`. */
+function aliasesIn(batch: Tok[], cursor: number, meta?: CompletionMetadata): Record<string, string> {
   const toks = statementAt(
-    tokenize(sql).filter((t) => t.kind !== "skip"),
+    batch.filter((t) => t.kind !== "skip"),
     cursor,
   );
   const found = new Map<string, { alias: string; target: string; dist: number }>();
@@ -220,9 +299,11 @@ export function completionSource(meta: CompletionMetadata): CompletionSource {
   const relations = meta.objects.filter((o) => o.kind !== "procedure");
 
   return (ctx: CompletionContext): CompletionResult | null => {
+    // An IME is composing: the text under the cursor is not final, so nothing opens.
+    if (ctx.view?.composing || ctx.view?.compositionStarted) return null;
     const text = ctx.state.doc.toString();
     const pos = ctx.pos;
-    const toks = tokenize(text);
+    const toks = tokensAround(text, pos);
     if (toks.some((t) => t.kind === "skip" && t.from < pos && (pos < t.to || (t.open && pos === t.to)))) return null;
 
     const typed = TYPED.exec(text.slice(Math.max(0, pos - 256), pos))?.[0] ?? "";
@@ -242,7 +323,7 @@ export function completionSource(meta: CompletionMetadata): CompletionSource {
     const qual = qualifierBefore(text, from);
     if (qual.length === 1) {
       const [q] = qual;
-      const aliases = aliasMap(text, pos, meta);
+      const aliases = aliasesIn(toks, pos, meta);
       const alias = Object.keys(aliases).find((a) => a.toLowerCase() === q.toLowerCase());
       if (alias) return result(columnOptions(aliases[alias]));
       if (schemas.has(q.toLowerCase())) {
