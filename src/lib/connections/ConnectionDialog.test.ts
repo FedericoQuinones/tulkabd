@@ -453,3 +453,13 @@ test("new connection follows the environment default both ways", () => {
   flushSync();
   expect(radio("c-ai", "Read only").getAttribute("aria-checked")).toBe("true");
 });
+
+test("Test connection asks for the password when the saved one cannot be reused", async () => {
+  vi.mocked(ipc.testConnection).mockRejectedValue("password_required");
+  open({ initial: base });
+  button("Test connection").click();
+  await settle();
+  flushSync();
+  expect(document.body.textContent).toContain("Enter the password to test");
+  expect(document.body.textContent).not.toContain("password_required");
+});

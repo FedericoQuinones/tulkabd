@@ -188,7 +188,10 @@
       const info = await ipc.testConnection(build(), password || undefined);
       testResult = { ok: true, text: t("connection.test.ok", { version: info.version }) };
     } catch (e) {
-      testResult = { ok: false, text: String(e) };
+      testResult = {
+        ok: false,
+        text: String(e) === "password_required" ? t("connection.test.passwordNeeded") : String(e),
+      };
     } finally {
       busy = null;
     }

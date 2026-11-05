@@ -1,4 +1,5 @@
 import * as ipc from "../ipc";
+import { t } from "../i18n/t";
 import { forgetStructures } from "../structure/cache";
 import type { ConnectionConfig, GuardLevel, SaveConnectionResult } from "../ipc";
 
@@ -9,6 +10,9 @@ class ConnectionStore {
 
   /** Ids of the connections whose guard is off until the app closes (mirrors the backend). */
   guardOff = $state<string[]>([]);
+
+  /** Set when a saved password could not be removed from the system keychain. */
+  warning = $state<string | null>(null);
 
   /** Set when the connections file could not be read at startup. */
   startupError = $state<string | null>(null);
@@ -43,6 +47,7 @@ class ConnectionStore {
   /** Saves a connection; the password goes to the backend only and is not retained here. */
   async save(conn: ConnectionConfig, password?: string): Promise<SaveConnectionResult> {
     const result = await ipc.saveConnection(conn, password);
+    if (result.secretOrphaned) this.warning = t("connection.secretOrphaned", { id: conn.id });
     forgetStructures(conn.id);
     // Saving with another guard level ends the until-restart override, so both lists are re-read.
     await Promise.all([this.refresh(), this.loadGuardOff()]);
@@ -67,7 +72,8 @@ class ConnectionStore {
   }
 
   async remove(id: string): Promise<void> {
-    await ipc.deleteConnection(id);
+    const orphaned = await ipc.deleteConnection(id);
+    if (orphaned) this.warning = t("connection.secretOrphaned", { id });
     forgetStructures(id);
     await this.refresh();
   }

@@ -302,6 +302,10 @@ pub struct SaveConnectionResult {
     pub connection: ConnectionConfig,
     /// The password could not be stored because there is no usable keychain.
     pub keyring_unavailable: bool,
+    /// A password that no longer applies could not be removed from the
+    /// unavailable keychain (entry `tulkabd` / the connection id).
+    #[serde(default)]
+    pub secret_orphaned: bool,
 }
 
 /// Text format of `copy_results`: `"excel"` or `"ai"`.
@@ -474,10 +478,11 @@ mod tests {
         let r = SaveConnectionResult {
             connection: c.clone(),
             keyring_unavailable: true,
+            secret_orphaned: false,
         };
         assert_eq!(
             to_json(&r),
-            json!({"connection": to_json(&c), "keyringUnavailable": true})
+            json!({"connection": to_json(&c), "keyringUnavailable": true, "secretOrphaned": false})
         );
         assert_eq!(to_json(&r)["connection"]["passwordSaved"], json!(false));
     }
