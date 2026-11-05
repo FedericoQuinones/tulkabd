@@ -170,6 +170,34 @@ async fn maps_types_and_unicode() {
 }
 
 #[tokio::test]
+async fn varchar_in_oem_collations_decodes() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    // CP437 (sort id 32) and CP850 (sort id 42), also through char and text.
+    let (result, events) = collect(
+        s.as_mut(),
+        "SELECT CAST(N'x\u{e7}\u{2591}' COLLATE SQL_Latin1_General_CP437_CI_AS AS varchar(10)), \
+         CAST(N'x\u{e7}\u{2591}' COLLATE SQL_Latin1_General_CP850_CI_AS AS varchar(10)), \
+         CAST(N'\u{f8}\u{a2}' COLLATE SQL_Latin1_General_CP850_CS_AS AS char(3)), \
+         CAST(N'\u{a2}\u{a5}' COLLATE SQL_Latin1_General_CP437_BIN AS varchar(10)), \
+         CAST(CAST(N'\u{e9}' COLLATE SQL_Latin1_General_CP850_CI_AS AS varchar(5)) AS sql_variant)",
+    )
+    .await;
+    result.unwrap();
+    assert_eq!(
+        rows(&events),
+        vec![vec![
+            Value::Text("x\u{e7}\u{2591}".into()),
+            Value::Text("x\u{e7}\u{2591}".into()),
+            Value::Text("\u{f8}\u{a2} ".into()),
+            Value::Text("\u{a2}\u{a5}".into()),
+            Value::Text("\u{e9}".into()),
+        ]]
+    );
+}
+
+#[tokio::test]
 async fn maps_temporal_and_numeric_types() {
     let Some(p) = test_params() else { return };
     let mut s = connect(&p).await;

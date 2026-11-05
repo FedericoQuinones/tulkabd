@@ -273,6 +273,28 @@ but the first are lost.
 
 **Drop when** upstream yields every ERROR token from `QueryStream`.
 
+## 7. OEM code pages 437 and 850 for `char`/`varchar`/`text`
+
+**What.** Values of columns with a `SQL_*_CP437_*` (sort ids 30 to 35) or
+`SQL_*_CP850_*` (sort ids 40 to 45, 49, 55 to 61) collation are decoded with
+two static 128-entry tables (`CP437`, `CP850` in `src/tds/collation.rs`)
+through the new `Collation::decode`, instead of failing the whole result with
+"unspported encoding". Bytes below 0x80 are ASCII. Decode only: encoding
+(`Collation::encoding`, used for bulk inserts and `TEXT` parameters) still
+reports these collations as unsupported.
+
+**Why.** `encoding_rs` has neither IBM437 nor IBM850. Upstream tiberius
+(commit 30f7b363) adds them with the `oem_cp` crate; two small tables avoid a
+dependency. The tables were generated from Python's `cp437` and `cp850`
+codecs.
+
+**Files.**
+- `src/tds/collation.rs`: `Collation::decode`, the tables, unit tests.
+- `src/tds/codec/column_data/{string,text,sql_variant}.rs`: decode through
+  `Collation::decode`.
+
+**Drop when** upstream releases CP437/CP850 support.
+
 ## 4. Build plumbing
 
 - `Cargo.toml`: a `[[test]]` entry for `tests/tulka_patches.rs` (the published
