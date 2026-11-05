@@ -154,6 +154,8 @@ mod tests {
                 database: "master".into(),
                 session: None,
                 cancel: None,
+                starting: false,
+                stop_pending: false,
                 results: Vec::new(),
                 disconnected: false,
             },
