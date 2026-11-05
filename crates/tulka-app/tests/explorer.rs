@@ -1410,10 +1410,39 @@ async fn moving_an_offline_connection_forgets_its_cached_metadata() {
 }
 
 #[tokio::test]
-async fn editing_a_connected_connection_keeps_what_the_explorer_holds() {
+async fn editing_a_connected_connections_server_resets_it() {
     let f = indexed(Inner::new(&["a"])).await;
-    let mut c = conn("c1", "Main", None);
+    // A rename changes nothing about the server.
+    save(&f, conn("c1", "Renamed", None)).await;
+    assert_eq!(f.driver.open.load(Ordering::SeqCst), 1);
+    assert_eq!(explorer_databases(&f.state, "c1".into()).await.len(), 1);
+
+    let mut c = conn("c1", "Renamed", None);
     c.port = 1444;
     save(&f, c).await;
+    assert_eq!(f.driver.open.load(Ordering::SeqCst), 0);
+    assert!(explorer_databases(&f.state, "c1".into()).await.is_empty());
+    assert!(search(&f, "V_a").await.hits.is_empty());
+    assert_eq!(
+        refresh_metadata(&f.state, "c1".into(), None)
+            .await
+            .unwrap_err(),
+        NOT_CONNECTED
+    );
+    assert_eq!(
+        status_events(&f, "c1").last().unwrap(),
+        &(ConnectionStatus::Disconnected, None)
+    );
+
+    // The new server is unreachable: nothing of the old one comes back.
+    f.driver.fail_connect.store(true, Ordering::SeqCst);
+    assert!(connect_explorer(&f.state, "c1".into(), None).await.is_err());
+    assert!(explorer_databases(&f.state, "c1".into()).await.is_empty());
+    assert!(search(&f, "V_a").await.hits.is_empty());
+
+    // When it answers, the cache fills from it.
+    f.driver.fail_connect.store(false, Ordering::SeqCst);
+    connect_explorer(&f.state, "c1".into(), None).await.unwrap();
+    f.events.wait_idle("c1").await;
     assert_eq!(explorer_databases(&f.state, "c1".into()).await.len(), 1);
 }

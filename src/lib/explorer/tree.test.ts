@@ -447,6 +447,13 @@ test("changing a connection's server or deleting it drops what was read for it",
   expect(Object.keys(explorer.objects)).toEqual([other]);
   expect(explorer.state("c2").databases).toEqual([]);
 
+  // A connected one reconnects to the new server.
+  explorer.state("c2").status = "connected";
+  vi.mocked(ipc.connectExplorer).mockResolvedValue({ server: { version: "", user: "", singleDatabase: false }, databases: [] } as never);
+  await connections.save({ ...edited, port: 1444 });
+  await flush();
+  expect(ipc.connectExplorer).toHaveBeenCalledWith("c2", undefined);
+
   // Same server: nothing is dropped.
   seed();
   await connections.save({ ...local, name: "Renamed" });

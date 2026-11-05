@@ -1193,9 +1193,17 @@ pub(crate) async fn forget_cached_metadata(state: &AppState, connection_id: &str
         .await;
 }
 
-/// Whether the Explorer of `connection_id` is connected.
-pub(crate) fn explorer_connected(state: &AppState, connection_id: &str) -> bool {
-    state.explorer.conns().contains_key(connection_id)
+/// The connection now points at another server or scope: stops its Explorer
+/// (reporting "disconnected" if it was connected, so the UI connects again)
+/// and forgets everything cached for it.
+pub(crate) async fn reset_for_new_server(state: &AppState, connection_id: &str) {
+    let was_connected = state.explorer.conns().contains_key(connection_id);
+    forget_connection(state, connection_id).await;
+    if was_connected {
+        state
+            .explorer
+            .status(connection_id, ConnectionStatus::Disconnected, None);
+    }
 }
 
 #[cfg(test)]
