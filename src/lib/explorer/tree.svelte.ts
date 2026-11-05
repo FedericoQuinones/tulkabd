@@ -153,7 +153,9 @@ class ExplorerStore {
         void this.loadDatabases(e.connectionId).then(() => {
           // Done but still never indexed (and not for lack of access): the snapshot failed.
           const d = st.databases?.find((x) => x.name === e.database);
-          if (d && d.indexedAt === null && !d.noAccess && !st.failed.includes(d.name)) st.failed.push(d.name);
+          if (d && d.indexedAt === null && !d.noAccess && !st.indexing.includes(d.name) && !st.failed.includes(d.name)) {
+            st.failed.push(d.name);
+          }
         });
         this.invalidate(e.connectionId, e.database);
       }

@@ -337,6 +337,19 @@ test("a connected status that trails a user disconnect is ignored", async () => 
   expect(explorer.state("c2").status).toBe("connected");
 });
 
+test("a late done does not mark failed a database indexing again", async () => {
+  explorer.expanded.add("c2");
+  const st = explorer.state("c2");
+  st.status = "connected";
+  st.databases = [db("Ventas", { indexedAt: null })];
+  vi.mocked(ipc.explorerDatabases).mockResolvedValue([db("Ventas", { indexedAt: null })]);
+  explorer.handleEvent({ kind: "indexProgress", connectionId: "c2", database: "Ventas", done: true, noAccess: false });
+  explorer.handleEvent({ kind: "indexProgress", connectionId: "c2", database: "Ventas", done: false, noAccess: false });
+  await flush();
+  await flush();
+  expect(st.failed).toEqual([]);
+});
+
 test("progress after an error does not bring back indexing", () => {
   explorer.expanded.add("c2");
   const st = explorer.state("c2");
