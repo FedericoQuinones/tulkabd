@@ -845,9 +845,16 @@ fn cell_equals(value: &Value, text: &str) -> bool {
         return true;
     }
     match value {
-        Value::Int(_) | Value::Float(_) | Value::Decimal(_) => {
+        // `js_number_text` can differ from JavaScript in the last digit of
+        // an exact tie, so a float also matches the number the text reads as.
+        Value::Float(f) => {
             equals_ignoring_case(&group_digits(&plain), text)
+                || text
+                    .replace(',', "")
+                    .parse::<f64>()
+                    .is_ok_and(|n| n == *f && n.is_finite())
         }
+        Value::Int(_) | Value::Decimal(_) => equals_ignoring_case(&group_digits(&plain), text),
         Value::Text(full) => text.strip_suffix('…').is_some_and(|shown| {
             full.char_indices()
                 .nth(DISPLAY_TEXT_CHARS)
@@ -1145,6 +1152,12 @@ mod tests {
         assert!(cell_equals(&Value::Float(1e-7), "1e-7"));
         assert!(cell_equals(&Value::Float(1e21), "1e+21"));
         assert!(cell_equals(&Value::Float(-0.0), "0"));
+        // The grid's JS text of an exact tie differs from Rust's.
+        #[allow(clippy::excessive_precision)]
+        let tie = 199073113327400.625;
+        assert!(cell_equals(&Value::Float(tie), "199073113327400.62"));
+        assert!(cell_equals(&Value::Float(tie), "199,073,113,327,400.62"));
+        assert!(!cell_equals(&Value::Float(tie), "199073113327400.5"));
     }
 
     #[test]
