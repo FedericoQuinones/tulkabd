@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import {
   anchoredScrollTop,
   headerHeight,
+  idColumnWidth,
   isScaled,
   MAX_SPACER,
   maxRealTop,
@@ -79,4 +80,12 @@ test("revealRowTop scrolls the least needed", () => {
   expect(revealRowTop(100, 0, small)).toBe(100 * 34 + 34 - 600);
   expect(revealRowTop(2, 340, small)).toBe(68);
   expect(revealRowTop(999_999, 0, huge)).toBe(maxVirtualTop(huge));
+});
+
+test("the row-number column grows with the digits and the zoom", () => {
+  expect(idColumnWidth(999, 100)).toBe(56);
+  expect(idColumnWidth(1_000_000, 100)).toBeGreaterThanOrEqual(22 + 7 * 7.2);
+  expect(idColumnWidth(1_000_000, 200)).toBeGreaterThan(idColumnWidth(1_000_000, 100));
+  expect(idColumnWidth(100_000, 100)).toBeGreaterThan(idColumnWidth(1000, 100));
+  expect(idColumnWidth(0, 100)).toBe(56);
 });

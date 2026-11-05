@@ -18,6 +18,7 @@
   import {
     anchoredScrollTop,
     headerHeight,
+    idColumnWidth,
     isScaled,
     maxVirtualTop,
     revealRowTop,
@@ -50,7 +51,6 @@
   }
   let { tabId, resultIndex, result, final, view, ready, oncopy, scroll = 0, onscrolled }: Props = $props();
 
-  const ID_WIDTH = 56;
   const NUMERIC = new Set(["int", "bigint", "smallint", "tinyint", "decimal", "numeric", "float", "real", "money", "smallmoney"]);
   const gridId = `result-grid-${++nextGridId}`;
 
@@ -106,7 +106,8 @@
   const total = $derived((void viewVersion, v.visible ?? result.total));
   const numeric = $derived(columns.map((c) => NUMERIC.has(c.typeName.toLowerCase())));
   const colWidth = (i: number) => widths[i] ?? (numeric[i] ? 120 : 180);
-  const totalWidth = $derived(columns.reduce((sum, _, i) => sum + colWidth(i), ID_WIDTH));
+  const idWidth = $derived(idColumnWidth(total, zoom.level));
+  const totalWidth = $derived(columns.reduce((sum, _, i) => sum + colWidth(i), idWidth));
   const rowH = $derived(rowHeight(zoom.level));
   const headH = $derived(headerHeight(zoom.level));
   const bodyHeight = $derived(Math.max(viewportHeight - headH, 0));
@@ -255,7 +256,7 @@
     if (!gridEl) return;
     const next = revealRowTop(cell.row, scrollTop, geo);
     if (next !== scrollTop) setScroll(next);
-    let left = ID_WIDTH;
+    let left = idWidth;
     for (let i = 0; i < cell.col; i++) left += colWidth(i);
     const right = left + colWidth(cell.col);
     if (cell.col === 0) gridEl.scrollLeft = 0;
@@ -339,7 +340,7 @@
 >
   <div class="inner" style:width="{totalWidth}px" style:height="{headH + spacerHeight(geo)}px">
     <div class="head" style:height="{headH}px" role="row" aria-rowindex={1}>
-      <div class="id" style:width="{ID_WIDTH}px" role="columnheader" aria-colindex={1}>{t("results.rowNumber")}</div>
+      <div class="id" style:width="{idWidth}px" role="columnheader" aria-colindex={1}>{t("results.rowNumber")}</div>
       {#each columns as c, i (i)}
         {@const dir = sortDirection(i)}
         {@const filtered = spec.columns.some((f) => f.column === i)}
@@ -377,7 +378,7 @@
         <div
           class="id num"
           class:sel={selection?.kind === "all" || (selection?.kind === "rows" && isSelected(selection, i, -1))}
-          style:width="{ID_WIDTH}px"
+          style:width="{idWidth}px"
           role="rowheader"
           aria-colindex={1}
           tabindex="-1"
