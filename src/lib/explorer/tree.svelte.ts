@@ -131,6 +131,8 @@ class ExplorerStore {
         st.message = null;
         st.failed = [];
       } else if (e.status === "connected") {
+        // The user went offline after the backend checked it was still current: that connect is stale.
+        if (this.userOffline.has(e.connectionId)) return;
         st.status = "connected";
         st.message = null;
         void this.loadDatabases(e.connectionId);

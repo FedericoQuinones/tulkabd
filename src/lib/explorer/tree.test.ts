@@ -327,6 +327,16 @@ test("a database whose snapshot failed shows an error, not indexing", async () =
   expect(r?.kind === "database" && r.failed).toBe(true);
 });
 
+test("a connected status that trails a user disconnect is ignored", async () => {
+  vi.mocked(ipc.disconnectExplorer).mockResolvedValue();
+  await explorer.disconnect("c2");
+  explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "connected", message: null });
+  expect(explorer.state("c2").status).toBe("offline");
+  explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "connecting", message: null });
+  explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "connected", message: null });
+  expect(explorer.state("c2").status).toBe("connected");
+});
+
 test("progress after an error does not bring back indexing", () => {
   explorer.expanded.add("c2");
   const st = explorer.state("c2");
