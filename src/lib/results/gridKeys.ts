@@ -34,6 +34,8 @@ export function gridKey(e: KeyboardEvent, state: GridKeyState): GridKeyResult {
   if (mod && !e.shiftKey && key === "a") return { active: state.active, selection: { kind: "all" } };
   if (mod && !e.shiftKey && key === "c") return "copy";
 
+  if (!mod && !e.shiftKey && key === "Escape") return state.selection ? { active: state.active, selection: null } : null;
+
   // Ctrl only goes with Home and End: Ctrl+arrows and Ctrl+PageUp/PageDown belong to others.
   if (mod && key !== "Home" && key !== "End") return null;
   const { rows, cols } = state;

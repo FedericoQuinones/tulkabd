@@ -262,8 +262,8 @@ test("Filter by this value from the keyboard gives the focus back to the grid", 
   // The context-menu key fires `contextmenu` on the focused grid.
   grid().dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
   flushSync();
-  const item = document.querySelector<HTMLButtonElement>('[role="menuitem"]')!;
-  expect(document.activeElement).toBe(item);
+  const item = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => /filter/i.test(b.textContent ?? ""))!;
+  expect(document.activeElement).toBe(document.querySelector('[role="menuitem"]'));
   item.click();
   flushSync();
   await settle();

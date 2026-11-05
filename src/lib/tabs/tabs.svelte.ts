@@ -1,3 +1,4 @@
+import { forgetWidths } from "../results/columnWidths";
 import { t } from "../i18n/t";
 import * as ipc from "../ipc";
 import type { ConnectionConfig, FileEncoding, LineEnding, RunLogEntry } from "../ipc";
@@ -390,6 +391,7 @@ export class TabsStore {
     const [tab] = this.list.splice(i, 1);
     this.pending.delete(id);
     this.wanted.delete(id);
+    forgetWidths(id);
     this.dropRequest(id);
     if (tab.pane) tab.pane.onedit = null;
     if (g) {
