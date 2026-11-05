@@ -746,6 +746,16 @@ mod tests {
     }
 
     #[test]
+    fn denied_names_have_no_letter_pair_a_collation_expands_to() {
+        // On the server, Æ Þ ß Ĳ Œ compare equal to ae th ss ij oe.
+        for name in DENIED_NAMES.iter().chain(DENIED_HINTS) {
+            for pair in ["ae", "th", "ss", "ij", "oe"] {
+                assert!(!name.contains(pair), "{name} contains {pair}");
+            }
+        }
+    }
+
+    #[test]
     fn denied_lists_are_sorted_and_lower_case() {
         for list in [DENIED_NAMES, DENIED_HINTS] {
             assert!(list.windows(2).all(|w| w[0] < w[1]));
