@@ -119,6 +119,17 @@ test("reload drops held entries and reads the first page again when it had been 
   expect(runLog.loaded).toBe(true);
 });
 
+test("a read in flight when the log is reloaded does not write its rows", async () => {
+  let release!: (rows: RunLogEntry[]) => void;
+  vi.mocked(ipc.listRunLog).mockReturnValueOnce(new Promise((r) => (release = r)));
+  const stale = runLog.ensureLoaded();
+  vi.mocked(ipc.listRunLog).mockResolvedValue([entry(20)]);
+  await runLog.reload();
+  release([entry(2), entry(1)]);
+  await stale;
+  expect(runLog.entries.map((e) => e.id)).toEqual([20]);
+});
+
 test("reload before the log was read only clears", async () => {
   runLog.prepend(entry(3));
   vi.mocked(ipc.listRunLog).mockClear();

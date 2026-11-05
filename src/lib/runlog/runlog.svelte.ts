@@ -19,6 +19,8 @@ export class RunLogStore {
   failed = $state(false);
   private loading = false;
   private exhausted = false;
+  /** Bumped by `reset`: a read that started before it must not write its rows. */
+  private generation = 0;
 
   /**
    * Runs of today (local time) among the entries held. Before the tab has been opened that is
@@ -43,8 +45,10 @@ export class RunLogStore {
     if (this.loaded || this.loading) return;
     this.loading = true;
     this.failed = false;
+    const generation = this.generation;
     try {
       const rows = await ipc.listRunLog(null, PAGE);
+      if (generation !== this.generation) return;
       // Runs that arrived while the page was on its way are in the page too.
       const held = new Set(rows.map((e) => e.id));
       const fresh = this.entries.filter((e) => !held.has(e.id));
@@ -52,9 +56,9 @@ export class RunLogStore {
       this.exhausted = rows.length < PAGE;
       this.loaded = true;
     } catch {
-      this.failed = true;
+      if (generation === this.generation) this.failed = true;
     } finally {
-      this.loading = false;
+      if (generation === this.generation) this.loading = false;
     }
   }
 
@@ -63,28 +67,31 @@ export class RunLogStore {
     if (!this.loaded) return void (await this.ensureLoaded());
     if (this.loading || this.exhausted || this.entries.length === 0) return;
     this.loading = true;
+    const generation = this.generation;
     try {
       const before = this.entries[this.entries.length - 1].id;
       const rows = await ipc.listRunLog(before, PAGE);
+      if (generation !== this.generation) return;
       const held = new Set(this.entries.map((e) => e.id));
       this.entries.push(...rows.filter((e) => !held.has(e.id)));
       this.exhausted = rows.length < PAGE;
     } catch {
       // The next scroll to the end tries again.
     } finally {
-      this.loading = false;
+      if (generation === this.generation) this.loading = false;
     }
   }
 
   /** The ids changed (the log moved files): read the first page again if it had been read. */
   async reload(): Promise<void> {
-    const wasLoaded = this.loaded;
+    const wasLoaded = this.loaded || this.loading;
     this.reset();
     if (wasLoaded) await this.ensureLoaded();
   }
 
   /** Back to the state before the first load. */
   reset(): void {
+    this.generation++;
     this.entries = [];
     this.loaded = false;
     this.failed = false;
