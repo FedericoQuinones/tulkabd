@@ -437,7 +437,7 @@ pub async fn copy_results(
         let (text, outcome) = buffer.blocking_read().with_selection(
             &selection,
             |columns, rows| -> Result<_, String> {
-                check_copy_size(rows)?;
+                check_copy_size(rows, mode)?;
                 Ok(match mode {
                     CopyMode::Excel => {
                         // One cell copies as its bare value, to paste into
@@ -480,7 +480,7 @@ const EXCEL_MAX_ROWS: usize = 1_048_576;
 /// Rough size of the text of `rows`, before formatting it: bytes of text,
 /// two characters a byte of binary and a fixed size for the other values,
 /// plus a separator each.
-fn copy_size_estimate(rows: &[&[Value]]) -> usize {
+fn copy_size_estimate(rows: &[&[Value]], mode: CopyMode) -> usize {
     rows.iter()
         .flat_map(|row| row.iter())
         .map(|v| {
@@ -492,6 +492,8 @@ fn copy_size_estimate(rows: &[&[Value]]) -> usize {
                 | Value::DateTime(s)
                 | Value::DateTimeOffset(s)
                 | Value::Uuid(s) => s.len(),
+                // "Copy for AI" writes at most 32 bytes of binary, then `…`.
+                Value::Bytes(b) if mode == CopyMode::Ai => b.len().min(32) * 2 + 3,
                 Value::Bytes(b) => b.len() * 2 + 2,
                 Value::Null | Value::Bool(_) => 1,
                 Value::Int(_) | Value::Float(_) => 20,
@@ -501,8 +503,8 @@ fn copy_size_estimate(rows: &[&[Value]]) -> usize {
 }
 
 /// Refuses a copy whose text would pass [`MAX_COPY_BYTES`].
-fn check_copy_size(rows: &[&[Value]]) -> Result<(), String> {
-    check_copy_estimate(copy_size_estimate(rows), rows.len())
+fn check_copy_size(rows: &[&[Value]], mode: CopyMode) -> Result<(), String> {
+    check_copy_estimate(copy_size_estimate(rows, mode), rows.len())
 }
 
 fn check_copy_estimate(bytes: usize, rows: usize) -> Result<(), String> {
@@ -927,14 +929,21 @@ mod tests {
     #[test]
     fn copy_over_the_limit_is_refused_with_a_clear_message() {
         let small: Vec<Value> = vec![Value::Int(1), Value::Text("x".into())];
-        assert!(check_copy_size(&[small.as_slice()]).is_ok());
+        assert!(check_copy_size(&[small.as_slice()], CopyMode::Excel).is_ok());
 
         let big = vec![Value::Text("x".repeat(60 * 1024 * 1024))];
         let rows = [big.as_slice(), big.as_slice()];
-        let err = check_copy_size(&rows).unwrap_err();
+        let err = check_copy_size(&rows, CopyMode::Excel).unwrap_err();
         assert!(err.starts_with("Too much to copy (≈120 MB)."), "{err}");
         assert!(err.contains("Select fewer rows or narrow the query."));
         assert!(!err.contains("Excel"));
+
+        // In AI mode binary is cut to 32 bytes, so the same rows fit.
+        let blob = vec![Value::Bytes(vec![0; 60 * 1024 * 1024])];
+        let rows = [blob.as_slice()];
+        assert!(check_copy_size(&rows, CopyMode::Excel).is_err());
+        assert_eq!(copy_size_estimate(&rows, CopyMode::Ai), 1 + 32 * 2 + 3);
+        assert!(check_copy_size(&rows, CopyMode::Ai).is_ok());
 
         let err = check_copy_estimate(MAX_COPY_BYTES + 1, EXCEL_MAX_ROWS + 1).unwrap_err();
         assert!(err.contains("Excel holds at most 1048576 rows."), "{err}");
