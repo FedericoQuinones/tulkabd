@@ -149,7 +149,9 @@ export class PaneState {
       await ipc.closeSession(this.tabId);
     } catch (e) {
       console.warn("close_session failed", e);
-      this.messages.push({ kind: "error", text: t("pane.closeFailed", { error: String(e) }), line: null });
+      const msg: PaneMessage = { kind: "error", text: t("pane.closeFailed", { error: String(e) }), line: null };
+      this.closeNotice = msg;
+      this.messages.push(msg);
     }
   }
 
@@ -169,6 +171,8 @@ export class PaneState {
     this.guardToast = null;
   }
 
+  /** A failed close_session; it survives the reset of the messages by the next open and runs. */
+  private closeNotice: PaneMessage | null = null;
   private hasSession = false;
   // Run token: every run() takes a new id and open() bumps it, so a run that is still pending
   // (e.g. after a mid-run "disconnected") is stale once a reconnect starts and must not touch state.
@@ -182,6 +186,7 @@ export class PaneState {
     if (this.status === "connecting" || this.status === "running") return { kind: "busy" };
     const before = this.status;
     const token = ++this.runId;
+    this.closeNotice = null;
     this.status = "connecting";
     try {
       // The confirmation belongs to the session being replaced: record it before that goes.
@@ -200,7 +205,7 @@ export class PaneState {
       this.connectionId = conn.id;
       this.database = info.currentDatabase;
       this.results = [];
-      this.messages = [];
+      this.messages = this.closeNotice ? [this.closeNotice] : [];
       this.summary = null;
       this.guardPrompt = null;
       this.blocked = null;
@@ -299,7 +304,7 @@ export class PaneState {
     this.runCount++;
     this.runMaxRows = prefs.confirmed.maxRows;
     this.results = [];
-    this.messages = [];
+    this.messages = this.closeNotice ? [this.closeNotice] : [];
     this.summary = null;
     // `body` is a view over this pane so the pure reducer can fill it.
     const self = this;
