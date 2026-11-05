@@ -300,7 +300,6 @@ fn cap_sql(sql: &str) -> (&str, bool) {
     (&sql[..end], true)
 }
 
-/// Writes one run, cutting its text and client name to their caps.
 /// Writes `e` as it is (the id is assigned again), keeping its truncation flag.
 fn insert_entry(conn: &Connection, e: &RunLogEntry) -> rusqlite::Result<()> {
     conn.execute(
@@ -325,6 +324,7 @@ fn insert_entry(conn: &Connection, e: &RunLogEntry) -> rusqlite::Result<()> {
     .map(|_| ())
 }
 
+/// Writes one run, cutting its text and client name to their caps.
 fn insert_run(conn: &Connection, run: &NewRun) -> Result<RunLogEntry, String> {
     let (sql, sql_truncated) = cap_sql(&run.sql);
     let client: Option<String> = run
