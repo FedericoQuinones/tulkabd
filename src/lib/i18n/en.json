@@ -210,6 +210,7 @@
   "pane.guard": "Guard: {level}",
   "pane.connectionLost": "The connection was lost. Temporary tables, session variables and any open transaction are gone.",
   "pane.rowsAffected": "({count} rows affected)",
+  "pane.rowsAffectedMany": "({count} rows affected in total, {times} statements)",
   "pane.cancelled": "Query cancelled.",
   "pane.useDatabaseFailed": "Could not switch database: {error}",
   "pane.disconnected": "Disconnected",

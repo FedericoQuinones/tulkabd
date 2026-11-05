@@ -225,6 +225,12 @@ pub enum UiEvent {
     RowsAffected {
         count: u64,
     },
+    /// `times` consecutive statements affected `count` rows in total (merged
+    /// so a loop of inserts does not send one event each).
+    RowsAffectedMany {
+        count: u64,
+        times: u32,
+    },
     BatchDone {
         batch: u32,
     },
@@ -381,6 +387,10 @@ mod tests {
             (
                 UiEvent::RowsAffected { count: 3 },
                 json!({"kind": "rowsAffected", "count": 3}),
+            ),
+            (
+                UiEvent::RowsAffectedMany { count: 9, times: 3 },
+                json!({"kind": "rowsAffectedMany", "count": 9, "times": 3}),
             ),
             (
                 UiEvent::BatchDone { batch: 2 },

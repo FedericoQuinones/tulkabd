@@ -66,6 +66,7 @@ export type UiEvent =
   | { kind: "rowCount"; index: number; total: number; truncated: boolean; memoryCut: boolean }
   | { kind: "message"; messageKind: MessageKind; text: string; line: number | null }
   | { kind: "rowsAffected"; count: number }
+  | { kind: "rowsAffectedMany"; count: number; times: number }
   | { kind: "batchDone"; batch: number }
   | { kind: "disconnected"; reason: string };
 
