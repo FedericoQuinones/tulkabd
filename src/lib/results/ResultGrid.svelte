@@ -15,7 +15,19 @@
   import { gridKey, type Cell } from "./gridKeys";
   import { isSelected, type GridSelection } from "./selection";
   import { nextSort, withColumnFilter, type ResultView } from "./view";
-  import { anchoredScrollTop, headerHeight, rowHeight, visibleRange } from "./virtual";
+  import {
+    anchoredScrollTop,
+    headerHeight,
+    isScaled,
+    maxVirtualTop,
+    revealRowTop,
+    rowHeight,
+    spacerHeight,
+    toRealTop,
+    toVirtualTop,
+    visibleRange,
+    type ScrollGeometry,
+  } from "./virtual";
   import { zoom } from "../zoom.svelte";
   import { WindowCache } from "./windowCache";
 
@@ -61,6 +73,8 @@
       selection = null;
       active = null;
       scrollTop = 0;
+      realTop = 0;
+      programmatic = null;
       if (gridEl) gridEl.scrollTop = 0;
     }
     viewVersion++;
@@ -74,7 +88,12 @@
 
   let selection = $state<GridSelection | null>(null);
   let active = $state<Cell | null>(null);
+  // `scrollTop` is the position in row space (what the rows are laid out in); `realTop` is the
+  // element's own scrollTop. They are equal until the rows are taller than the capped spacer.
   let scrollTop = $state(untrack(() => scroll));
+  let realTop = $state(0);
+  /** The scrollTop last set from code: the scroll event it causes must not re-derive `scrollTop`. */
+  let programmatic: number | null = null;
   let viewportHeight = $state(0);
   let gridEl = $state<HTMLDivElement>();
   let widths = $state<number[]>([]);
@@ -91,6 +110,7 @@
   const rowH = $derived(rowHeight(zoom.level));
   const headH = $derived(headerHeight(zoom.level));
   const bodyHeight = $derived(Math.max(viewportHeight - headH, 0));
+  const geo = $derived<ScrollGeometry>({ total, rowH, bodyH: bodyHeight });
   const range = $derived(visibleRange(scrollTop, bodyHeight, rowH, total));
   const page = $derived(Math.max(1, Math.floor(bodyHeight / rowH)));
 
@@ -98,11 +118,7 @@
   $effect(() => {
     if (!gridEl) return;
     untrack(() => {
-      if (scroll > 0) {
-        gridEl!.scrollTop = scroll;
-        // The browser may clamp it (fewer rows now): the window of rows follows what it kept.
-        scrollTop = gridEl!.scrollTop;
-      }
+      if (scroll > 0) setScroll(scroll);
     });
   });
 
@@ -113,12 +129,27 @@
     const h = rowH;
     untrack(() => {
       if (h !== shownRowH && gridEl) {
-        scrollTop = anchoredScrollTop(scrollTop, shownRowH, h);
-        gridEl.scrollTop = scrollTop;
+        setScroll(anchoredScrollTop(scrollTop, shownRowH, h));
       }
       shownRowH = h;
     });
   });
+
+  /**
+   * Scrolls to the row-space position `v`. The browser may clamp it (fewer rows now): the window
+   * of rows follows what it kept.
+   */
+  function setScroll(v: number) {
+    if (!gridEl) return;
+    const g = untrack(() => geo);
+    v = Math.min(Math.max(v, 0), maxVirtualTop(g));
+    const real = toRealTop(v, g);
+    programmatic = real;
+    gridEl.scrollTop = real;
+    realTop = gridEl.scrollTop;
+    scrollTop = isScaled(g) ? v : realTop;
+  }
+
   const indexes = $derived(Array.from({ length: range.end - range.start }, (_, i) => range.start + i));
 
   export function getSelection(): GridSelection | null {
@@ -222,10 +253,8 @@
   /** Scrolls so the cell is fully in view. */
   function reveal(cell: Cell) {
     if (!gridEl) return;
-    const top = cell.row * rowH;
-    if (top < scrollTop) scrollTop = top;
-    else if (top + rowH > scrollTop + bodyHeight) scrollTop = Math.max(0, top + rowH - bodyHeight);
-    gridEl.scrollTop = scrollTop;
+    const next = revealRowTop(cell.row, scrollTop, geo);
+    if (next !== scrollTop) setScroll(next);
     let left = ID_WIDTH;
     for (let i = 0; i < cell.col; i++) left += colWidth(i);
     const right = left + colWidth(cell.col);
@@ -294,13 +323,21 @@
   bind:this={gridEl}
   bind:clientHeight={viewportHeight}
   onscroll={(e) => {
-    scrollTop = e.currentTarget.scrollTop;
+    const top = e.currentTarget.scrollTop;
+    realTop = top;
+    if (programmatic !== null && Math.abs(top - programmatic) <= 1) {
+      // Our own scroll: the exact row-space position is already in `scrollTop`.
+      if (!isScaled(geo)) scrollTop = top;
+    } else {
+      programmatic = null;
+      scrollTop = toVirtualTop(top, geo);
+    }
     onscrolled?.(scrollTop);
   }}
   {onkeydown}
   {oncontextmenu}
 >
-  <div class="inner" style:width="{totalWidth}px" style:height="{headH + total * rowH}px">
+  <div class="inner" style:width="{totalWidth}px" style:height="{headH + spacerHeight(geo)}px">
     <div class="head" style:height="{headH}px" role="row" aria-rowindex={1}>
       <div class="id" style:width="{ID_WIDTH}px" role="columnheader" aria-colindex={1}>{t("results.rowNumber")}</div>
       {#each columns as c, i (i)}
@@ -335,7 +372,7 @@
     </div>
     {#each indexes as i (i)}
       {@const row = rowAt(i)}
-      <div class="row" style:top="{headH + i * rowH}px" style:height="{rowH}px" role="row" aria-rowindex={i + 2}>
+      <div class="row" style:top="{headH + realTop + (i * rowH - scrollTop)}px" style:height="{rowH}px" role="row" aria-rowindex={i + 2}>
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <div
           class="id num"

@@ -48,3 +48,55 @@ export function windowOffsets(start: number, end: number, size = WINDOW_SIZE): n
   for (let o = Math.floor(start / size) * size; o < end; o += size) out.push(o);
   return out;
 }
+
+/** Tallest scroll spacer the grid uses, in px: browsers cap an element's height near 33.5M px. */
+export const MAX_SPACER = 10_000_000;
+
+/** Geometry of the scrolling body: rows of `rowH` px, `bodyH` px of them visible at once. */
+export interface ScrollGeometry {
+  total: number;
+  rowH: number;
+  bodyH: number;
+}
+
+/** Height of all the rows laid end to end, in px. */
+export const bodyExtent = (g: ScrollGeometry) => g.total * g.rowH;
+
+/** Height of the scroll spacer under the header: the rows' height, capped at `MAX_SPACER`. */
+export const spacerHeight = (g: ScrollGeometry) => Math.min(bodyExtent(g), MAX_SPACER);
+
+/** True when the rows are taller than the spacer, so scroll positions map to rows by a scale factor. */
+export const isScaled = (g: ScrollGeometry) => bodyExtent(g) > MAX_SPACER;
+
+/** Largest scroll position of the rows, in px of row space (not of the spacer). */
+export const maxVirtualTop = (g: ScrollGeometry) => Math.max(0, bodyExtent(g) - g.bodyH);
+
+/** Largest `scrollTop` the spacer allows. */
+export const maxRealTop = (g: ScrollGeometry) => Math.max(0, spacerHeight(g) - g.bodyH);
+
+/** The row-space position (what the rows are laid out in) at a real `scrollTop`; identical below the cap. */
+export function toVirtualTop(real: number, g: ScrollGeometry): number {
+  if (!isScaled(g)) return real;
+  const maxReal = maxRealTop(g);
+  if (maxReal <= 0) return 0;
+  return Math.min(Math.max(real, 0) / maxReal, 1) * maxVirtualTop(g);
+}
+
+/** The real `scrollTop` that shows the row-space position `virtual`; the inverse of `toVirtualTop`. */
+export function toRealTop(virtual: number, g: ScrollGeometry): number {
+  if (!isScaled(g)) return virtual;
+  const maxVirtual = maxVirtualTop(g);
+  if (maxVirtual <= 0) return 0;
+  return Math.min(Math.max(virtual, 0) / maxVirtual, 1) * maxRealTop(g);
+}
+
+/**
+ * Smallest row-space scroll position that shows the whole row `row` from `virtual`; unchanged when
+ * it is already in view.
+ */
+export function revealRowTop(row: number, virtual: number, g: ScrollGeometry): number {
+  const top = row * g.rowH;
+  if (top < virtual) return top;
+  if (top + g.rowH > virtual + g.bodyH) return Math.max(0, top + g.rowH - g.bodyH);
+  return virtual;
+}
