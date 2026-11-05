@@ -4,7 +4,7 @@
 //! The password is never part of [`ConnectionConfig`]; it lives in the OS
 //! keychain (see [`crate::secrets`]). Only the `password_saved` flag is stored.
 
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -579,7 +579,7 @@ impl ConfigStore {
         }
         // Persist the rename itself; best effort (not possible on Windows).
         #[cfg(unix)]
-        if let Ok(d) = File::open(dir) {
+        if let Ok(d) = fs::File::open(dir) {
             let _ = d.sync_all();
         }
         Ok(())
