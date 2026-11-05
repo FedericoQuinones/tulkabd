@@ -193,6 +193,37 @@ test("duplicate saved names do not break the list", () => {
   expect(rowNames()).toEqual(["Ventas"]);
 });
 
+test("names chosen but hidden by the filter are still saved", async () => {
+  vi.mocked(ipc.listServerDatabases).mockResolvedValue(["Ventas", "Stock"]);
+  vi.mocked(ipc.saveConnection).mockResolvedValue({ connection: base, keyringUnavailable: false });
+  open({ initial: base });
+  button("Load databases").click();
+  await settle();
+  flushSync();
+  type(".filter", "Stock");
+  expect(rowNames()).toEqual(["Stock"]);
+  document.querySelector("form")!.requestSubmit();
+  await settle();
+  const conn = vi.mocked(ipc.saveConnection).mock.calls[0][0];
+  expect(conn.databases).toEqual({ kind: "selected", names: ["Ventas", "Gone"] });
+});
+
+test("picking the no-folder option saves a null folder", async () => {
+  explorer.folders = [{ id: "f1", name: "Cliente A", parentId: null }];
+  vi.mocked(ipc.saveConnection).mockResolvedValue({ connection: base, keyringUnavailable: false });
+  open({ initial: { ...base, id: "new", folderId: null }, folderId: "f1" });
+  const sel = document.querySelector<HTMLSelectElement>("#c-folder")!;
+  sel.selectedIndex = 1;
+  sel.dispatchEvent(new Event("change", { bubbles: true }));
+  flushSync();
+  sel.selectedIndex = 0;
+  sel.dispatchEvent(new Event("change", { bubbles: true }));
+  flushSync();
+  document.querySelector("form")!.requestSubmit();
+  await settle();
+  expect(vi.mocked(ipc.saveConnection).mock.calls[0][0].folderId).toBeNull();
+});
+
 test("Save sends the selected scope", async () => {
   vi.mocked(ipc.saveConnection).mockResolvedValue({ connection: base, keyringUnavailable: false });
   open({ initial: base });

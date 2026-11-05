@@ -15,6 +15,11 @@ pub const MAX_ROWS: usize = tulka_core::MAX_ROWS_DEFAULT as usize;
 /// stored (text at a character boundary).
 pub const MAX_CELL_BYTES: usize = 1024 * 1024;
 
+/// Most memory the stored rows of one run (all its result sets together) may
+/// take, as estimated by [`row_bytes`]. Rows past it are drained from the
+/// server and dropped, and the result is flagged as truncated.
+pub const MAX_RUN_BYTES: usize = 256 * 1024 * 1024;
+
 /// Text cells longer than this many characters are shortened (plus `…`) in
 /// the rows sent to the grid.
 pub const DISPLAY_TEXT_CHARS: usize = 1000;
@@ -26,6 +31,66 @@ pub const DISPLAY_BYTES: usize = 32;
 /// The warning shown once per run when [`MAX_CELL_BYTES`] shortened a value.
 pub const CELLS_CAPPED_WARNING: &str = "Some values over 1 MB were shortened.";
 
+/// Memory used by the rows stored in one run, against its limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ByteBudget {
+    limit: usize,
+    used: usize,
+}
+
+impl ByteBudget {
+    pub fn new(limit: usize) -> Self {
+        Self { limit, used: 0 }
+    }
+
+    /// Whether the limit is reached; later rows of the run (in any of its
+    /// result sets) are refused.
+    pub fn exhausted(&self) -> bool {
+        self.used >= self.limit
+    }
+}
+
+impl Default for ByteBudget {
+    fn default() -> Self {
+        Self::new(MAX_RUN_BYTES)
+    }
+}
+
+/// What [`ResultBuffer::push_rows`] reports besides storing rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PushOutcome {
+    /// A text or binary cell was shortened to [`MAX_CELL_BYTES`].
+    pub capped: bool,
+    /// Rows were dropped because the run's [`ByteBudget`] ran out.
+    pub over_budget: bool,
+}
+
+/// Allocator bookkeeping assumed per heap-backed cell.
+const HEAP_OVERHEAD: usize = 16;
+
+/// Cheap estimate of the memory a stored row takes: a fixed size per cell
+/// plus the capacity of text and binary cells and [`HEAP_OVERHEAD`] each.
+pub fn row_bytes(row: &[Value]) -> usize {
+    std::mem::size_of::<Vec<Value>>()
+        + row
+            .iter()
+            .map(|v| {
+                std::mem::size_of::<Value>()
+                    + match v {
+                        Value::Decimal(s)
+                        | Value::Text(s)
+                        | Value::Date(s)
+                        | Value::Time(s)
+                        | Value::DateTime(s)
+                        | Value::DateTimeOffset(s)
+                        | Value::Uuid(s) => s.capacity() + HEAP_OVERHEAD,
+                        Value::Bytes(b) => b.capacity() + HEAP_OVERHEAD,
+                        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => 0,
+                    }
+            })
+            .sum::<usize>()
+}
+
 /// The rows of one result set, capped at `cap` rows.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResultBuffer {
@@ -34,6 +99,8 @@ pub struct ResultBuffer {
     pub cap: usize,
     /// Set when rows beyond `cap` were dropped.
     pub truncated: bool,
+    /// Set when rows were dropped because the run's memory budget ran out.
+    pub memory_cut: bool,
     /// Indexes into `rows` of the visible rows, in display order, set by
     /// [`ResultBuffer::set_view`]; `None` shows every row in arrival order.
     view: Option<Vec<u32>>,
@@ -140,6 +207,7 @@ impl ResultBuffer {
             rows: Vec::new(),
             cap,
             truncated: false,
+            memory_cut: false,
             view: None,
         }
     }
@@ -225,23 +293,36 @@ impl ResultBuffer {
         self.visible(from.min(end), end)
     }
 
-    /// Appends rows up to `cap`; any excess is dropped and flags `truncated`.
-    /// Text and binary cells of the kept rows are capped at
-    /// [`MAX_CELL_BYTES`]; returns whether any was.
-    pub fn push_rows(&mut self, mut rows: Vec<Vec<Value>>) -> bool {
+    /// Appends rows up to `cap` and while `budget` has room (the row that
+    /// crosses the limit is still kept); any excess is dropped and flags
+    /// `truncated`. Text and binary cells of the kept rows are capped at
+    /// [`MAX_CELL_BYTES`].
+    pub fn push_rows(&mut self, mut rows: Vec<Vec<Value>>, budget: &mut ByteBudget) -> PushOutcome {
         // Views are only set once a run ended, and a run gets new buffers.
         debug_assert!(self.view.is_none(), "rows pushed under a view");
+        let mut out = PushOutcome::default();
         let room = self.cap.saturating_sub(self.rows.len());
         if rows.len() > room {
             rows.truncate(room);
             self.truncated = true;
         }
-        let mut capped = false;
-        for cell in rows.iter_mut().flatten() {
-            capped |= cap_cell(cell, MAX_CELL_BYTES);
+        let mut keep = 0;
+        for row in &mut rows {
+            if budget.exhausted() {
+                out.over_budget = true;
+                self.truncated = true;
+                self.memory_cut = true;
+                break;
+            }
+            for cell in row.iter_mut() {
+                out.capped |= cap_cell(cell, MAX_CELL_BYTES);
+            }
+            budget.used = budget.used.saturating_add(row_bytes(row));
+            keep += 1;
         }
+        rows.truncate(keep);
         self.rows.append(&mut rows);
-        capped
+        out
     }
 
     /// Up to `limit` visible rows starting at visible row `offset`; empty
@@ -752,9 +833,14 @@ mod tests {
         }
     }
 
+    fn push(b: &mut ResultBuffer, rows: Vec<Vec<Value>>) -> PushOutcome {
+        b.push_rows(rows, &mut ByteBudget::default())
+    }
+
     fn grid(rows: usize, cols: usize) -> ResultBuffer {
         let mut b = ResultBuffer::new((0..cols).map(|c| col(&format!("c{c}"))).collect(), 100);
-        b.push_rows(
+        push(
+            &mut b,
             (0..rows)
                 .map(|r| (0..cols).map(|c| Value::Int((r * 10 + c) as i64)).collect())
                 .collect(),
@@ -765,8 +851,8 @@ mod tests {
     #[test]
     fn caps_rows_and_flags_truncated() {
         let mut b = ResultBuffer::new(vec![], 100_000);
-        b.push_rows(vec![vec![Value::Int(1)]; 60_000]);
-        b.push_rows(vec![vec![Value::Int(1)]; 60_000]);
+        push(&mut b, vec![vec![Value::Int(1)]; 60_000]);
+        push(&mut b, vec![vec![Value::Int(1)]; 60_000]);
         assert_eq!(b.rows.len(), 100_000);
         assert!(b.truncated);
     }
@@ -813,11 +899,11 @@ mod tests {
     #[test]
     fn exact_cap_is_not_truncated() {
         let mut b = ResultBuffer::new(vec![], 3);
-        b.push_rows(vec![vec![Value::Null]; 3]);
+        push(&mut b, vec![vec![Value::Null]; 3]);
         assert!(!b.truncated);
-        b.push_rows(vec![]);
+        push(&mut b, vec![]);
         assert!(!b.truncated);
-        b.push_rows(vec![vec![Value::Null]]);
+        push(&mut b, vec![vec![Value::Null]]);
         assert!(b.truncated);
         assert_eq!(b.rows.len(), 3);
     }
@@ -849,18 +935,65 @@ mod tests {
         assert_eq!(v, Value::Int(7));
     }
 
+    fn text_row(n: usize) -> Vec<Value> {
+        vec![Value::Text("x".repeat(n))]
+    }
+
+    #[test]
+    fn budget_stops_storing_rows_and_flags_truncated() {
+        let mut budget = ByteBudget::new(10 * 1024);
+        let mut b = ResultBuffer::new(vec![], 1000);
+        let out = b.push_rows(vec![text_row(1024); 100], &mut budget);
+        assert!(out.over_budget && b.truncated);
+        assert!(b.rows.len() < 100 && b.rows.len() >= 9);
+        assert!(budget.exhausted());
+        let kept = b.rows.len();
+        let out = b.push_rows(vec![text_row(1024)], &mut budget);
+        assert!(out.over_budget);
+        assert_eq!(b.rows.len(), kept);
+    }
+
+    #[test]
+    fn budget_is_shared_by_the_result_sets_of_a_run() {
+        let mut budget = ByteBudget::new(10 * 1024);
+        let mut a = ResultBuffer::new(vec![], 1000);
+        assert!(
+            !a.push_rows(vec![text_row(1024); 5], &mut budget)
+                .over_budget
+        );
+        let mut b = ResultBuffer::new(vec![], 1000);
+        let out = b.push_rows(vec![text_row(1024); 50], &mut budget);
+        assert!(out.over_budget && b.truncated && !a.truncated);
+        assert!(a.rows.len() + b.rows.len() < 55);
+    }
+
+    #[test]
+    fn under_budget_is_not_truncated() {
+        let mut budget = ByteBudget::new(10 * 1024);
+        let mut b = ResultBuffer::new(vec![], 1000);
+        let out = b.push_rows(vec![text_row(10); 5], &mut budget);
+        assert_eq!(out, PushOutcome::default());
+        assert!(!b.truncated && b.rows.len() == 5);
+    }
+
     #[test]
     fn push_rows_caps_large_cells_of_kept_rows_only() {
         let big = "x".repeat(MAX_CELL_BYTES + 10);
         let mut b = ResultBuffer::new(vec![], 1);
-        assert!(!b.push_rows(vec![vec![Value::Text("small".into())]]));
+        assert!(!push(&mut b, vec![vec![Value::Text("small".into())]]).capped);
         // The row beyond the cap is dropped, so nothing is reported capped.
-        assert!(!b.push_rows(vec![vec![Value::Text(big.clone())]]));
+        assert!(!push(&mut b, vec![vec![Value::Text(big.clone())]]).capped);
         let mut b = ResultBuffer::new(vec![], 10);
-        assert!(b.push_rows(vec![vec![
-            Value::Text(big),
-            Value::Bytes(vec![0; MAX_CELL_BYTES + 1]),
-        ]]));
+        assert!(
+            push(
+                &mut b,
+                vec![vec![
+                    Value::Text(big),
+                    Value::Bytes(vec![0; MAX_CELL_BYTES + 1]),
+                ]]
+            )
+            .capped
+        );
         assert_eq!(
             b.rows[0],
             vec![
@@ -913,7 +1046,7 @@ mod tests {
     fn buffer_of(rows: Vec<Vec<Value>>) -> ResultBuffer {
         let cols = rows.first().map_or(0, Vec::len);
         let mut b = ResultBuffer::new((0..cols).map(|c| col(&format!("c{c}"))).collect(), 1000);
-        b.push_rows(rows);
+        push(&mut b, rows);
         b
     }
 
@@ -1336,7 +1469,7 @@ mod tests {
                     .collect()
             })
             .collect();
-        b.push_rows(rows);
+        push(&mut b, rows);
         b
     }
 

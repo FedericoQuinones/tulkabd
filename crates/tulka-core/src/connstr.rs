@@ -31,9 +31,11 @@ pub struct ParsedConnection {
     pub connect_timeout_s: Option<u32>,
     /// Well-known settings this app does not use, by their canonical names
     /// (`Application Name`, `Pooling`, ...).
+    #[serde(default)]
     pub ignored_keys: Vec<String>,
     /// Other keys that were not understood. They are only counted: their
     /// names come from the paste and may be a piece of a password.
+    #[serde(default)]
     pub unknown_keys: u32,
 }
 
@@ -422,7 +424,12 @@ impl Builder {
                 self.out.trust_server_certificate = Some(parse_bool(&value).ok_or_else(bad)?)
             }
             Key::ConnectTimeout => {
-                self.out.connect_timeout_s = Some(value.trim().parse().map_err(|_| bad())?)
+                let v = value.trim();
+                // Digits only: `parse` would also take a leading `+`.
+                if !v.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(bad());
+                }
+                self.out.connect_timeout_s = Some(v.parse().map_err(|_| bad())?)
             }
             Key::IntegratedSecurity => {
                 if value.trim().eq_ignore_ascii_case("sspi")
@@ -534,8 +541,6 @@ impl Builder {
             let key = Key::resolve(&percent_decode(key).ok_or(ConnStrError::Unrecognized)?);
             match percent_decode(value) {
                 Some(value) => self.apply(key, value)?,
-                // A parameter this parser does not use is dropped, unnamed.
-                None if matches!(key, Key::Ignored(_) | Key::Unknown) => {}
                 None => return Err(key.bad_value()),
             }
         }
@@ -749,10 +754,23 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_uri_parameter_that_does_not_decode_is_dropped() {
-        let p = parse("sqlserver://h?mystery=%ZZ&encrypt=false");
-        assert_eq!(p.encrypt, Some(false));
+    fn a_uri_parameter_that_does_not_decode_is_an_error() {
+        assert_eq!(err("sqlserver://h?app=%ZZ"), "bad_value:Application Name");
+        assert_eq!(err("sqlserver://h?mystery=%ZZ&encrypt=false"), "unrecognized");
         assert_eq!(err("sqlserver://h?encrypt=%ZZ"), "bad_value:Encrypt");
+    }
+
+    #[test]
+    fn connect_timeout_takes_plain_digits_only() {
+        assert_eq!(err("Server=x;Connect Timeout=+30"), "bad_value:Connect Timeout");
+        assert_eq!(parse("Server=x;Connect Timeout=30").connect_timeout_s, Some(30));
+    }
+
+    #[test]
+    fn counts_default_when_missing_from_json() {
+        let p: ParsedConnection = serde_json::from_str(r#"{"server":"h"}"#).unwrap();
+        assert_eq!(p.unknown_keys, 0);
+        assert!(p.ignored_keys.is_empty());
     }
 
     #[test]

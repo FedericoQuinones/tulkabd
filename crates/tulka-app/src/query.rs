@@ -16,7 +16,10 @@ use tulka_core::{
 use tulka_store::RunLogOutcome;
 
 use crate::connections::{blocking, connect_params, resolve_password};
-use crate::results::{display_cell, ResultBuffer, Selection, ViewSpec, CELLS_CAPPED_WARNING};
+use crate::results::{
+    display_cell, ByteBudget, PushOutcome, ResultBuffer, Selection, ViewSpec, CELLS_CAPPED_WARNING,
+    MAX_RUN_BYTES,
+};
 use crate::runlog;
 use crate::state::{AppState, SharedBuffer, TabState, Tabs};
 use crate::types::{
@@ -201,6 +204,7 @@ where
         generation: checkout.generation,
         emit: &on_event,
         max_rows: prefs.max_rows as usize,
+        budget: std::sync::Mutex::new(ByteBudget::default()),
     };
     // The driver must be polled until `execute` returns, also after a
     // cancel, so all of these run to completion here. The timer ends as soon
@@ -592,6 +596,18 @@ impl Drop for Checkout<'_> {
     }
 }
 
+/// The warning shown once per run when [`MAX_RUN_BYTES`] cut a result at
+/// `rows` rows.
+fn budget_warning(index: u32, rows: usize) -> String {
+    let mb = MAX_RUN_BYTES / (1024 * 1024);
+    let n = index + 1;
+    if rows == 0 {
+        format!("Result {n} was not kept because the run exceeded the memory limit ({mb} MB); later results were not kept either. Narrow the query.")
+    } else {
+        format!("Result {n} was cut at {rows} rows because the run exceeded the memory limit ({mb} MB); later results were not kept. Narrow the query.")
+    }
+}
+
 fn new_buffer(columns: Vec<Column>, max_rows: usize) -> SharedBuffer {
     Arc::new(RwLock::new(ResultBuffer::new(columns, max_rows)))
 }
@@ -631,6 +647,8 @@ struct Forwarder<'a, F> {
     emit: &'a F,
     /// Rows kept per result; later ones are counted but dropped.
     max_rows: usize,
+    /// Memory left for the stored rows of this run, all results together.
+    budget: std::sync::Mutex<ByteBudget>,
 }
 
 impl<F: Fn(UiEvent)> Forwarder<'_, F> {
@@ -640,6 +658,7 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
         let mut tally = RunTally::default();
         // The capped-cell warning is shown once per run.
         let mut warned_capped = false;
+        let mut warned_budget = false;
         loop {
             let next = match counter.deadline() {
                 Some(deadline) => tokio::select! {
@@ -657,8 +676,19 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
                     let received = rows.len();
                     tally.saw_result = true;
                     tally.rows_received += received as u64;
-                    if let Some((total, truncated, capped)) = self.push_rows(index, rows).await {
-                        counter.rows(index, received, total, truncated, self.emit);
+                    if let Some((total, truncated, memory_cut, outcome)) =
+                        self.push_rows(index, rows).await
+                    {
+                        counter.rows(index, received, (total, truncated, memory_cut), self.emit);
+                        let capped = outcome.capped;
+                        if outcome.over_budget && !warned_budget {
+                            warned_budget = true;
+                            (self.emit)(UiEvent::Message {
+                                kind: MessageKind::Warning,
+                                text: budget_warning(index, total),
+                                line: None,
+                            });
+                        }
                         if capped && !warned_capped {
                             warned_capped = true;
                             (self.emit)(UiEvent::Message {
@@ -718,13 +748,25 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
     }
 
     /// Appends rows to result `index`; returns its row count, its truncated
-    /// flag and whether a cell of these rows was capped, or `None` if the tab
-    /// was closed or replaced.
-    async fn push_rows(&self, index: u32, rows: Vec<Vec<Value>>) -> Option<(usize, bool, bool)> {
+    /// flag and what the push did, or `None` if the tab was closed or
+    /// replaced.
+    async fn push_rows(
+        &self,
+        index: u32,
+        rows: Vec<Vec<Value>>,
+    ) -> Option<(usize, bool, bool, PushOutcome)> {
         let buffer = self.buffer(index, None)?;
         let mut buffer = buffer.write().await;
-        let capped = buffer.push_rows(rows);
-        Some((buffer.rows.len(), buffer.truncated, capped))
+        let outcome = {
+            let mut budget = self.budget.lock().unwrap_or_else(|e| e.into_inner());
+            buffer.push_rows(rows, &mut budget)
+        };
+        Some((
+            buffer.rows.len(),
+            buffer.truncated,
+            buffer.memory_cut,
+            outcome,
+        ))
     }
 }
 
@@ -734,10 +776,10 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
 #[derive(Default)]
 struct RowCounter {
     index: Option<u32>,
-    /// Last (total, truncated) sent for `index`.
-    sent: Option<(usize, bool)>,
-    /// Latest (total, truncated) not sent yet.
-    pending: Option<(usize, bool)>,
+    /// Last (total, truncated, memory cut) sent for `index`.
+    sent: Option<(usize, bool, bool)>,
+    /// Latest (total, truncated, memory cut) not sent yet.
+    pending: Option<(usize, bool, bool)>,
     rows_since: usize,
     last: Option<Instant>,
 }
@@ -755,8 +797,7 @@ impl RowCounter {
         &mut self,
         index: u32,
         received: usize,
-        total: usize,
-        truncated: bool,
+        state: (usize, bool, bool),
         emit: &impl Fn(UiEvent),
     ) {
         if self.index != Some(index) {
@@ -764,7 +805,7 @@ impl RowCounter {
             self.finish(emit);
             self.start(index);
         }
-        self.pending = Some((total, truncated));
+        self.pending = Some(state);
         self.rows_since += received;
         let due = self.last.is_none_or(|t| t.elapsed() >= ROW_COUNT_INTERVAL);
         if self.rows_since >= ROW_COUNT_ROWS || due {
@@ -792,6 +833,7 @@ impl RowCounter {
                 index,
                 total: state.0,
                 truncated: state.1,
+                memory_cut: state.2,
             });
             self.sent = Some(state);
         }
@@ -807,6 +849,7 @@ impl RowCounter {
                 index,
                 total: 0,
                 truncated: false,
+                memory_cut: false,
             });
         }
         *self = RowCounter::default();
@@ -906,5 +949,49 @@ mod tests {
         let (state, _dir) = state_with_tab(2);
         assert!(Checkout::take(&state, "t1", true, Some(2)).is_ok());
         assert!(state.tabs().open["t1"].session.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_budget_cuts_rows_and_warns_once() {
+        let (state, _dir) = state_with_tab(1);
+        let messages = std::sync::Mutex::new(Vec::new());
+        let emit = |ev: UiEvent| {
+            if let UiEvent::Message { text, .. } = ev {
+                messages.lock().unwrap().push(text);
+            }
+        };
+        let f = Forwarder {
+            state: &state,
+            tab_id: "t1",
+            generation: 1,
+            emit: &emit,
+            max_rows: 1000,
+            budget: std::sync::Mutex::new(ByteBudget::new(10 * 1024)),
+        };
+        let (tx, rx) = mpsc::channel(16);
+        let col = Column {
+            name: "c".into(),
+            type_name: "varchar".into(),
+        };
+        tx.send(ExecEvent::ResultStart {
+            index: 0,
+            columns: vec![col],
+        })
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            let rows = vec![vec![Value::Text("x".repeat(1024))]; 20];
+            tx.send(ExecEvent::Rows { index: 0, rows }).await.unwrap();
+        }
+        drop(tx);
+        let tally = f.run(rx).await;
+        // Every row was drained from the server, few were stored.
+        assert_eq!(tally.rows_received, 60);
+        let buffer = state.tabs().open["t1"].results[0].clone();
+        let b = buffer.read().await;
+        assert!(b.truncated && b.memory_cut && b.rows.len() < 20);
+        let messages = messages.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains(&format!("Result 1 was cut at {} rows", b.rows.len())));
     }
 }

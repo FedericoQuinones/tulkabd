@@ -151,6 +151,30 @@ test("a stale open never closes the session of a newer open", async () => {
   expect(pane.connectionId).toBe("c1");
 });
 
+test("a close_session failure is logged and shown in the messages", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.mocked(ipc.closeSession).mockRejectedValueOnce("backend gone");
+  await pane.close();
+  expect(warn).toHaveBeenCalled();
+  expect(pane.messages.at(-1)).toMatchObject({ kind: "error", text: expect.stringContaining("backend gone") });
+  warn.mockRestore();
+});
+
+test("a close_session failure while reconnecting survives the open and only the next run", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.mocked(ipc.closeSession).mockRejectedValueOnce("backend gone");
+  await pane.open(conn);
+  const shown = () => pane.messages.some((m) => m.kind === "error" && m.text.includes("backend gone"));
+  expect(shown()).toBe(true);
+  vi.mocked(ipc.runQuery).mockResolvedValue({ elapsedMs: 1, finishedAt: "", outcome: "ok", findings: [] });
+  await pane.run("SELECT 1", 0);
+  expect(shown()).toBe(true);
+  // Only the first run after the failure shows it.
+  await pane.run("SELECT 1", 0);
+  expect(shown()).toBe(false);
+  warn.mockRestore();
+});
+
 // Guard
 
 const finding = (line: number) => ({ kind: "deleteWithoutWhere" as const, object: "dbo.T", statement: "DELETE FROM dbo.T", line });

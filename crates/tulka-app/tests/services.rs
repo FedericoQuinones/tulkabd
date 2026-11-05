@@ -433,6 +433,7 @@ fn row_counts(events: &[UiEvent], index: u32) -> Vec<(usize, bool)> {
                 index: i,
                 total,
                 truncated,
+                ..
             } if *i == index => Some((*total, *truncated)),
             _ => None,
         })

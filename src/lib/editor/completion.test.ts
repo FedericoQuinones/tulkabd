@@ -2,7 +2,7 @@ import { expect, test, vi } from "vitest";
 import { CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
 import { EditorState } from "@codemirror/state";
 import type { CompletionMetadata } from "../ipc";
-import { aliasMap, completionSource, MetadataCache } from "./completion";
+import { aliasMap, batchRange, completionSource, MetadataCache } from "./completion";
 
 const meta: CompletionMetadata = {
   schemas: ["dbo", "ventas", "we]ird"],
@@ -69,7 +69,8 @@ test("names that need brackets are inserted quoted", async () => {
   const r = await complete("SELECT * FROM Ord|");
   expect(option(r, "Order Details")?.apply).toBe("[Order Details]");
   expect(option(r, "Order")?.apply).toBe("[Order]");
-  expect(option(r, "Pedidos")?.apply ?? "Pedidos").toBe("Pedidos");
+  expect(option(r, "Pedidos")).toMatchObject({ label: "Pedidos", type: "class", detail: "dbo" });
+  expect(option(r, "Pedidos")?.apply).toBeUndefined();
   const año = option(await complete("SELECT * FROM Ped|"), "Pedidos_Año");
   expect(año?.apply).toBe("ventas.Pedidos_Año");
   expect(option(await complete("SELECT * FROM a|"), "a]b")?.apply).toBe("[we]]ird].[a]]b]");
@@ -80,7 +81,11 @@ test("a typed [ keeps the bracketed form", async () => {
   const r = await complete("SELECT * FROM [Order D|");
   expect(r?.from).toBe("SELECT * FROM ".length);
   const o = option(r, "[Order Details]");
-  expect(o?.apply ?? o?.label).toBe("[Order Details]");
+  expect(o).toBeDefined();
+  expect(o?.apply).toBeUndefined();
+  // Bracketed form: every option is bracketed and no bare keyword is offered.
+  expect(labels(r).every((l) => l.startsWith("["))).toBe(true);
+  expect(labels(r)).toContain("[Order]");
 });
 
 test("plain words offer keywords, schemas, tables and views", async () => {
@@ -108,6 +113,47 @@ test("the metadata cache fetches once per connection and database until it is in
   cache.invalidate("c1", "Ventas");
   expect(await cache.get("c1", "Ventas")).not.toBe(a);
   expect(fetch).toHaveBeenCalledTimes(3);
+});
+
+test("GO separates batches by the same rules as the Rust split_batches", () => {
+  const at = (sql: string) => aliasMap(sql, sql.length);
+  // A GO alone on a line (any case, blanks, trailing comment) ends the batch.
+  expect(at("SELECT 1 FROM a x\nGO\nSELECT 2 FROM b y")).toEqual({ y: "dbo.b" });
+  expect(at("SELECT 1 FROM a x\n  go  \nSELECT 2 FROM b y")).toEqual({ y: "dbo.b" });
+  expect(at("SELECT 1 FROM a x\nGo -- done\nSELECT 2 FROM b y")).toEqual({ y: "dbo.b" });
+  expect(at("SELECT 1 FROM a x\nGO--done\nSELECT 2 FROM b y")).toEqual({ y: "dbo.b" });
+  // GO with a count, or with other text on its line, is not a separator.
+  expect(at("SELECT 1 FROM a x\nGO 5\nSELECT 2 FROM b y")).toEqual({ x: "dbo.a", y: "dbo.b" });
+  expect(at("SELECT 1 FROM a x GO\nSELECT 2 FROM b y")).toEqual({ x: "dbo.a", y: "dbo.b" });
+  expect(at("SELECT 1 FROM a x\nWHERE go = 1")).toEqual({ x: "dbo.a" });
+  // GO inside a string or a block comment is no separator.
+  expect(at("SELECT 'a\nGO\n' FROM a x")).toEqual({ x: "dbo.a" });
+  expect(at("/*\nGO\n*/ SELECT 1 FROM a x")).toEqual({ x: "dbo.a" });
+});
+
+test("only the batch around the cursor is looked at", async () => {
+  const doc = "SELECT 1 FROM Pedidos p\nGO\nSELECT p.| FROM ventas.Clientes p\nGO\nSELECT 3 FROM Pedidos p";
+  expect(labels(await complete(doc))).toEqual(["Id", "Nombre"]);
+  const sql = "SELECT 'a\nGO\n' FROM a x\nGO\nSELECT 1 FROM b y";
+  expect(batchRange(sql, 0)).toEqual([0, sql.indexOf("\nGO\nSELECT 1")]);
+  expect(batchRange(sql, sql.length)).toEqual([sql.indexOf("SELECT 1"), sql.length]);
+  // A cursor on a GO line gets only that line, never the next batch.
+  const go = "SELECT 1\nGO\nSELECT 2";
+  expect(batchRange(go, go.indexOf("GO") + 1)).toEqual([9, 11]);
+  expect(batchRange("GO\nGO\nSELECT 1", 4)).toEqual([3, 5]);
+  expect(batchRange("GO\nSELECT 1", 1)).toEqual([0, 2]);
+  expect(await complete("SELECT 1\nGO -- hello wor|")).toBeNull();
+  // A GO inside a string left open is part of the string, so there is no second batch.
+  expect(await complete("SELECT 'x\nGO\nSEL|")).toBeNull();
+});
+
+test("nothing opens while an IME is composing", () => {
+  const state = EditorState.create({ doc: "SEL" });
+  const run = (view: object) =>
+    completionSource(meta)(new CompletionContext(state, 3, false, view as never)) as CompletionResult | null;
+  expect(labels(run({ composing: false, compositionStarted: false }))).toContain("SELECT");
+  expect(run({ composing: true, compositionStarted: true })).toBeNull();
+  expect(run({ composing: false, compositionStarted: true })).toBeNull();
 });
 
 test("a failed fetch is not cached", async () => {

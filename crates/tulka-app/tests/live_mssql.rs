@@ -115,6 +115,7 @@ async fn run_query_select_fills_the_buffer() {
                 index: 0,
                 total,
                 truncated,
+                ..
             } => Some((*total, *truncated)),
             _ => None,
         })

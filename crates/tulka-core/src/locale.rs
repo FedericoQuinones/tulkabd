@@ -1,8 +1,9 @@
 //! OS decimal-separator detection for the "Copy" (Excel) format.
 
 /// Language codes whose usual decimal separator is a comma.
-const COMMA_LANGUAGES: [&str; 15] = [
-    "es", "pt", "fr", "de", "it", "nl", "ru", "pl", "tr", "sv", "da", "nb", "fi", "cs", "id",
+const COMMA_LANGUAGES: [&str; 17] = [
+    "es", "pt", "fr", "de", "it", "nl", "ru", "pl", "tr", "sv", "da", "nb", "no", "nn", "fi", "cs",
+    "id",
 ];
 
 /// The decimal separator for a locale tag such as `es-AR`, `pt_BR` or `en-US`.
@@ -36,5 +37,7 @@ mod tests {
         assert_eq!(decimal_separator_for("es-AR"), ',');
         assert_eq!(decimal_separator_for("en-US"), '.');
         assert_eq!(decimal_separator_for("pt_BR"), ',');
+        assert_eq!(decimal_separator_for("no-NO"), ',');
+        assert_eq!(decimal_separator_for("nn_NO"), ',');
     }
 }

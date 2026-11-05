@@ -11,11 +11,27 @@
   import type { ColumnFilter, Value } from "../ipc";
   import type { PaneResult } from "../pane/reduce";
   import { cellText } from "./cellText";
+  import { fitWidth, MAX_RESIZE_WIDTH, MIN_COLUMN_WIDTH, recallWidths, rememberWidth } from "./columnWidths";
   import ColumnMenu from "./ColumnMenu.svelte";
   import { gridKey, type Cell } from "./gridKeys";
   import { isSelected, type GridSelection } from "./selection";
   import { nextSort, withColumnFilter, type ResultView } from "./view";
-  import { anchoredScrollTop, headerHeight, rowHeight, visibleRange } from "./virtual";
+  import {
+    anchoredScrollTop,
+    headerHeight,
+    idColumnWidth,
+    isScaled,
+    maxVirtualTop,
+    resyncedTop,
+    revealRowTop,
+    rowHeight,
+    spacerHeight,
+    toRealTop,
+    toVirtualTop,
+    visibleColumns,
+    visibleRange,
+    type ScrollGeometry,
+  } from "./virtual";
   import { zoom } from "../zoom.svelte";
   import { WindowCache } from "./windowCache";
 
@@ -31,14 +47,17 @@
     ready: boolean;
     /** Ctrl+C in the grid. */
     oncopy: () => void;
+    /** Where the grid was scrolled to when it was last shown. */
+    scroll?: number;
+    /** Reports the scroll position, so a remount can come back to it. */
+    onscrolled?: (top: number) => void;
   }
-  let { tabId, resultIndex, result, final, view, ready, oncopy }: Props = $props();
+  let { tabId, resultIndex, result, final, view, ready, oncopy, scroll = 0, onscrolled }: Props = $props();
 
-  const ID_WIDTH = 56;
   const NUMERIC = new Set(["int", "bigint", "smallint", "tinyint", "decimal", "numeric", "float", "real", "money", "smallmoney"]);
   const gridId = `result-grid-${++nextGridId}`;
 
-  // The parent keys this component by run, so the cache and widths die with the run.
+  // The parent keys this component by run, so the cache dies with the run.
   let version = $state(0);
   const cache = new WindowCache(
     (offset, limit) => ipc.fetchRows(tabId, resultIndex, offset, limit),
@@ -57,6 +76,8 @@
       selection = null;
       active = null;
       scrollTop = 0;
+      realTop = 0;
+      programmatic = null;
       if (gridEl) gridEl.scrollTop = 0;
     }
     viewVersion++;
@@ -70,10 +91,18 @@
 
   let selection = $state<GridSelection | null>(null);
   let active = $state<Cell | null>(null);
-  let scrollTop = $state(0);
+  // `scrollTop` is the position in row space (what the rows are laid out in); `realTop` is the
+  // element's own scrollTop. They are equal until the rows are taller than the capped spacer.
+  let scrollTop = $state(untrack(() => scroll));
+  let realTop = $state(0);
+  /** The scrollTop last set from code: the scroll event it causes must not re-derive `scrollTop`. */
+  let programmatic: number | null = null;
   let viewportHeight = $state(0);
+  let viewportWidth = $state(0);
+  let scrollLeft = $state(0);
   let gridEl = $state<HTMLDivElement>();
-  let widths = $state<number[]>([]);
+  // Widths the user set earlier in this tab, by column name, survive a re-run.
+  let widths = $state<number[]>(untrack(() => recallWidths(tabId, result.columns.map((c) => c.name))));
   let columnMenu = $state<{ column: number; x: number; y: number; trigger: HTMLElement } | null>(null);
   let cellMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
@@ -83,12 +112,39 @@
   const total = $derived((void viewVersion, v.visible ?? result.total));
   const numeric = $derived(columns.map((c) => NUMERIC.has(c.typeName.toLowerCase())));
   const colWidth = (i: number) => widths[i] ?? (numeric[i] ? 120 : 180);
-  const totalWidth = $derived(columns.reduce((sum, _, i) => sum + colWidth(i), ID_WIDTH));
+  const idWidth = $derived(idColumnWidth(total, zoom.level));
+  const totalWidth = $derived(columns.reduce((sum, _, i) => sum + colWidth(i), idWidth));
   const rowH = $derived(rowHeight(zoom.level));
   const headH = $derived(headerHeight(zoom.level));
   const bodyHeight = $derived(Math.max(viewportHeight - headH, 0));
+  const geo = $derived<ScrollGeometry>({ total, rowH, bodyH: bodyHeight });
   const range = $derived(visibleRange(scrollTop, bodyHeight, rowH, total));
   const page = $derived(Math.max(1, Math.floor(bodyHeight / rowH)));
+
+  // Coming back to a tab: the grid starts where it was left.
+  // Below the spacer cap the mapping is the identity; above it, it waits for the viewport height.
+  let restored = false;
+  $effect(() => {
+    if (!gridEl || restored || (viewportHeight <= 0 && isScaled(geo))) return;
+    restored = true;
+    untrack(() => {
+      if (scroll > 0) setScroll(scroll);
+    });
+  });
+
+  // When the geometry changes (rows streaming in, a resize), the scale factor of a capped spacer
+  // changes with it: keep the same first visible row, or the end if the grid was there.
+  let shownGeo: ScrollGeometry = untrack(() => geo);
+  $effect(() => {
+    const g = geo;
+    untrack(() => {
+      const prev = shownGeo;
+      shownGeo = g;
+      if (!gridEl || !restored || prev.rowH !== g.rowH || (!isScaled(prev) && !isScaled(g))) return;
+      if (prev.total === g.total && prev.bodyH === g.bodyH) return;
+      setScroll(resyncedTop(scrollTop, prev, g));
+    });
+  });
 
   // A zoom change keeps the first visible row at the top. `scrollTop` still holds the position
   // for the old row height here: the browser's own scroll event (if any) comes later.
@@ -97,12 +153,30 @@
     const h = rowH;
     untrack(() => {
       if (h !== shownRowH && gridEl) {
-        scrollTop = anchoredScrollTop(scrollTop, shownRowH, h);
-        gridEl.scrollTop = scrollTop;
+        setScroll(anchoredScrollTop(scrollTop, shownRowH, h));
       }
       shownRowH = h;
     });
   });
+
+  /**
+   * Scrolls to the row-space position `v`. The browser may clamp it (fewer rows now): the window
+   * of rows follows what it kept.
+   */
+  function setScroll(v: number) {
+    if (!gridEl) return;
+    const g = untrack(() => geo);
+    v = Math.min(Math.max(v, 0), maxVirtualTop(g));
+    const real = toRealTop(v, g);
+    programmatic = real;
+    gridEl.scrollTop = real;
+    realTop = gridEl.scrollTop;
+    scrollTop = isScaled(g) ? v : realTop;
+  }
+
+  // Only the columns near the viewport are rendered; a spacer stands in for those before them.
+  const cols = $derived(visibleColumns(columns.length, colWidth, idWidth, scrollLeft, viewportWidth));
+  const colIndexes = $derived(Array.from({ length: cols.end - cols.start }, (_, k) => cols.start + k));
   const indexes = $derived(Array.from({ length: range.end - range.start }, (_, i) => range.start + i));
 
   export function getSelection(): GridSelection | null {
@@ -121,7 +195,7 @@
   }
   const fetchError = $derived((void version, cache.error));
   const cellId = (row: number, col: number) => `${gridId}-${row}-${col}`;
-  const activeId = $derived(active && active.row >= range.start && active.row < range.end ? cellId(active.row, active.col) : undefined);
+  const activeId = $derived(active && active.row >= range.start && active.row < range.end && active.col >= cols.start && active.col < cols.end ? cellId(active.row, active.col) : undefined);
 
   function sortDirection(col: number): "ascending" | "descending" | undefined {
     if (spec.sort?.column !== col) return undefined;
@@ -180,7 +254,14 @@
       x = r.left;
       y = r.bottom;
     }
-    cellMenu = { x, y, items: [{ id: "filterValue", label: t("results.filter.byValue"), run: () => filterByValue(at, value) }] };
+    cellMenu = {
+      x,
+      y,
+      items: [
+        { id: "copy", label: t("results.copy"), run: () => oncopy() },
+        { id: "filterValue", label: t("results.filter.byValue"), run: () => filterByValue(at, value) },
+      ],
+    };
   }
 
   function closeCellMenu(refocus: boolean) {
@@ -190,7 +271,7 @@
 
   function onkeydown(e: KeyboardEvent) {
     // Header buttons keep their keys.
-    if (e.target !== gridEl && (e.target as HTMLElement).closest("button")) return;
+    if (e.target !== gridEl && (e.target as HTMLElement).closest("button, [role=separator]")) return;
     const out = gridKey(e, { active, rows: total, cols: columns.length, selection, page });
     if (out === null) return;
     e.preventDefault();
@@ -206,11 +287,9 @@
   /** Scrolls so the cell is fully in view. */
   function reveal(cell: Cell) {
     if (!gridEl) return;
-    const top = cell.row * rowH;
-    if (top < scrollTop) scrollTop = top;
-    else if (top + rowH > scrollTop + bodyHeight) scrollTop = Math.max(0, top + rowH - bodyHeight);
-    gridEl.scrollTop = scrollTop;
-    let left = ID_WIDTH;
+    const next = revealRowTop(cell.row, scrollTop, geo);
+    if (next !== scrollTop) setScroll(next);
+    let left = idWidth;
     for (let i = 0; i < cell.col; i++) left += colWidth(i);
     const right = left + colWidth(cell.col);
     if (cell.col === 0) gridEl.scrollLeft = 0;
@@ -233,6 +312,33 @@
     gridEl?.focus({ preventScroll: true });
   }
 
+  function setWidth(col: number, width: number) {
+    const w = Math.min(MAX_RESIZE_WIDTH, Math.max(MIN_COLUMN_WIDTH, width));
+    widths[col] = w;
+    const name = columns[col]?.name;
+    if (name !== undefined) rememberWidth(tabId, name, w);
+  }
+
+  /** Double-click on the grip: fits the column to its header and the cells in view. */
+  function fitColumn(col: number) {
+    if (!gridEl) return;
+    const head = gridEl.querySelector<HTMLElement>(`[role=columnheader][aria-colindex="${col + 2}"]`);
+    const name = head?.querySelector<HTMLElement>(".name");
+    const arrow = head?.querySelector<HTMLElement>(".arrow");
+    // The sort button's padding, its gap, the filter button and the header's right padding.
+    const header = name ? 12 + name.scrollWidth + (arrow ? arrow.offsetWidth + 4 : 0) + 4 + 18 + 6 : 0;
+    const cells = [...gridEl.querySelectorAll<HTMLElement>(`[data-col="${col}"]`)].map((c) => c.scrollWidth);
+    setWidth(col, fitWidth(header, cells));
+  }
+
+  function resizeKey(e: KeyboardEvent, col: number) {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    e.stopPropagation();
+    const step = e.shiftKey ? 50 : 10;
+    setWidth(col, colWidth(col) + (e.key === "ArrowRight" ? step : -step));
+  }
+
   let stopResize: (() => void) | undefined;
   function startResize(e: PointerEvent, col: number) {
     e.preventDefault();
@@ -240,7 +346,7 @@
     const startX = e.clientX;
     const startW = colWidth(col);
     const move = (ev: PointerEvent) => {
-      widths[col] = Math.max(48, startW + ev.clientX - startX);
+      setWidth(col, startW + ev.clientX - startX);
     };
     const stop = () => {
       window.removeEventListener("pointermove", move);
@@ -277,14 +383,30 @@
   aria-busy={viewPending}
   bind:this={gridEl}
   bind:clientHeight={viewportHeight}
-  onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}
+  bind:clientWidth={viewportWidth}
+  onscroll={(e) => {
+    const top = e.currentTarget.scrollTop;
+    realTop = top;
+    scrollLeft = e.currentTarget.scrollLeft;
+    if (programmatic !== null && Math.abs(top - programmatic) <= 1) {
+      // Our own scroll: the exact row-space position is already in `scrollTop`.
+      programmatic = null;
+      if (!isScaled(geo)) scrollTop = top;
+    } else {
+      programmatic = null;
+      scrollTop = toVirtualTop(top, geo);
+    }
+    onscrolled?.(scrollTop);
+  }}
   {onkeydown}
   {oncontextmenu}
 >
-  <div class="inner" style:width="{totalWidth}px" style:height="{headH + total * rowH}px">
+  <div class="inner" style:width="{totalWidth}px" style:height="{headH + spacerHeight(geo)}px">
     <div class="head" style:height="{headH}px" role="row" aria-rowindex={1}>
-      <div class="id" style:width="{ID_WIDTH}px" role="columnheader" aria-colindex={1}>{t("results.rowNumber")}</div>
-      {#each columns as c, i (i)}
+      <div class="id" style:width="{idWidth}px" role="columnheader" aria-colindex={1}>{t("results.rowNumber")}</div>
+      {#if cols.offset > 0}<div class="skip" style:width="{cols.offset}px"></div>{/if}
+      {#each colIndexes as i (i)}
+        {@const c = columns[i]}
         {@const dir = sortDirection(i)}
         {@const filtered = spec.columns.some((f) => f.column === i)}
         <div class="h" class:r={numeric[i]} style:width="{colWidth(i)}px" role="columnheader" aria-colindex={i + 2} aria-sort={dir}>
@@ -309,19 +431,32 @@
             aria-expanded={columnMenu?.column === i}
             onclick={(e) => openColumnMenu(e, i)}>▾</button
           >
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <span class="grip" aria-label={t("results.resize", { name: c.name })} onpointerdown={(e) => startResize(e, i)}></span>
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+          <span
+            class="grip"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t("results.resize", { name: c.name })}
+            aria-valuenow={colWidth(i)}
+            aria-valuemin={MIN_COLUMN_WIDTH}
+            aria-valuemax={MAX_RESIZE_WIDTH}
+            aria-valuetext="{colWidth(i)} px"
+            tabindex="0"
+            onpointerdown={(e) => startResize(e, i)}
+            ondblclick={() => fitColumn(i)}
+            onkeydown={(e) => resizeKey(e, i)}
+          ></span>
         </div>
       {/each}
     </div>
     {#each indexes as i (i)}
       {@const row = rowAt(i)}
-      <div class="row" style:top="{headH + i * rowH}px" style:height="{rowH}px" role="row" aria-rowindex={i + 2}>
+      <div class="row" style:top="{headH + realTop + (i * rowH - scrollTop)}px" style:height="{rowH}px" role="row" aria-rowindex={i + 2}>
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <div
           class="id num"
           class:sel={selection?.kind === "all" || (selection?.kind === "rows" && isSelected(selection, i, -1))}
-          style:width="{ID_WIDTH}px"
+          style:width="{idWidth}px"
           role="rowheader"
           aria-colindex={1}
           tabindex="-1"
@@ -329,7 +464,8 @@
         >
           {i + 1}
         </div>
-        {#each columns as _, j (j)}
+        {#if cols.offset > 0}<div class="skip" style:width="{cols.offset}px"></div>{/if}
+        {#each colIndexes as j (j)}
           {@const cell = row ? cellText(row[j]) : null}
           {@const selected = isSelected(selection, i, j)}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -419,6 +555,7 @@
   .inner {
     position: relative;
     min-width: 100%;
+    overflow: clip;
   }
   .head {
     font-size: calc(12px * var(--code-zoom) / 100);
@@ -428,6 +565,9 @@
     display: flex;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
+  }
+  .skip {
+    flex: none;
   }
   .h,
   .id,
@@ -512,6 +652,10 @@
     bottom: 0;
     width: 6px;
     cursor: col-resize;
+  }
+  .grip:focus-visible {
+    outline: none;
+    background: var(--accent);
   }
   .grip:hover {
     background: var(--control);
