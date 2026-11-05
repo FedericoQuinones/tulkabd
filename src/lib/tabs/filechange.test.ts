@@ -155,3 +155,22 @@ test("the same file spelled two ways opens one tab", async () => {
   await tabs.openFiles(["/a.sql/"]);
   expect(tabs.list).toHaveLength(1);
 });
+
+test("a file opens bound to the tab that is active when the read finishes", async () => {
+  const bind = (id: string, connectionId: string, database: string) => {
+    const pane = tabs.list.find((x) => x.id === id)!.pane!;
+    pane.connectionId = connectionId;
+    pane.database = database;
+  };
+  bind(tabs.open({ kind: "query" }), "c1", "One");
+  let finish!: () => void;
+  vi.mocked(ipc.readSqlFile).mockReturnValue(new Promise((r) => (finish = () => r(opened("SELECT 1", 100)))));
+  const spy = vi.spyOn(tabs, "open");
+  const opening = tabs.openFiles(["/a.sql"]);
+  bind(tabs.open({ kind: "query" }), "c2", "Two");
+  spy.mockClear();
+  finish();
+  await opening;
+  expect(spy).toHaveBeenCalledWith(expect.objectContaining({ connectionId: "c2", database: "Two" }));
+  spy.mockRestore();
+});

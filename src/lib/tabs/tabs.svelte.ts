@@ -1051,7 +1051,6 @@ export class TabsStore {
    * its tab instead. A file that cannot be read opens nothing and is reported in `fileError`.
    */
   async openFiles(paths: string[]): Promise<void> {
-    const { connectionId, database } = this.binding(this.active);
     const seen = new Set<string>();
     const unique = paths.filter((p) => !seen.has(pathKey(p)) && seen.add(pathKey(p)));
     const read = await Promise.all(
@@ -1064,6 +1063,8 @@ export class TabsStore {
             ),
       ),
     );
+    // The active tab may have changed while the files were read.
+    const { connectionId, database } = this.binding(this.active);
     const errors: string[] = [];
     unique.forEach((path, i) => {
       const open = this.tabOfFile(path);
