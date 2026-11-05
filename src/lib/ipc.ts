@@ -78,6 +78,8 @@ export interface ServerInfo {
 export interface SaveConnectionResult {
   connection: ConnectionConfig;
   keyringUnavailable: boolean;
+  /** A password that no longer applies could not be removed from the unavailable keychain. */
+  secretOrphaned?: boolean;
 }
 export interface SessionInfo {
   server: ServerInfo;
@@ -280,7 +282,7 @@ export const listConnections = () => invoke<ConnectionConfig[]>("list_connection
 export const saveConnection = (conn: ConnectionConfig, password?: string) =>
   invoke<SaveConnectionResult>("save_connection", { conn, password: password ?? null });
 
-export const deleteConnection = (id: string) => invoke<void>("delete_connection", { id });
+export const deleteConnection = (id: string) => invoke<boolean>("delete_connection", { id });
 
 export const testConnection = (conn: ConnectionConfig, password?: string) =>
   invoke<ServerInfo>("test_connection", { conn, password: password ?? null });

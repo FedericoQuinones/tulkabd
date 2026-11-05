@@ -16,8 +16,8 @@ use tulka_core::{
     estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, AiAccess, CancelHandle, Column,
     ColumnInfo, ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, DatabaseSnapshot,
     DbObject, Driver, DriverError, Environment, ExecEvent, MemoryStore, MessageKind, NumberFormat,
-    ObjectKind, Preferences, SecretStore, ServerInfo, Session, TableStructure, UnavailableStore,
-    Value,
+    ObjectKind, Preferences, SecretError, SecretStore, ServerInfo, Session, TableStructure,
+    UnavailableStore, Value,
 };
 
 const PASSWORD: &str = "s3cret-pw";
@@ -2280,4 +2280,110 @@ async fn running_a_query_does_not_prune_the_run_log() {
     assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
     // Pruning is the job of a background timer, never of the run itself.
     assert_eq!(list_run_log(&state, None, 10).await.len(), 2);
+}
+
+// ------------------------------------------------ saved password scope
+
+#[tokio::test]
+async fn saved_password_is_not_sent_to_another_server() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    assert!(test_connection(&f.state, saved.clone(), None).await.is_ok());
+
+    let mut other_host = saved.clone();
+    other_host.server = "other-host".into();
+    let mut other_port = saved.clone();
+    other_port.port = 1444;
+    let mut other_user = saved.clone();
+    other_user.user = "admin".into();
+    let mut no_encrypt = saved.clone();
+    no_encrypt.encrypt = false;
+    let mut trusting = saved.clone();
+    trusting.trust_server_certificate = true;
+    // `new_conn` encrypts by default and does not trust, so both are weaker.
+    assert!(saved.encrypt && !saved.trust_server_certificate);
+    for c in [other_host, other_port, other_user, no_encrypt, trusting] {
+        assert_eq!(
+            test_connection(&f.state, c.clone(), None)
+                .await
+                .unwrap_err(),
+            PASSWORD_REQUIRED
+        );
+        assert_eq!(
+            list_server_databases(&f.state, c, None).await.unwrap_err(),
+            PASSWORD_REQUIRED
+        );
+    }
+    // A typed password is always used.
+    let mut other_host = saved.clone();
+    other_host.server = "other-host".into();
+    assert!(test_connection(&f.state, other_host, Some(PASSWORD.into()))
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn saving_a_retargeted_connection_without_password_drops_the_secret() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+
+    let mut moved = saved.clone();
+    moved.server = "other-host".into();
+    let result = save_connection(&f.state, moved, None).await.unwrap();
+    assert!(!result.connection.password_saved && !result.secret_orphaned);
+    assert_eq!(f.secrets.get(&saved.id).unwrap(), None);
+    assert!(!list_connections(&f.state).await[0].password_saved);
+}
+
+#[tokio::test]
+async fn saving_a_retargeted_connection_with_password_stores_the_new_one() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    let mut moved = saved.clone();
+    moved.server = "other-host".into();
+    let result = save_connection(&f.state, moved, Some("new-pw".into()))
+        .await
+        .unwrap();
+    assert!(result.connection.password_saved);
+    assert_eq!(f.secrets.get(&saved.id).unwrap().as_deref(), Some("new-pw"));
+}
+
+/// Reads fine but cannot delete, like a keychain that went away.
+#[derive(Default)]
+struct StuckStore(MemoryStore);
+
+impl SecretStore for StuckStore {
+    fn set(&self, id: &str, secret: &str) -> Result<(), SecretError> {
+        self.0.set(id, secret)
+    }
+    fn get(&self, id: &str) -> Result<Option<String>, SecretError> {
+        self.0.get(id)
+    }
+    fn delete(&self, _id: &str) -> Result<(), SecretError> {
+        Err(SecretError::Unavailable("locked".into()))
+    }
+}
+
+#[tokio::test]
+async fn an_undeletable_secret_is_reported() {
+    let f = fixture(Arc::new(StuckStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    let mut moved = saved.clone();
+    moved.server = "other-host".into();
+    let result = save_connection(&f.state, moved, None).await.unwrap();
+    assert!(result.secret_orphaned && !result.connection.password_saved);
+
+    assert!(delete_connection(&f.state, saved.id.clone()).await.unwrap());
 }

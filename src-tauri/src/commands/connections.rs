@@ -27,7 +27,7 @@ pub async fn save_connection(
 }
 
 #[tauri::command]
-pub async fn delete_connection(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub async fn delete_connection(state: State<'_, AppState>, id: String) -> Result<bool, String> {
     tulka_app::delete_connection(&state, id).await
 }
 

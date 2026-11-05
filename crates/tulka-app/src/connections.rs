@@ -57,6 +57,7 @@ pub async fn save_connection(
     let existing = current.connections.iter().position(|c| c.id == conn.id);
 
     let mut keyring_unavailable = false;
+    let mut secret_orphaned = false;
     match password {
         Some(password) => {
             let secrets: Arc<dyn SecretStore> = state.secrets.clone();
@@ -71,7 +72,23 @@ pub async fn save_connection(
             }
         }
         None => {
-            conn.password_saved = existing.is_some_and(|i| current.connections[i].password_saved);
+            // The stored secret was entered for the stored server and user;
+            // it is kept only while the connection still points at them.
+            let keep = existing.is_some_and(|i| {
+                current.connections[i].password_saved
+                    && may_reuse_saved_password(&current.connections[i], &conn)
+            });
+            let had = existing.is_some_and(|i| current.connections[i].password_saved);
+            if had && !keep {
+                let secrets = state.secrets.clone();
+                let id = conn.id.clone();
+                match blocking(move || secrets.delete(&id)).await? {
+                    Ok(()) => {}
+                    Err(SecretError::Unavailable(_)) => secret_orphaned = true,
+                    Err(e) => return Err(format!("could not delete the password: {e}")),
+                }
+            }
+            conn.password_saved = keep;
         }
     }
 
@@ -97,20 +114,24 @@ pub async fn save_connection(
     Ok(SaveConnectionResult {
         connection: conn,
         keyring_unavailable,
+        secret_orphaned,
     })
 }
 
 /// Deletes a connection and its stored password. A missing keychain does
 /// not prevent the deletion. Then closes its query tabs and its Explorer and
-/// forgets its cached metadata.
-pub async fn delete_connection(state: &AppState, id: String) -> Result<(), String> {
+/// forgets its cached metadata. Returns `true` when the keychain was
+/// unavailable and a saved password may remain in it.
+pub async fn delete_connection(state: &AppState, id: String) -> Result<bool, String> {
     state.ensure_writable()?;
+    let mut orphaned = false;
     {
         let mut current = state.connections.lock().await;
         let secrets = state.secrets.clone();
         let key = id.clone();
         match blocking(move || secrets.delete(&key)).await? {
-            Ok(()) | Err(SecretError::Unavailable(_)) => {}
+            Ok(()) => {}
+            Err(SecretError::Unavailable(_)) => orphaned = true,
             Err(e) => return Err(format!("could not delete the password: {e}")),
         }
         let mut next = current.clone();
@@ -128,7 +149,7 @@ pub async fn delete_connection(state: &AppState, id: String) -> Result<(), Strin
         close_session(state, tab_id).await?;
     }
     explorer::forget_connection(state, &id).await;
-    Ok(())
+    Ok(orphaned)
 }
 
 /// Copies a connection under a new id, named `"<name> (copy)"`, in the same
@@ -449,7 +470,7 @@ pub async fn list_server_databases(
     password: Option<String>,
 ) -> Result<Vec<String>, String> {
     if password.is_none() {
-        conn.password_saved = saved_password_flag(state, &conn.id).await;
+        conn.password_saved = reusable_saved_password(state, &conn).await;
     }
     let password = resolve_password(state, &conn, password).await?;
     let driver = state.driver(&conn.driver)?;
@@ -460,27 +481,50 @@ pub async fn list_server_databases(
     session.list_databases().await.map_err(|e| e.to_string())
 }
 
-async fn saved_password_flag(state: &AppState, id: &str) -> bool {
+/// Whether the password saved for `conn.id` may be sent to what the form
+/// describes. The stored connection decides, never the form (which may be
+/// stale or hold pasted values): see [`may_reuse_saved_password`].
+async fn reusable_saved_password(state: &AppState, conn: &ConnectionConfig) -> bool {
     state
         .connections
         .lock()
         .await
         .connections
         .iter()
-        .any(|c| c.id == id && c.password_saved)
+        .any(|c| c.id == conn.id && c.password_saved && may_reuse_saved_password(c, conn))
+}
+
+/// The saved password of `stored` may be used to log in as `requested` only
+/// when it targets the same server, port and user (the instance is part of
+/// the server name) and the TLS settings are not weaker: encryption not
+/// turned off and certificate trust not turned on.
+pub(crate) fn may_reuse_saved_password(
+    stored: &ConnectionConfig,
+    requested: &ConnectionConfig,
+) -> bool {
+    stored
+        .server
+        .trim()
+        .eq_ignore_ascii_case(requested.server.trim())
+        && stored.port == requested.port
+        && stored.user == requested.user
+        && (requested.encrypt || !stored.encrypt)
+        && (!requested.trust_server_certificate || stored.trust_server_certificate)
 }
 
 /// Connects with `conn`, reads the server information and disconnects.
 /// Without `password`, uses the one saved for the connection with the same
 /// id (the stored `password_saved` decides, not the one sent by the UI,
-/// which may be stale).
+/// which may be stale), but only if the form still targets the stored
+/// server, port and user with no weaker TLS; otherwise fails with
+/// [`PASSWORD_REQUIRED`].
 pub async fn test_connection(
     state: &AppState,
     mut conn: ConnectionConfig,
     password: Option<String>,
 ) -> Result<ServerInfo, String> {
     if password.is_none() {
-        conn.password_saved = saved_password_flag(state, &conn.id).await;
+        conn.password_saved = reusable_saved_password(state, &conn).await;
     }
     let password = resolve_password(state, &conn, password).await?;
     let driver = state.driver(&conn.driver)?;
@@ -538,5 +582,59 @@ pub(crate) fn connect_params(
         trust_server_certificate: conn.trust_server_certificate,
         connect_timeout_s: conn.connect_timeout_s,
         ..ConnectParams::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tulka_core::Environment;
+
+    fn stored() -> ConnectionConfig {
+        let mut c = ConnectionConfig::new("A", "prod-host", 1433, "sa", Environment::Production);
+        c.encrypt = true;
+        c.trust_server_certificate = false;
+        c
+    }
+
+    #[test]
+    fn saved_password_is_reused_only_for_the_same_target() {
+        let s = stored();
+        assert!(may_reuse_saved_password(&s, &s.clone()));
+        let mut same = s.clone();
+        same.server = " PROD-HOST ".into();
+        same.name = "Renamed".into();
+        assert!(may_reuse_saved_password(&s, &same));
+
+        let mut other = s.clone();
+        other.server = "evil".into();
+        assert!(!may_reuse_saved_password(&s, &other));
+        let mut other = s.clone();
+        other.server = "prod-host\\INST".into();
+        assert!(!may_reuse_saved_password(&s, &other));
+        let mut other = s.clone();
+        other.port = 1444;
+        assert!(!may_reuse_saved_password(&s, &other));
+        let mut other = s.clone();
+        other.user = "admin".into();
+        assert!(!may_reuse_saved_password(&s, &other));
+    }
+
+    #[test]
+    fn saved_password_is_not_reused_with_weaker_tls() {
+        let s = stored();
+        let mut weaker = s.clone();
+        weaker.encrypt = false;
+        assert!(!may_reuse_saved_password(&s, &weaker));
+        let mut weaker = s.clone();
+        weaker.trust_server_certificate = true;
+        assert!(!may_reuse_saved_password(&s, &weaker));
+
+        // Stronger or equal settings are fine.
+        let mut weak_stored = s.clone();
+        weak_stored.encrypt = false;
+        weak_stored.trust_server_certificate = true;
+        assert!(may_reuse_saved_password(&weak_stored, &weak_stored.clone()));
+        assert!(may_reuse_saved_password(&weak_stored, &s));
     }
 }
