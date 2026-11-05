@@ -424,7 +424,12 @@ impl Builder {
                 self.out.trust_server_certificate = Some(parse_bool(&value).ok_or_else(bad)?)
             }
             Key::ConnectTimeout => {
-                self.out.connect_timeout_s = Some(value.trim().parse().map_err(|_| bad())?)
+                let v = value.trim();
+                // Digits only: `parse` would also take a leading `+`.
+                if !v.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(bad());
+                }
+                self.out.connect_timeout_s = Some(v.parse().map_err(|_| bad())?)
             }
             Key::IntegratedSecurity => {
                 if value.trim().eq_ignore_ascii_case("sspi")
@@ -755,6 +760,12 @@ mod tests {
         let p = parse("sqlserver://h?mystery=%ZZ&encrypt=false");
         assert_eq!(p.encrypt, Some(false));
         assert_eq!(err("sqlserver://h?encrypt=%ZZ"), "bad_value:Encrypt");
+    }
+
+    #[test]
+    fn connect_timeout_takes_plain_digits_only() {
+        assert_eq!(err("Server=x;Connect Timeout=+30"), "bad_value:Connect Timeout");
+        assert_eq!(parse("Server=x;Connect Timeout=30").connect_timeout_s, Some(30));
     }
 
     #[test]
