@@ -22,7 +22,6 @@
   const ERROR_TOAST_MS = 5000;
   const FILTER_DEBOUNCE_MS = 150;
 
-  let tab = $state(0);
   let grid = $state<ResultGrid>();
   let toast = $state<{ text: string; error: boolean } | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -36,8 +35,9 @@
       if (run !== seenRun) {
         seenRun = run;
         pane.bottomTab = "results";
+        pane.resultTab = 0;
+        pane.gridScroll = [];
       }
-      tab = 0;
       toast = null;
     });
   });
@@ -48,7 +48,7 @@
   });
 
   const active = $derived(
-    pane.bottomTab === "runlog" ? "runlog" : pane.bottomTab === "results" && pane.results[tab] ? tab : "messages",
+    pane.bottomTab === "runlog" ? "runlog" : pane.bottomTab === "results" && pane.results[pane.resultTab] ? pane.resultTab : "messages",
   );
   // The index of the result set shown, or null on the Messages and Run log tabs.
   const index = $derived(typeof active === "number" ? active : null);
@@ -168,7 +168,7 @@
 <div class="panel">
   <div class="rhead">
     {#each pane.results as r, i (i)}
-      <button type="button" class="rt" class:on={active === i} onclick={() => { tab = i; pane.bottomTab = "results"; }}>
+      <button type="button" class="rt" class:on={active === i} onclick={() => { pane.resultTab = i; pane.bottomTab = "results"; }}>
         {i === 0 ? t("results.tab") : t("results.tabN", { n: i + 1 })}<span class="num">{count(r.total)}</span>
       </button>
     {/each}
@@ -214,6 +214,8 @@
         <ResultGrid bind:this={grid} tabId={pane.tabId} resultIndex={index} {result} {view} {ready}
           final={pane.status !== "running" || pane.results.length > index + 1}
           oncopy={() => copy("excel")}
+          scroll={pane.gridScroll[index]}
+          onscrolled={(top) => (pane.gridScroll[index] = top)}
         />
       {/key}
     {/if}

@@ -49,6 +49,10 @@ export class PaneState {
   bottomTab = $state<"results" | "messages" | "runlog">("results");
   /** Increments on every run start; the results view uses it to drop its row cache. */
   runCount = $state(0);
+  /** The result set shown in the results panel; kept here so it survives a tab switch. */
+  resultTab = $state(0);
+  /** Grid scroll position per result set of the current run (not reactive: only read on mount). */
+  gridScroll: number[] = [];
   /** The confirmed row limit in force when the last run started; later preference changes do not apply to it. */
   runMaxRows = $state(prefs.confirmed.maxRows);
   session = $state<SessionInfo | null>(null);
