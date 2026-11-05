@@ -252,7 +252,9 @@ impl ResultBuffer {
                 let order = match (&a.1, &b.1) {
                     (Some(Parsed::Dec(x)), Some(Parsed::Dec(y))) => x.cmp(y),
                     (Some(Parsed::Instant(x)), Some(Parsed::Instant(y))) => x.cmp(y),
-                    (Some(Parsed::Folded(x)), Some(Parsed::Folded(y))) => x.cmp(y),
+                    (Some(Parsed::Folded(x, xo)), Some(Parsed::Folded(y, yo))) => {
+                        x.cmp(y).then_with(|| lowercase_cmp(xo, yo))
+                    }
                     _ => compare_values(a.0, b.0),
                 };
                 if descending {
@@ -412,9 +414,10 @@ enum SortKind {
 enum Parsed<'a> {
     Dec(Dec<'a>),
     Instant(Instant<'a>),
-    /// A text-like value (see [`SortKind::Text`]) lower-cased; UTF-8 byte order is the order of its chars, so
-    /// comparing two of these is [`compare_ignoring_case`].
-    Folded(Cow<'a, str>),
+    /// A text-like value (see [`SortKind::Text`]) as its [`fold_key`], with
+    /// the original text for ties; UTF-8 byte order is the order of the
+    /// chars, so comparing two keys is [`compare_ignoring_case`].
+    Folded(Cow<'a, str>, &'a str),
 }
 
 impl<'a> Parsed<'a> {
@@ -424,13 +427,7 @@ impl<'a> Parsed<'a> {
             Value::DateTimeOffset(t) => Instant::parse(t).map(Self::Instant),
             v if sort_kind(v) == SortKind::Text => {
                 let t = text_of(v);
-                Some(Self::Folded(
-                    if t.is_ascii() && !t.bytes().any(|c| c.is_ascii_uppercase()) {
-                        Cow::Borrowed(t)
-                    } else {
-                        Cow::Owned(t.chars().flat_map(char::to_lowercase).collect())
-                    },
-                ))
+                Some(Self::Folded(fold_key(t), t))
             }
             _ => None,
         }
@@ -534,6 +531,11 @@ fn text_of(v: &Value) -> &str {
     }
 }
 
+/// Text order: ignoring case and accents (`Ávila` sorts with the `A`s), with
+/// `ñ` a letter of its own between `n` and `o`. Texts equal under that order
+/// but spelled differently (`ávila`, `avila`) are told apart by their
+/// lower-cased text, so the order does not depend on arrival; texts that
+/// differ only in case stay equal.
 fn compare_ignoring_case(a: &str, b: &str) -> Ordering {
     // Same result as the general case, without its per-char work.
     if a.is_ascii() && b.is_ascii() {
@@ -541,10 +543,60 @@ fn compare_ignoring_case(a: &str, b: &str) -> Ordering {
             .map(|c| c.to_ascii_lowercase())
             .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
     } else {
-        a.chars()
-            .flat_map(char::to_lowercase)
-            .cmp(b.chars().flat_map(char::to_lowercase))
+        fold_key(a)
+            .cmp(&fold_key(b))
+            .then_with(|| lowercase_cmp(a, b))
     }
+}
+
+fn lowercase_cmp(a: &str, b: &str) -> Ordering {
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(b.chars().flat_map(char::to_lowercase))
+}
+
+/// `t` lower-cased with the Latin letters of Latin-1 Supplement and Latin
+/// Extended-A reduced to their base letters (`ß` to `ss`, `æ` to `ae`, `ø`
+/// to `o`). `ñ` becomes `n` plus the highest char, which sorts after every
+/// other `n…` text and before `o`, as in Spanish.
+fn fold_key(t: &str) -> Cow<'_, str> {
+    if t.is_ascii() && !t.bytes().any(|c| c.is_ascii_uppercase()) {
+        return Cow::Borrowed(t);
+    }
+    let mut out = String::with_capacity(t.len());
+    for c in t.chars().flat_map(char::to_lowercase) {
+        match c {
+            'à'..='å' | 'ā' | 'ă' | 'ą' => out.push('a'),
+            'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => out.push('c'),
+            'ď' | 'đ' | 'ð' => out.push('d'),
+            'è'..='ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => out.push('e'),
+            'ĝ' | 'ğ' | 'ġ' | 'ģ' => out.push('g'),
+            'ĥ' | 'ħ' => out.push('h'),
+            'ì'..='ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => out.push('i'),
+            'ĵ' => out.push('j'),
+            'ķ' => out.push('k'),
+            'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => out.push('l'),
+            'ñ' => {
+                out.push('n');
+                out.push(char::MAX);
+            }
+            'ń' | 'ņ' | 'ň' | 'ŉ' => out.push('n'),
+            'ò'..='ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => out.push('o'),
+            'ŕ' | 'ŗ' | 'ř' => out.push('r'),
+            'ś' | 'ŝ' | 'ş' | 'š' => out.push('s'),
+            'ţ' | 'ť' | 'ŧ' => out.push('t'),
+            'ù'..='ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => out.push('u'),
+            'ŵ' => out.push('w'),
+            'ý' | 'ÿ' | 'ŷ' => out.push('y'),
+            'ź' | 'ż' | 'ž' => out.push('z'),
+            'ß' => out.push_str("ss"),
+            'æ' => out.push_str("ae"),
+            'œ' => out.push_str("oe"),
+            'þ' => out.push_str("th"),
+            c => out.push(c),
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// A numeric value as a sortable key: infinities around the finite values,
@@ -1320,6 +1372,47 @@ mod tests {
             Less
         );
         assert_eq!(compare_values(&Value::Null, &text("")), Less);
+    }
+
+    #[test]
+    fn text_sorts_accents_with_their_base_letter() {
+        use std::cmp::Ordering::*;
+        let cmp = |a: &str, b: &str| compare_values(&text(a), &text(b));
+        assert_eq!(cmp("Ávila", "Zurich"), Less);
+        assert_eq!(cmp("Ávila", "Barcelona"), Less);
+        assert_eq!(cmp("Zurich", "Ávila"), Greater);
+        // ñ is a letter after n, before o.
+        assert_eq!(cmp("nz", "ñ"), Less);
+        assert_eq!(cmp("ñu", "nzz"), Greater);
+        assert_eq!(cmp("ñandú", "oso"), Less);
+        assert_eq!(cmp("Ñ", "ñ"), Equal);
+        assert_eq!(cmp("straße", "strasse"), Greater);
+        assert_eq!(cmp("straße", "strassf"), Less);
+        assert_eq!(cmp("Øre", "Ore"), Greater);
+        assert_eq!(cmp("Øre", "Orf"), Less);
+        // Same base letters: told apart by the original, not by arrival.
+        assert_eq!(cmp("avila", "ávila"), Less);
+        assert_eq!(cmp("ávila", "avila"), Greater);
+        assert_eq!(cmp("ÉCLAIR", "éclair"), Equal);
+
+        let mut b = buffer_of(vec![
+            vec![text("Zurich")],
+            vec![text("Ávila")],
+            vec![text("ñu")],
+            vec![text("nube")],
+            vec![text("Oslo")],
+        ]);
+        b.set_view(&sorted(0, false));
+        assert_eq!(
+            first_cells(&b),
+            vec![
+                text("Ávila"),
+                text("nube"),
+                text("ñu"),
+                text("Oslo"),
+                text("Zurich")
+            ]
+        );
     }
 
     #[test]
