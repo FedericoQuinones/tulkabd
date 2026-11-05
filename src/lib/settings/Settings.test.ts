@@ -9,6 +9,8 @@ vi.mock("../ipc", () => ({
   dataLocations: vi.fn(),
   revealDataLocation: vi.fn(),
   clearMetadataCache: vi.fn(),
+  mcpSetup: vi.fn(),
+  copyMcpSetup: vi.fn(),
 }));
 
 import * as ipc from "../ipc";
@@ -46,6 +48,14 @@ beforeEach(() => {
   vi.mocked(ipc.revealDataLocation).mockResolvedValue();
   vi.mocked(ipc.clearRunLog).mockResolvedValue();
   vi.mocked(ipc.clearMetadataCache).mockResolvedValue();
+  vi.mocked(ipc.mcpSetup).mockResolvedValue({
+    command: "/opt/tulkabd",
+    args: ["mcp"],
+    claudeCode: "claude mcp add tulkabd -- /opt/tulkabd mcp",
+    mcpServersJson: "{}",
+    vscodeJson: "{}",
+  });
+  vi.mocked(ipc.copyMcpSetup).mockResolvedValue();
 });
 afterEach(() => {
   if (cmp) unmount(cmp);
@@ -66,10 +76,10 @@ const type = (el: HTMLInputElement, value: string) => {
 const button = (text: string) => [...document.querySelectorAll("button")].find((b) => b.textContent!.trim() === text)!;
 const saved = () => document.querySelector("section[data-section='general'] [aria-live='polite']")!.textContent!.trim();
 
-test("renders the six sections in order", async () => {
+test("renders the seven sections in order", async () => {
   await open();
   const titles = [...document.querySelectorAll("h2")].map((h) => h.textContent!.replace("Saved", "").trim());
-  expect(titles).toEqual(["General", "Environments", "Execution", "Copy", "Run log", "Data"]);
+  expect(titles).toEqual(["General", "Environments", "Execution", "Copy", "Run log", "AI assistants (MCP)", "Data"]);
   expect(document.querySelector("h1")?.textContent).toBe("Settings");
 });
 
@@ -320,4 +330,46 @@ test("pending typing is saved when the screen closes", async () => {
   cmp = undefined;
   await settle();
   expect(vi.mocked(ipc.setPreferences).mock.calls[0][0].maxRows).toBe(5000);
+});
+
+test("AI section saves rows and timeout", async () => {
+  vi.useFakeTimers();
+  await open();
+  type(byLabel("Rows per AI query") as HTMLInputElement, "200");
+  type(byLabel("AI query timeout") as HTMLInputElement, "45");
+  await vi.advanceTimersByTimeAsync(400);
+  expect(ipc.setPreferences).toHaveBeenCalledWith(expect.objectContaining({ aiMaxRows: 200 }));
+  expect(ipc.setPreferences).toHaveBeenCalledWith(expect.objectContaining({ aiQueryTimeoutS: 45 }));
+});
+
+test("Copy calls copyMcpSetup with the right kind", async () => {
+  await open();
+  const ai = document.querySelector("section[data-section='ai']")!;
+  const inAi = (text: string) => [...ai.querySelectorAll("button")].find((b) => b.textContent!.trim() === text)!;
+  inAi("Copy").click();
+  inAi("Copy JSON for Cursor / Claude Desktop").click();
+  inAi("Copy JSON for VS Code").click();
+  expect(vi.mocked(ipc.copyMcpSetup).mock.calls.map((c) => c[0])).toEqual(["claude", "json", "vscode"]);
+});
+
+test("environment AI default is saved", async () => {
+  await open();
+  const select = document.querySelector<HTMLSelectElement>('select[aria-label="Local AI access"]')!;
+  select.value = "none";
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  await settle();
+  const sent = vi.mocked(ipc.setPreferences).mock.calls.at(-1)![0];
+  expect(sent.environments.local.aiAccess).toBe("none");
+  expect(sent.environments.production.aiAccess).toBe("none");
+});
+
+test("the setup command shows the path from mcpSetup", async () => {
+  await open();
+  const ai = document.querySelector("section[data-section='ai']")!;
+  expect(ai.querySelector("code")!.textContent).toBe("claude mcp add tulkabd -- /opt/tulkabd mcp");
+});
+
+test("the run log section says AI queries are logged too", async () => {
+  await open();
+  expect(document.querySelector("section[data-section='runLog']")!.textContent).toContain("marked AI");
 });

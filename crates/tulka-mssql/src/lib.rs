@@ -3,11 +3,17 @@
 mod batches;
 mod convert;
 pub mod guard;
+mod lexer;
 mod meta;
+pub mod readonly;
 mod session;
 
+// Lets the shared test support code name this crate the way integration tests do.
+#[cfg(test)]
+extern crate self as tulka_mssql;
+
 use async_trait::async_trait;
-use tulka_core::{ConnectParams, Driver, DriverError, GuardFinding, Session};
+use tulka_core::{ConnectParams, Driver, DriverError, GuardFinding, ReadOnlyViolation, Session};
 
 pub use batches::{split_batches, Batch};
 
@@ -26,5 +32,9 @@ impl Driver for MssqlDriver {
 
     fn guard_findings(&self, sql: &str) -> Vec<GuardFinding> {
         guard::findings(sql)
+    }
+
+    fn read_only_violation(&self, sql: &str) -> Option<ReadOnlyViolation> {
+        readonly::violation(sql)
     }
 }

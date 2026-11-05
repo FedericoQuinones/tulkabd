@@ -512,9 +512,11 @@ mod tests {
                         outcome: tulka_store::RunLogOutcome::Ok,
                         rows: Some(1),
                         elapsed_ms: None,
+                        source: tulka_store::RunSource::App,
+                        client: None,
                     },
                 },
-                json!({"kind": "runLogged", "entry": {"id": 1, "atMs": 5, "connectionId": "c1", "connectionName": "prod", "color": "#fff", "database": "db", "sql": "SELECT 1", "sqlTruncated": false, "outcome": "ok", "rows": 1, "elapsedMs": null}}),
+                json!({"kind": "runLogged", "entry": {"id": 1, "atMs": 5, "connectionId": "c1", "connectionName": "prod", "color": "#fff", "database": "db", "sql": "SELECT 1", "sqlTruncated": false, "outcome": "ok", "rows": 1, "elapsedMs": null, "source": "app", "client": null}}),
             ),
         ];
         for (ev, expected) in cases {

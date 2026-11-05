@@ -47,6 +47,8 @@ function entry(id: number, over: Partial<RunLogEntry> = {}): RunLogEntry {
     outcome: "ok",
     rows: 20,
     elapsedMs: 84,
+    source: "app",
+    client: null,
     ...over,
   };
 }
@@ -105,6 +107,31 @@ test("runLogged prepends and bumps the today counter", () => {
   expect(runLog.todayCount).toBe(2);
   show();
   expect(document.body.textContent).toContain("Run log2");
+});
+
+test("runLogged from the poller prepends like any other", () => {
+  runLog.prepend(entry(5));
+  runLog.prepend(entry(7, { source: "ai", client: "claude" }));
+  // Noticed late: lower id than an app run held already.
+  runLog.prepend(entry(6, { source: "ai", client: "claude" }));
+  runLog.prepend(entry(1));
+  runLog.prepend(entry(6, { source: "ai", client: "claude" }));
+  expect(runLog.entries.map((e) => e.id)).toEqual([7, 6, 5, 1]);
+});
+
+test("ai entries show the AI tag with the client in the title", () => {
+  runLog.prepend(entry(1));
+  runLog.prepend(entry(2, { source: "ai", client: "claude-code" }));
+  runLog.prepend(entry(3, { source: "ai", client: null }));
+  pane.bottomTab = "runlog";
+  show();
+  const tag = (id: number) => document.querySelector<HTMLElement>(`tr[data-id="${id}"] .ai`);
+  expect(tag(1)).toBeNull();
+  expect(tag(2)!.textContent).toBe("AI");
+  expect(tag(2)!.title).toBe("Run by an AI assistant (claude-code)");
+  expect(tag(3)!.title).toBe("Run by an AI assistant");
+  tag(2)!.closest("tr")!.click();
+  expect(tabs.active!.pane!.connectionId).toBe("c1");
 });
 
 test("an entry that arrives before the first load is not duplicated by it", async () => {

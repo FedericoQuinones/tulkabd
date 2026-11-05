@@ -3,8 +3,10 @@
 //! statement text only, never passwords or result rows. A failure to write
 //! the log never fails the run it describes.
 
+use std::sync::atomic::Ordering;
+
 use chrono::Utc;
-use tulka_store::{NewRun, RunLogEntry, RunLogOutcome};
+use tulka_store::{NewRun, RunLogEntry, RunLogOutcome, RunSource};
 
 use crate::connections::blocking;
 use crate::query::no_session;
@@ -61,6 +63,8 @@ pub(crate) async fn record(
         outcome,
         rows,
         elapsed_ms,
+        source: RunSource::App,
+        client: None,
     };
     let store = state.runlog.clone();
     if let Ok(Ok(entry)) = blocking(move || store.insert(&run)).await {
@@ -113,4 +117,28 @@ pub async fn prune_run_log(state: &AppState) {
     let now = Utc::now().timestamp_millis();
     let store = state.runlog.clone();
     let _ = blocking(move || store.prune(now - keep_days * DAY_MS)).await;
+}
+
+/// Most AI entries one poll returns.
+const MAX_POLL: u32 = 200;
+
+/// The entries the MCP process logged since the last call, oldest first.
+/// The first call only notes where the log ends and returns nothing, so the
+/// history from before this launch is not announced again.
+pub async fn poll_ai_runs(state: &AppState) -> Vec<RunLogEntry> {
+    let store = state.runlog.clone();
+    let seen = state.ai_runs_seen.load(Ordering::Acquire);
+    let Ok((seen, entries)) = blocking(move || {
+        if seen < 0 {
+            return (store.max_id(), Vec::new());
+        }
+        let entries = store.list_after(seen, Some(RunSource::Ai), MAX_POLL);
+        (entries.last().map_or(seen, |e| e.id), entries)
+    })
+    .await
+    else {
+        return Vec::new();
+    };
+    state.ai_runs_seen.store(seen, Ordering::Release);
+    entries
 }

@@ -6,33 +6,10 @@ use tokio::sync::{mpsc, OnceCell};
 use tulka_core::{ConnectParams, Driver, DriverError, ForeignKey, IndexInfo, ObjectKind, Session};
 use tulka_mssql::MssqlDriver;
 
-fn test_params() -> Option<ConnectParams> {
-    let Ok(raw) = std::env::var("TULKA_MSSQL_TEST") else {
-        println!("skipped (TULKA_MSSQL_TEST not set)");
-        return None;
-    };
-    let mut p = ConnectParams {
-        server: "127.0.0.1".into(),
-        port: 1433,
-        encrypt: true,
-        trust_server_certificate: true,
-        connect_timeout_s: 15,
-        ..ConnectParams::default()
-    };
-    for part in raw.split(';').filter(|s| !s.trim().is_empty()) {
-        let (key, value) = part
-            .split_once('=')
-            .expect("TULKA_MSSQL_TEST entries must be key=value");
-        match key.trim().to_lowercase().as_str() {
-            "server" => p.server = value.trim().to_string(),
-            "port" => p.port = value.trim().parse().expect("port must be a number"),
-            "user" => p.user = value.to_string(),
-            "password" => p.password = value.to_string(),
-            _ => {}
-        }
-    }
-    Some(p)
-}
+#[path = "support/params.rs"]
+#[allow(dead_code)]
+mod params;
+use params::test_params;
 
 async fn connect(p: &ConnectParams) -> Box<dyn Session> {
     MssqlDriver.connect(p).await.expect("connect")

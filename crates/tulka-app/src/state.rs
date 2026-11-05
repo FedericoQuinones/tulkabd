@@ -51,7 +51,7 @@
 //! see [`crate::files`].
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, MutexGuard, PoisonError};
 
 use tokio::sync::{Mutex, RwLock};
@@ -94,6 +94,9 @@ pub struct AppState {
     pub(crate) guard_off_session: std::sync::Mutex<HashSet<String>>,
     /// Every statement run, with where it ran; see [`crate::runlog`].
     pub(crate) runlog: Arc<RunLogStore>,
+    /// Highest run log id already looked at for AI entries; `-1` until the
+    /// first poll fixes it to the current end of the log.
+    pub(crate) ai_runs_seen: AtomicI64,
 }
 
 /// A result buffer shared between the run that fills it and the commands
@@ -151,6 +154,7 @@ impl AppState {
             files: AllowedFiles::default(),
             guard_off_session: std::sync::Mutex::default(),
             runlog: Arc::new(RunLogStore::in_memory()),
+            ai_runs_seen: AtomicI64::new(-1),
         })
     }
 
@@ -177,6 +181,7 @@ impl AppState {
             files: AllowedFiles::default(),
             guard_off_session: std::sync::Mutex::default(),
             runlog: Arc::new(RunLogStore::in_memory()),
+            ai_runs_seen: AtomicI64::new(-1),
         }
     }
 

@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
-  import type { DataLocationKey, DataLocations, Environment, GuardLevel, NumberFormat, Preferences } from "../ipc";
+  import type { AiAccess, DataLocationKey, DataLocations, Environment, GuardLevel, NumberFormat, Preferences } from "../ipc";
   import { ENVIRONMENTS } from "../connections/env";
   import { zoom } from "../zoom.svelte";
   import { prefs } from "./prefs.svelte";
@@ -17,8 +17,8 @@
   const DEBOUNCE_MS = 300;
   const SAVED_MS = 1500;
 
-  type Section = "general" | "environments" | "execution" | "copy" | "runLog" | "data";
-  type NumKey = "fontSize" | "zoom" | "queryTimeoutS" | "maxRows" | "runLogDays";
+  type Section = "general" | "environments" | "execution" | "copy" | "runLog" | "ai" | "data";
+  type NumKey = "fontSize" | "zoom" | "queryTimeoutS" | "maxRows" | "runLogDays" | "aiMaxRows" | "aiQueryTimeoutS";
 
   let root: HTMLElement;
   // What each section's "Saved" or status note says; empty most of the time.
@@ -58,6 +58,8 @@
     queryTimeoutS: "execution",
     maxRows: "execution",
     runLogDays: "runLog",
+    aiMaxRows: "ai",
+    aiQueryTimeoutS: "ai",
   };
   const shown = (key: NumKey) => drafts[key] ?? String(prefs.value[key]);
 
@@ -113,6 +115,7 @@
     { id: "invariant", label: t("settings.numbersInvariant") },
   ];
   const guards: GuardLevel[] = ["off", "confirm", "block"];
+  const aiLevels: AiAccess[] = ["none", "readOnly"];
 
   function setEnvironment(id: Environment, change: Partial<Preferences["environments"][Environment]>) {
     void save({ environments: { ...prefs.environments, [id]: { ...prefs.environments[id], ...change } } }, "environments");
@@ -142,6 +145,18 @@
       note("runLog", t("settings.runLogCleared"));
     } catch (e) {
       error = t("settings.clearFailed", { error: String(e) });
+    }
+  }
+
+  // AI assistants.
+  let setupCommand = $state("");
+  async function copySetup(kind: ipc.McpSetupKind) {
+    try {
+      await ipc.copyMcpSetup(kind);
+      error = null;
+      note("ai", t("settings.aiCopied"));
+    } catch (e) {
+      error = t("settings.aiCopyFailed", { error: String(e) });
     }
   }
 
@@ -175,6 +190,10 @@
 
   onMount(() => {
     root.focus();
+    ipc
+      .mcpSetup()
+      .then((m) => (setupCommand = m.claudeCode))
+      .catch(() => {});
     ipc
       .dataLocations()
       .then((l) => (locations = l))
@@ -274,6 +293,13 @@
             >
               {#each guards as g (g)}<option value={g} selected={style.guard === g}>{t(`guard.${g}`)}</option>{/each}
             </select>
+            <select
+              aria-label={t("settings.envAi", { env: t(env.label) })}
+              value={style.aiAccess}
+              onchange={(e) => setEnvironment(env.id, { aiAccess: e.currentTarget.value as AiAccess })}
+            >
+              {#each aiLevels as a (a)}<option value={a} selected={style.aiAccess === a}>{t(`ai.${a}`)}</option>{/each}
+            </select>
           </div>
         </div>
       {/each}
@@ -308,6 +334,30 @@
         <button type="button" class="ghost" bind:this={clearButton} onclick={() => (confirming = true)}>{t("settings.clearRunLog")}</button>
       </div>
       <p class="hint">{t("settings.runLogNote")}</p>
+      <p class="hint">{t("settings.runLogAiNote")}</p>
+    </section>
+
+    <section data-section="ai">
+      {@render head(t("settings.ai"), "ai")}
+      {@render num("aiMaxRows", "set-ai-rows", t("settings.aiMaxRows"), 1, 10_000)}
+      {@render num("aiQueryTimeoutS", "set-ai-timeout", t("settings.aiTimeout"), 1, 3_600)}
+      <div class="row place">
+        <div class="where">
+          <span class="lbl" id="ai-claude">{t("settings.aiSetup")} · {t("settings.aiClaude")}</span>
+          <code class="path">{setupCommand}</code>
+        </div>
+        <button type="button" class="ghost" aria-describedby="ai-claude" onclick={() => void copySetup("claude")}>
+          {t("settings.copy")}
+        </button>
+      </div>
+      <div class="row">
+        <span class="lbl"></span>
+        <div class="pair">
+          <button type="button" class="ghost" onclick={() => void copySetup("json")}>{t("settings.aiCopyJson")}</button>
+          <button type="button" class="ghost" onclick={() => void copySetup("vscode")}>{t("settings.aiCopyVscode")}</button>
+        </div>
+      </div>
+      <p class="hint">{t("settings.aiNote")}</p>
     </section>
 
     <section data-section="data">

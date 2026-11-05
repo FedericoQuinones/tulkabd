@@ -714,8 +714,8 @@ pub fn cap_cell(value: &mut Value, max: usize) -> bool {
 /// stored value, not this one.
 pub fn display_cell(value: &Value) -> Value {
     match value {
-        Value::Text(text) => match text.char_indices().nth(DISPLAY_TEXT_CHARS) {
-            Some((end, _)) => Value::Text(format!("{}…", &text[..end])),
+        Value::Text(text) => match shorten_text(text, DISPLAY_TEXT_CHARS) {
+            Some(shortened) => Value::Text(shortened),
             None => value.clone(),
         },
         Value::Bytes(bytes) if bytes.len() > DISPLAY_BYTES => {
@@ -723,6 +723,14 @@ pub fn display_cell(value: &Value) -> Value {
         }
         _ => value.clone(),
     }
+}
+
+/// `text` cut to its first `max_chars` characters plus `…`, or `None` when
+/// it already fits.
+pub(crate) fn shorten_text(text: &str, max_chars: usize) -> Option<String> {
+    text.char_indices()
+        .nth(max_chars)
+        .map(|(end, _)| format!("{}…", &text[..end]))
 }
 
 /// The inclusive range `from..=to` of `items`, clamped; empty when inverted
