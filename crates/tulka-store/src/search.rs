@@ -66,7 +66,13 @@ impl Entry {
         let name = pattern
             .score(self.haystack.slice(self.name_start as usize..), matcher)
             .map(|s| {
-                let exact_name = self.object.name.to_lowercase() == exact;
+                // Compared char by char: no allocation per match.
+                let exact_name = self
+                    .object
+                    .name
+                    .chars()
+                    .flat_map(char::to_lowercase)
+                    .eq(exact.chars());
                 (
                     s + NAME_BONUS + if exact_name { EXACT_BONUS } else { 0 },
                     self.name_start,

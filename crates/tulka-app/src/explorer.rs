@@ -399,17 +399,20 @@ impl Explorer {
 
     /// Adds `order` to the queue of a connected Explorer (skipping what is
     /// queued already; `front` moves them to the front) and starts the
-    /// indexing task if none is running.
+    /// indexing task if none is running. `relist` also asks the task to list
+    /// the server's databases again before its next one.
     fn enqueue(
         self: &Arc<Self>,
         connection_id: &str,
         order: Vec<String>,
         front: bool,
+        relist: bool,
     ) -> Result<(), String> {
         let mut conns = self.conns();
         let conn = conns
             .get_mut(connection_id)
             .ok_or_else(|| NOT_CONNECTED.to_string())?;
+        conn.relist |= relist;
         if front {
             conn.queue.retain(|d| !order.contains(d));
             for db in order.into_iter().rev() {
@@ -434,12 +437,6 @@ impl Explorer {
             conn.task = Some(task);
         }
         Ok(())
-    }
-
-    fn want_relist(&self, connection_id: &str) {
-        if let Some(c) = self.conns().get_mut(connection_id) {
-            c.relist = true;
-        }
     }
 
     /// Takes the "list the databases again" request of the entry of `epoch`;
@@ -829,7 +826,7 @@ pub async fn connect_explorer(
     }
     let order = index_order(state, &connection_id, &databases);
     // Fails only if a disconnect came in meanwhile, which is fine.
-    let _ = explorer.enqueue(&connection_id, order, false);
+    let _ = explorer.enqueue(&connection_id, order, false, false);
     Ok(ExplorerInfo { server, databases })
 }
 
@@ -863,14 +860,14 @@ pub async fn refresh_metadata(
         .ok_or_else(|| NOT_CONNECTED.to_string())?;
     match database {
         Some(db) if !databases.contains(&db) => Err(NOT_FOUND.into()),
-        Some(db) => state.explorer.enqueue(&connection_id, vec![db], true),
+        Some(db) => state
+            .explorer
+            .enqueue(&connection_id, vec![db], true, false),
         None => {
             let order = index_order(state, &connection_id, &databases);
-            state.explorer.enqueue(&connection_id, order, false)?;
             // The databases may have changed on the server: the indexing
             // task lists them again before its next database.
-            state.explorer.want_relist(&connection_id);
-            Ok(())
+            state.explorer.enqueue(&connection_id, order, false, true)
         }
     }
 }
@@ -893,9 +890,7 @@ pub async fn clear_metadata_cache(state: &AppState) {
     for (id, databases) in connected {
         let order = index_order(state, &id, &databases);
         // Fails only if a disconnect came in meanwhile, which is fine.
-        if state.explorer.enqueue(&id, order, false).is_ok() {
-            state.explorer.want_relist(&id);
-        }
+        let _ = state.explorer.enqueue(&id, order, false, true);
     }
 }
 

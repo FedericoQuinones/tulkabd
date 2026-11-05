@@ -97,6 +97,10 @@ pub struct MssqlSession {
 /// Run once on a session that reads the catalog: dirty reads, so a
 /// transaction that has created or altered an object does not block the
 /// scan, and a lock timeout as a backstop for any other blocking.
+///
+/// Dirty catalog reads can catch DDL in flight: an object that is then rolled
+/// back shows as a ghost until the next index of that database, and a read
+/// torn by the DDL (error 601) fails only that database's snapshot.
 const META_SETUP: &str = "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; SET LOCK_TIMEOUT 10000";
 
 /// The default SQL Server port. With a named instance it means "ask SQL
