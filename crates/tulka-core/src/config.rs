@@ -535,11 +535,20 @@ impl ConfigStore {
     /// Saves the config atomically: the JSON is written and synced to a
     /// temporary file in the same directory, which then replaces the config.
     pub fn save(&self, config: &AppConfig) -> Result<(), ConfigError> {
-        let dir = match self.path.parent() {
-            Some(d) if !d.as_os_str().is_empty() => d,
-            _ => Path::new("."),
+        let (dir, own_dir) = match self.path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => (d, true),
+            _ => (Path::new("."), false),
         };
         fs::create_dir_all(dir)?;
+        // The folder holds connection details: owner only (never the current
+        // directory when the path has no folder of its own).
+        #[cfg(unix)]
+        if own_dir {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        }
+        #[cfg(not(unix))]
+        let _ = own_dir;
         let mut json = serde_json::to_string_pretty(config)?;
         json.push('\n');
 
@@ -551,7 +560,14 @@ impl ConfigStore {
         let tmp = dir.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
 
         let result = (|| -> io::Result<()> {
-            let mut f = File::create(&tmp)?;
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut f = options.open(&tmp)?;
             f.write_all(json.as_bytes())?;
             f.sync_all()?;
             drop(f);
@@ -574,6 +590,26 @@ impl ConfigStore {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_config_and_its_folder_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("cfg").join("config.json");
+        let store = ConfigStore::at(&path);
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        store.save(&AppConfig::default()).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+
+        // Loosened afterwards, a save tightens both again.
+        fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        store.save(&AppConfig::default()).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+    }
 
     #[test]
     fn config_without_preferences_loads_with_zoom_100() {
