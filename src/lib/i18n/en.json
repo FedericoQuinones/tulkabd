@@ -183,6 +183,7 @@
   "structure.clustered": "Clustered",
   "structure.nonclustered": "Nonclustered",
   "structure.loading": "Loading...",
+  "structure.refresh": "Refresh",
   "pane.run": "Run",
   "pane.runKey.other": "Ctrl ↵",
   "pane.runKey.mac": "⌘ ↵",
