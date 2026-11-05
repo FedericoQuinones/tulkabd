@@ -570,9 +570,21 @@ pub async fn connect_explorer(
         .find(|c| c.id == connection_id)
         .cloned()
         .ok_or_else(|| "the connection does not exist".to_string())?;
-    let password = resolve_password(state, &conn, password).await?;
-    let driver = state.driver(&conn.driver)?;
+    // Before the keychain read, so a disconnect meanwhile cancels this attempt.
     let epoch = explorer.begin_attempt(&connection_id);
+    let password = match resolve_password(state, &conn, password).await {
+        Ok(password) => password,
+        Err(e) => {
+            if explorer.is_current_attempt(&connection_id, epoch) {
+                explorer.cancel_attempt(&connection_id);
+            }
+            return Err(e);
+        }
+    };
+    if !explorer.is_current_attempt(&connection_id, epoch) {
+        return Err(CLOSED.into());
+    }
+    let driver = state.driver(&conn.driver)?;
     if let Some(old) = explorer.take(&connection_id, None) {
         Explorer::stop(old).await;
     }
