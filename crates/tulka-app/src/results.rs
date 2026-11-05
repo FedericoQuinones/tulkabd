@@ -65,8 +65,11 @@ pub struct PushOutcome {
     pub over_budget: bool,
 }
 
+/// Allocator bookkeeping assumed per heap-backed cell.
+const HEAP_OVERHEAD: usize = 16;
+
 /// Cheap estimate of the memory a stored row takes: a fixed size per cell
-/// plus the heap payload of text and binary cells.
+/// plus the capacity of text and binary cells and [`HEAP_OVERHEAD`] each.
 pub fn row_bytes(row: &[Value]) -> usize {
     std::mem::size_of::<Vec<Value>>()
         + row
@@ -80,8 +83,8 @@ pub fn row_bytes(row: &[Value]) -> usize {
                         | Value::Time(s)
                         | Value::DateTime(s)
                         | Value::DateTimeOffset(s)
-                        | Value::Uuid(s) => s.len(),
-                        Value::Bytes(b) => b.len(),
+                        | Value::Uuid(s) => s.capacity() + HEAP_OVERHEAD,
+                        Value::Bytes(b) => b.capacity() + HEAP_OVERHEAD,
                         Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => 0,
                     }
             })
@@ -96,6 +99,8 @@ pub struct ResultBuffer {
     pub cap: usize,
     /// Set when rows beyond `cap` were dropped.
     pub truncated: bool,
+    /// Set when rows were dropped because the run's memory budget ran out.
+    pub memory_cut: bool,
     /// Indexes into `rows` of the visible rows, in display order, set by
     /// [`ResultBuffer::set_view`]; `None` shows every row in arrival order.
     view: Option<Vec<u32>>,
@@ -202,6 +207,7 @@ impl ResultBuffer {
             rows: Vec::new(),
             cap,
             truncated: false,
+            memory_cut: false,
             view: None,
         }
     }
@@ -305,6 +311,7 @@ impl ResultBuffer {
             if budget.exhausted() {
                 out.over_budget = true;
                 self.truncated = true;
+                self.memory_cut = true;
                 break;
             }
             for cell in row.iter_mut() {

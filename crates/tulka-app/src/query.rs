@@ -598,11 +598,14 @@ impl Drop for Checkout<'_> {
 
 /// The warning shown once per run when [`MAX_RUN_BYTES`] cut a result at
 /// `rows` rows.
-fn budget_warning(rows: usize) -> String {
-    format!(
-        "The result was cut at {rows} rows because it exceeded the memory limit ({} MB). Narrow the query to see the rest.",
-        MAX_RUN_BYTES / (1024 * 1024)
-    )
+fn budget_warning(index: u32, rows: usize) -> String {
+    let mb = MAX_RUN_BYTES / (1024 * 1024);
+    let n = index + 1;
+    if rows == 0 {
+        format!("Result {n} was not kept because the run exceeded the memory limit ({mb} MB); later results were not kept either. Narrow the query.")
+    } else {
+        format!("Result {n} was cut at {rows} rows because the run exceeded the memory limit ({mb} MB); later results were not kept. Narrow the query.")
+    }
 }
 
 fn new_buffer(columns: Vec<Column>, max_rows: usize) -> SharedBuffer {
@@ -673,14 +676,16 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
                     let received = rows.len();
                     tally.saw_result = true;
                     tally.rows_received += received as u64;
-                    if let Some((total, truncated, outcome)) = self.push_rows(index, rows).await {
-                        counter.rows(index, received, total, truncated, self.emit);
+                    if let Some((total, truncated, memory_cut, outcome)) =
+                        self.push_rows(index, rows).await
+                    {
+                        counter.rows(index, received, (total, truncated, memory_cut), self.emit);
                         let capped = outcome.capped;
                         if outcome.over_budget && !warned_budget {
                             warned_budget = true;
                             (self.emit)(UiEvent::Message {
                                 kind: MessageKind::Warning,
-                                text: budget_warning(total),
+                                text: budget_warning(index, total),
                                 line: None,
                             });
                         }
@@ -749,14 +754,19 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
         &self,
         index: u32,
         rows: Vec<Vec<Value>>,
-    ) -> Option<(usize, bool, PushOutcome)> {
+    ) -> Option<(usize, bool, bool, PushOutcome)> {
         let buffer = self.buffer(index, None)?;
         let mut buffer = buffer.write().await;
         let outcome = {
             let mut budget = self.budget.lock().unwrap_or_else(|e| e.into_inner());
             buffer.push_rows(rows, &mut budget)
         };
-        Some((buffer.rows.len(), buffer.truncated, outcome))
+        Some((
+            buffer.rows.len(),
+            buffer.truncated,
+            buffer.memory_cut,
+            outcome,
+        ))
     }
 }
 
@@ -766,10 +776,10 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
 #[derive(Default)]
 struct RowCounter {
     index: Option<u32>,
-    /// Last (total, truncated) sent for `index`.
-    sent: Option<(usize, bool)>,
-    /// Latest (total, truncated) not sent yet.
-    pending: Option<(usize, bool)>,
+    /// Last (total, truncated, memory cut) sent for `index`.
+    sent: Option<(usize, bool, bool)>,
+    /// Latest (total, truncated, memory cut) not sent yet.
+    pending: Option<(usize, bool, bool)>,
     rows_since: usize,
     last: Option<Instant>,
 }
@@ -787,8 +797,7 @@ impl RowCounter {
         &mut self,
         index: u32,
         received: usize,
-        total: usize,
-        truncated: bool,
+        state: (usize, bool, bool),
         emit: &impl Fn(UiEvent),
     ) {
         if self.index != Some(index) {
@@ -796,7 +805,7 @@ impl RowCounter {
             self.finish(emit);
             self.start(index);
         }
-        self.pending = Some((total, truncated));
+        self.pending = Some(state);
         self.rows_since += received;
         let due = self.last.is_none_or(|t| t.elapsed() >= ROW_COUNT_INTERVAL);
         if self.rows_since >= ROW_COUNT_ROWS || due {
@@ -824,6 +833,7 @@ impl RowCounter {
                 index,
                 total: state.0,
                 truncated: state.1,
+                memory_cut: state.2,
             });
             self.sent = Some(state);
         }
@@ -839,6 +849,7 @@ impl RowCounter {
                 index,
                 total: 0,
                 truncated: false,
+                memory_cut: false,
             });
         }
         *self = RowCounter::default();
@@ -978,9 +989,9 @@ mod tests {
         assert_eq!(tally.rows_received, 60);
         let buffer = state.tabs().open["t1"].results[0].clone();
         let b = buffer.read().await;
-        assert!(b.truncated && b.rows.len() < 20);
+        assert!(b.truncated && b.memory_cut && b.rows.len() < 20);
         let messages = messages.lock().unwrap();
         assert_eq!(messages.len(), 1);
-        assert!(messages[0].contains(&format!("cut at {} rows", b.rows.len())));
+        assert!(messages[0].contains(&format!("Result 1 was cut at {} rows", b.rows.len())));
     }
 }
