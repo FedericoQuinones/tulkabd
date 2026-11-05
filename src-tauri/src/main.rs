@@ -22,5 +22,12 @@ fn main() {
         // SAFETY: first statement of main, so no other thread exists yet.
         unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
     }
+    // GTK's own GL context is unused (WebKit renders in its web process) but
+    // pulls in the GL driver stack; turning it off saves ~10 MB of idle PSS.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("GDK_GL").is_none() {
+        // SAFETY: still single-threaded, see above.
+        unsafe { std::env::set_var("GDK_GL", "disable") };
+    }
     tulkabd_lib::run()
 }
