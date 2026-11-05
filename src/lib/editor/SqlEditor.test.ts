@@ -111,3 +111,15 @@ test("a loaded definition is not an edit; typing is", () => {
   expect(onedit).toHaveBeenCalledTimes(1);
   expect(pane.edits).toBe(1);
 });
+
+test("Ctrl+F opens the translated search panel and Escape closes it", () => {
+  show(new PaneState("t"));
+  const cm = document.querySelector(".cm-content") as HTMLElement;
+  cm.dispatchEvent(new KeyboardEvent("keydown", { key: "f", code: "KeyF", ctrlKey: true, bubbles: true, cancelable: true }));
+  const panel = document.querySelector(".cm-search");
+  expect(panel).not.toBeNull();
+  expect(panel!.textContent).toContain("replace all");
+  expect((panel!.querySelector("input[name=search]") as HTMLInputElement).placeholder).toBe("Find");
+  panel!.querySelector("input")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  expect(document.querySelector(".cm-search")).toBeNull();
+});
