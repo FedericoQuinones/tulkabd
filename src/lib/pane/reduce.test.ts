@@ -6,8 +6,10 @@ const body = (): PaneBody => ({ results: [], messages: [], disconnected: false }
 test("resultStart then rowCount builds a result", () => {
   const b = body();
   reduceEvent(b, { kind: "resultStart", index: 0, columns: [{ name: "a", typeName: "int" }] }, 0);
-  reduceEvent(b, { kind: "rowCount", index: 0, total: 5, truncated: true }, 0);
-  expect(b.results).toEqual([{ columns: [{ name: "a", typeName: "int" }], total: 5, truncated: true }]);
+  reduceEvent(b, { kind: "rowCount", index: 0, total: 5, truncated: true, memoryCut: false }, 0);
+  expect(b.results).toEqual([{ columns: [{ name: "a", typeName: "int" }], total: 5, truncated: true, memoryCut: false }]);
+  reduceEvent(b, { kind: "rowCount", index: 0, total: 3, truncated: true, memoryCut: true }, 0);
+  expect(b.results[0]).toMatchObject({ total: 3, memoryCut: true });
 });
 
 test("message line is shifted by lineOffset", () => {

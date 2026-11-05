@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { modal } from "../dialogFocus";
   import { onMount, untrack } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
@@ -233,7 +234,7 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="backdrop" {onkeydown}>
-  <div class="panel" role="dialog" aria-modal="true" aria-labelledby="conn-title">
+  <div class="panel" role="dialog" aria-modal="true" aria-labelledby="conn-title" use:modal>
     <div class="panel-h" id="conn-title">
       {isEdit ? t("connection.dialog.edit") : t("connection.dialog.new")}
     </div>

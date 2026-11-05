@@ -197,7 +197,7 @@ pub struct CompletionMetadata {
 /// `RowCount`, because rows stay in the Rust-side buffers.
 ///
 /// Serialized internally tagged, like [`ExecEvent`]:
-/// `{"kind": "rowCount", "index": 0, "total": 500, "truncated": false}`.
+/// `{"kind": "rowCount", "index": 0, "total": 500, "truncated": false, "memoryCut": false}`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(
     tag = "kind",
@@ -211,11 +211,13 @@ pub enum UiEvent {
         columns: Vec<Column>,
     },
     /// Result set `index` now holds `total` rows (at most the cap);
-    /// `truncated` once rows beyond the cap were dropped.
+    /// `truncated` once rows beyond the cap were dropped, `memory_cut` when
+    /// that was for the run's memory limit rather than the row cap.
     RowCount {
         index: u32,
         total: usize,
         truncated: bool,
+        memory_cut: bool,
     },
     /// A server message. Serialized as `messageKind` because the tag is `kind`.
     Message {
@@ -355,8 +357,18 @@ mod tests {
                     index: 1,
                     total: 500,
                     truncated: false,
+                    memory_cut: false,
                 },
-                json!({"kind": "rowCount", "index": 1, "total": 500, "truncated": false}),
+                json!({"kind": "rowCount", "index": 1, "total": 500, "truncated": false, "memoryCut": false}),
+            ),
+            (
+                UiEvent::RowCount {
+                    index: 2,
+                    total: 0,
+                    truncated: true,
+                    memory_cut: true,
+                },
+                json!({"kind": "rowCount", "index": 2, "total": 0, "truncated": true, "memoryCut": true}),
             ),
             (
                 UiEvent::Message {

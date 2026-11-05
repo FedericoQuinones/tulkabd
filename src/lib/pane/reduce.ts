@@ -5,6 +5,8 @@ export interface PaneResult {
   columns: Column[];
   total: number;
   truncated: boolean;
+  /** The rows were cut for the run's memory limit, not the row cap. */
+  memoryCut: boolean;
 }
 
 export interface PaneMessage {
@@ -35,13 +37,14 @@ export function pushDisconnectedMessage(body: Pick<PaneBody, "messages">): void 
 export function reduceEvent(body: PaneBody, e: UiEvent, lineOffset: number): void {
   switch (e.kind) {
     case "resultStart":
-      body.results[e.index] = { columns: e.columns, total: 0, truncated: false };
+      body.results[e.index] = { columns: e.columns, total: 0, truncated: false, memoryCut: false };
       break;
     case "rowCount": {
       const r = body.results[e.index];
       if (r) {
         r.total = e.total;
         r.truncated = e.truncated;
+        r.memoryCut = e.memoryCut;
       }
       break;
     }

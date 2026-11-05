@@ -9,6 +9,7 @@
 </script>
 
 <script lang="ts">
+  import { modal } from "../dialogFocus";
   import { onMount } from "svelte";
   import { t } from "../i18n/t";
   import { canMoveFolder } from "./tree";
@@ -91,6 +92,7 @@
   <div
     class="panel"
     bind:this={panel}
+    use:modal
     role={mode.kind === "confirm" ? "alertdialog" : "dialog"}
     aria-modal="true"
     aria-labelledby="fd-title"

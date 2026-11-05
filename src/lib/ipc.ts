@@ -63,7 +63,7 @@ export type MessageKind = "info" | "warning" | "error";
 /** Events forwarded by `run_query`; `rows` is replaced by `rowCount` (rows stay in the Rust buffer). */
 export type UiEvent =
   | { kind: "resultStart"; index: number; columns: Column[] }
-  | { kind: "rowCount"; index: number; total: number; truncated: boolean }
+  | { kind: "rowCount"; index: number; total: number; truncated: boolean; memoryCut: boolean }
   | { kind: "message"; messageKind: MessageKind; text: string; line: number | null }
   | { kind: "rowsAffected"; count: number }
   | { kind: "batchDone"; batch: number }
