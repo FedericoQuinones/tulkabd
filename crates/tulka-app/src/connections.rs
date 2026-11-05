@@ -90,7 +90,17 @@ pub async fn save_connection(
         Some(i) => next.connections[i] = conn.clone(),
         None => next.connections.push(conn.clone()),
     }
+    let previous = existing.map(|i| current.connections[i].clone());
     *current = persist(state, next).await?;
+    // Cached databases and objects belong to a server: once the connection
+    // points elsewhere (and no Explorer holds the old one), forget them.
+    if let Some(old) = previous {
+        let moved =
+            old.server != conn.server || old.port != conn.port || old.databases != conn.databases;
+        if moved && !crate::explorer::explorer_connected(state, &conn.id) {
+            crate::explorer::forget_cached_metadata(state, &conn.id).await;
+        }
+    }
     if guard_changed {
         crate::guard::set_guard_off_for_session(state, &conn.id, false);
     }

@@ -1389,3 +1389,31 @@ async fn a_full_refresh_lists_the_databases_again() {
     .await
     .expect("the vanished database stayed");
 }
+
+#[tokio::test]
+async fn moving_an_offline_connection_forgets_its_cached_metadata() {
+    let f = indexed(Inner::new(&["a", "b"])).await;
+    disconnect_explorer(&f.state, "c1".into()).await.unwrap();
+    assert_eq!(explorer_databases(&f.state, "c1".into()).await.len(), 2);
+
+    // Renaming keeps the cache: the server is the same.
+    let mut c = conn("c1", "Renamed", None);
+    save(&f, c.clone()).await;
+    assert_eq!(explorer_databases(&f.state, "c1".into()).await.len(), 2);
+    assert_eq!(search(&f, "V_a").await.hits.len(), 1);
+
+    // Another host: the old server's databases must not linger.
+    c.server = "other-host".into();
+    save(&f, c.clone()).await;
+    assert!(explorer_databases(&f.state, "c1".into()).await.is_empty());
+    assert!(search(&f, "V_a").await.hits.is_empty());
+}
+
+#[tokio::test]
+async fn editing_a_connected_connection_keeps_what_the_explorer_holds() {
+    let f = indexed(Inner::new(&["a"])).await;
+    let mut c = conn("c1", "Main", None);
+    c.port = 1444;
+    save(&f, c).await;
+    assert_eq!(explorer_databases(&f.state, "c1".into()).await.len(), 1);
+}

@@ -1180,6 +1180,14 @@ pub(crate) async fn forget_connection(state: &AppState, connection_id: &str) {
     if let Some(conn) = explorer.take(connection_id, None) {
         Explorer::stop(conn).await;
     }
+    forget_cached_metadata(state, connection_id).await;
+}
+
+/// Drops the cached metadata and the search entries of a connection, leaving
+/// its Explorer alone. Used when the connection now points at another server,
+/// whose databases the old rows say nothing about.
+pub(crate) async fn forget_cached_metadata(state: &AppState, connection_id: &str) {
+    let explorer = &state.explorer;
     let id = connection_id.to_string();
     explorer
         .with_cache(move |cache| cache.forget_connection(&id))
@@ -1188,6 +1196,11 @@ pub(crate) async fn forget_connection(state: &AppState, connection_id: &str) {
     explorer
         .update_index(move |index| index.remove_connection(&id))
         .await;
+}
+
+/// Whether the Explorer of `connection_id` is connected.
+pub(crate) fn explorer_connected(state: &AppState, connection_id: &str) -> bool {
+    state.explorer.conns().contains_key(connection_id)
 }
 
 #[cfg(test)]
