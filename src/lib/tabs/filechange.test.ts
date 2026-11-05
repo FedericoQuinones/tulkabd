@@ -148,3 +148,10 @@ test("closing with Save over a changed file keeps the tab and says why", async (
   expect(tabs.list.some((x) => x.id === tab.id)).toBe(true);
   expect(tabs.unsavedPrompt?.error).toBeTruthy();
 });
+
+test("the same file spelled two ways opens one tab", async () => {
+  vi.mocked(ipc.readSqlFile).mockResolvedValue(opened("SELECT 1", 100));
+  await tabs.openFiles(["/a.sql", "//a.sql"]);
+  await tabs.openFiles(["/a.sql/"]);
+  expect(tabs.list).toHaveLength(1);
+});

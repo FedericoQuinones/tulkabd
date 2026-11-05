@@ -166,6 +166,16 @@ export function fileErrorText(e: unknown): string {
   return s;
 }
 
+/**
+ * A path as compared to find an open tab: one kind of separator, no doubled or trailing ones, and
+ * case ignored where file systems usually do (Windows and macOS).
+ */
+export function pathKey(path: string): string {
+  const folded = typeof navigator !== "undefined" && /Win|Mac/.test(navigator.platform);
+  const key = path.replace(/[\\/]+/g, "/").replace(/(.)\/$/, "$1");
+  return folded ? key.toLowerCase() : key;
+}
+
 const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
 /** Environment color of the connection a tab is bound to; the neutral control color when unbound. */
@@ -1042,7 +1052,8 @@ export class TabsStore {
    */
   async openFiles(paths: string[]): Promise<void> {
     const { connectionId, database } = this.binding(this.active);
-    const unique = [...new Set(paths)];
+    const seen = new Set<string>();
+    const unique = paths.filter((p) => !seen.has(pathKey(p)) && seen.add(pathKey(p)));
     const read = await Promise.all(
       unique.map((path) =>
         this.tabOfFile(path)
@@ -1139,7 +1150,8 @@ export class TabsStore {
   }
 
   private tabOfFile(path: string): Tab | undefined {
-    return this.list.find((x) => x.file?.path === path);
+    const key = pathKey(path);
+    return this.list.find((x) => x.file && pathKey(x.file.path) === key);
   }
 
   /** The tab now holds a saved query: it takes its name, and a definition tab stops being one. */
@@ -1165,17 +1177,21 @@ export class TabsStore {
   }
 
   /**
-   * The open tab of a saved query. With `connectionId` (a tree click), only one bound to that
-   * connection and the query's database, or still connecting to them; any one otherwise.
+   * The open tab of a saved query. With `connectionId` (a tree click), one bound to that
+   * connection and the query's database, or still connecting to them, comes first; any other tab
+   * of the query is the fallback, so the same query is never open twice (two tabs would
+   * overwrite each other's saves).
    */
   private tabOf(q: { database: string; name: string }, connectionId: string | null = null): Tab | undefined {
-    return this.list.find((x) => {
-      if (x.savedQuery?.database !== q.database || x.savedQuery.name !== q.name) return false;
-      if (connectionId === null) return true;
-      const bound = this.binding(x);
-      const b = bound.connectionId !== null ? bound : (this.wanted.get(x.id) ?? bound);
-      return b.connectionId === connectionId && b.database === q.database;
-    });
+    const same = this.list.filter((x) => x.savedQuery?.database === q.database && x.savedQuery.name === q.name);
+    if (connectionId === null) return same[0];
+    return (
+      same.find((x) => {
+        const bound = this.binding(x);
+        const b = bound.connectionId !== null ? bound : (this.wanted.get(x.id) ?? bound);
+        return b.connectionId === connectionId && b.database === q.database;
+      }) ?? same[0]
+    );
   }
 
   /**
