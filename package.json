@@ -2,6 +2,7 @@
   "name": "tulkabd",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@11.5.0",
   "description": "A lightweight, cross-platform desktop client for Microsoft SQL Server",
   "type": "module",
   "license": "MIT OR Apache-2.0",
