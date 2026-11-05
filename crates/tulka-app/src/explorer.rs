@@ -584,7 +584,15 @@ pub async fn connect_explorer(
     if !explorer.is_current_attempt(&connection_id, epoch) {
         return Err(CLOSED.into());
     }
-    let driver = state.driver(&conn.driver)?;
+    let driver = match state.driver(&conn.driver) {
+        Ok(driver) => driver,
+        Err(e) => {
+            if explorer.is_current_attempt(&connection_id, epoch) {
+                explorer.cancel_attempt(&connection_id);
+            }
+            return Err(e);
+        }
+    };
     if let Some(old) = explorer.take(&connection_id, None) {
         Explorer::stop(old).await;
     }
