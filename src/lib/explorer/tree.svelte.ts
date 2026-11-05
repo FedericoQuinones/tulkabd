@@ -273,10 +273,15 @@ class ExplorerStore {
     }
   }
 
-  /** After an edit is saved: a live session still reads the old server and database list, so reconnect it. */
-  reconnectIfLive(id: string, password?: string): void {
+  /** Whether the Explorer of `id` is connected or connecting. Read before a save: its stop event may arrive before the save's reply. */
+  isLive(id: string): boolean {
     const status = this.state(id).status;
-    if (status === "connected" || status === "connecting") void this.connect(id, password);
+    return status === "connected" || status === "connecting";
+  }
+
+  /** After an edit is saved while live: the backend stopped the session that read the old server, so connect again. */
+  reconnectIfLive(id: string, wasLive: boolean, password?: string): void {
+    if (wasLive) void this.connect(id, password);
   }
 
   async submitPassword(password: string): Promise<void> {
@@ -420,11 +425,7 @@ class ExplorerStore {
     const st = this.conns[id];
     if (st) {
       st.databases = null;
-      if (connections.list.some((c) => c.id === id)) {
-        // The backend stopped its Explorer for the new server: connect to it again.
-        if (st.status === "connected" || st.status === "connecting") void this.connect(id);
-        else void this.loadDatabases(id);
-      }
+      if (connections.list.some((c) => c.id === id)) void this.loadDatabases(id);
     }
   }
 

@@ -447,13 +447,6 @@ test("changing a connection's server or deleting it drops what was read for it",
   expect(Object.keys(explorer.objects)).toEqual([other]);
   expect(explorer.state("c2").databases).toEqual([]);
 
-  // A connected one reconnects to the new server.
-  explorer.state("c2").status = "connected";
-  vi.mocked(ipc.connectExplorer).mockResolvedValue({ server: { version: "", user: "", singleDatabase: false }, databases: [] } as never);
-  await connections.save({ ...edited, port: 1444 });
-  await flush();
-  expect(ipc.connectExplorer).toHaveBeenCalledWith("c2", undefined);
-
   // Same server: nothing is dropped.
   seed();
   await connections.save({ ...local, name: "Renamed" });
@@ -464,6 +457,28 @@ test("changing a connection's server or deleting it drops what was read for it",
   vi.mocked(ipc.listConnections).mockResolvedValue([sales, billing]);
   await connections.remove("c2");
   expect(Object.keys(explorer.objects)).toEqual([other]);
+});
+
+test("a live connection reconnects after a save even when its stop event arrives first", async () => {
+  explorer.state("c2").status = "connected";
+  const wasLive = explorer.isLive("c2");
+  const edited = { ...local, port: 1444 } as ConnectionConfig;
+  // The backend stops the Explorer during the save: the event beats the reply.
+  vi.mocked(ipc.saveConnection).mockImplementation(async () => {
+    explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "disconnected", message: null });
+    return { connection: edited, keyringUnavailable: false };
+  });
+  vi.mocked(ipc.connectExplorer).mockResolvedValue({ server: { version: "", user: "", singleDatabase: false }, databases: [] } as never);
+  await connections.save(edited, "pw");
+  expect(explorer.state("c2").status).toBe("offline");
+  explorer.reconnectIfLive("c2", wasLive, "pw");
+  await flush();
+  expect(ipc.connectExplorer).toHaveBeenCalledWith("c2", "pw");
+  expect(explorer.state("c2").status).toBe("connected");
+  // Not live before the save: nothing reconnects.
+  vi.mocked(ipc.connectExplorer).mockClear();
+  explorer.reconnectIfLive("c2", false);
+  expect(ipc.connectExplorer).not.toHaveBeenCalled();
 });
 
 test("moving a folder into its own child does not call moveFolder", async () => {
