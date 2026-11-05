@@ -11,7 +11,7 @@
   import type { ColumnFilter, Value } from "../ipc";
   import type { PaneResult } from "../pane/reduce";
   import { cellText } from "./cellText";
-  import { fitWidth, MIN_COLUMN_WIDTH, recallWidths, rememberWidth } from "./columnWidths";
+  import { fitWidth, MAX_RESIZE_WIDTH, MIN_COLUMN_WIDTH, recallWidths, rememberWidth } from "./columnWidths";
   import ColumnMenu from "./ColumnMenu.svelte";
   import { gridKey, type Cell } from "./gridKeys";
   import { isSelected, type GridSelection } from "./selection";
@@ -22,6 +22,7 @@
     idColumnWidth,
     isScaled,
     maxVirtualTop,
+    resyncedTop,
     revealRowTop,
     rowHeight,
     spacerHeight,
@@ -121,10 +122,27 @@
   const page = $derived(Math.max(1, Math.floor(bodyHeight / rowH)));
 
   // Coming back to a tab: the grid starts where it was left.
+  // Below the spacer cap the mapping is the identity; above it, it waits for the viewport height.
+  let restored = false;
   $effect(() => {
-    if (!gridEl) return;
+    if (!gridEl || restored || (viewportHeight <= 0 && isScaled(geo))) return;
+    restored = true;
     untrack(() => {
       if (scroll > 0) setScroll(scroll);
+    });
+  });
+
+  // When the geometry changes (rows streaming in, a resize), the scale factor of a capped spacer
+  // changes with it: keep the same first visible row, or the end if the grid was there.
+  let shownGeo: ScrollGeometry = untrack(() => geo);
+  $effect(() => {
+    const g = geo;
+    untrack(() => {
+      const prev = shownGeo;
+      shownGeo = g;
+      if (!gridEl || !restored || prev.rowH !== g.rowH || (!isScaled(prev) && !isScaled(g))) return;
+      if (prev.total === g.total && prev.bodyH === g.bodyH) return;
+      setScroll(resyncedTop(scrollTop, prev, g));
     });
   });
 
@@ -295,7 +313,7 @@
   }
 
   function setWidth(col: number, width: number) {
-    const w = Math.max(MIN_COLUMN_WIDTH, width);
+    const w = Math.min(MAX_RESIZE_WIDTH, Math.max(MIN_COLUMN_WIDTH, width));
     widths[col] = w;
     const name = columns[col]?.name;
     if (name !== undefined) rememberWidth(tabId, name, w);
@@ -372,6 +390,7 @@
     scrollLeft = e.currentTarget.scrollLeft;
     if (programmatic !== null && Math.abs(top - programmatic) <= 1) {
       // Our own scroll: the exact row-space position is already in `scrollTop`.
+      programmatic = null;
       if (!isScaled(geo)) scrollTop = top;
     } else {
       programmatic = null;
@@ -420,6 +439,8 @@
             aria-label={t("results.resize", { name: c.name })}
             aria-valuenow={colWidth(i)}
             aria-valuemin={MIN_COLUMN_WIDTH}
+            aria-valuemax={MAX_RESIZE_WIDTH}
+            aria-valuetext="{colWidth(i)} px"
             tabindex="0"
             onpointerdown={(e) => startResize(e, i)}
             ondblclick={() => fitColumn(i)}
@@ -534,6 +555,7 @@
   .inner {
     position: relative;
     min-width: 100%;
+    overflow: clip;
   }
   .head {
     font-size: calc(12px * var(--code-zoom) / 100);

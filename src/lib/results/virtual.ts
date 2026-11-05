@@ -147,3 +147,13 @@ export function visibleColumns(
   }
   return { start, end: i, offset };
 }
+
+/**
+ * Row-space scroll position to keep after the geometry went from `prev` to `next`: the same first
+ * row, or the end when the grid was scrolled to the end (rows streaming in keep it there).
+ */
+export function resyncedTop(virtual: number, prev: ScrollGeometry, next: ScrollGeometry): number {
+  const max = maxVirtualTop(next);
+  if (prev.total > 0 && virtual >= maxVirtualTop(prev) - 1) return max;
+  return Math.min(Math.max(virtual, 0), max);
+}

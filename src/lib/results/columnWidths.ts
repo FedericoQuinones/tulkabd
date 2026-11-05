@@ -1,5 +1,7 @@
 /** Narrowest a column can be dragged or fitted to, in px. */
 export const MIN_COLUMN_WIDTH = 48;
+/** Widest a column can be resized to, in px. */
+export const MAX_RESIZE_WIDTH = 2000;
 /** Widest an auto-fit column gets, in px. */
 export const MAX_FIT_WIDTH = 600;
 

@@ -7,6 +7,7 @@ import {
   MAX_SPACER,
   maxRealTop,
   maxVirtualTop,
+  resyncedTop,
   revealRowTop,
   rowHeight,
   spacerHeight,
@@ -99,4 +100,14 @@ test("only the columns near the viewport are rendered", () => {
   expect(visibleColumns(1000, w, 56, 5000, 500, 300)).toEqual({ start: 46, end: 58, offset: 4600 });
   expect(visibleColumns(3, w, 56, 0, 0)).toEqual({ start: 0, end: 3, offset: 0 });
   expect(visibleColumns(3, w, 56, 10_000, 500, 0)).toEqual({ start: 3, end: 3, offset: 300 });
+});
+
+test("streaming more rows keeps the first row, or the end if the grid was at the end", () => {
+  const a = { total: 1_000_000, rowH: 34, bodyH: 800 };
+  const b = { total: 2_000_000, rowH: 34, bodyH: 800 };
+  expect(resyncedTop(5e6, a, b)).toBe(5e6);
+  expect(resyncedTop(maxVirtualTop(a), a, b)).toBe(maxVirtualTop(b));
+  // The same row sits at a different real scrollTop once the factor changed.
+  expect(toRealTop(5e6, b)).not.toBeCloseTo(toRealTop(5e6, a), 0);
+  expect(resyncedTop(9e9, a, a)).toBe(maxVirtualTop(a));
 });
