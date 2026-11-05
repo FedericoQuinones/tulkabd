@@ -21,6 +21,11 @@
 //! - Anything the check cannot read with certainty is refused as unparsed:
 //!   control characters, a bare `\r`, symbols outside T-SQL's operator set,
 //!   Unicode spaces and non-ASCII letters outside bracketed names.
+//! - A word or literal written right after a number with no space is
+//!   refused, because SQL Server splits `1eDELETE` into `1e` and `DELETE`.
+//!   This also refuses valid queries such as `1.e5`, `1AND`, `1DESC`,
+//!   `1[x]`, `1'x'` and money literals like `$1.50`; add a space or use a
+//!   plain number.
 
 use tulka_core::{ReadOnlyReason, ReadOnlyViolation};
 
@@ -303,7 +308,8 @@ fn glued_to_number(text: &str, tokens: &[Token], i: usize) -> bool {
     if t.kind == Kind::Num {
         let n = lexer::src(text, t);
         let last = n.as_bytes()[n.len() - 1];
-        // An exponent without digits, or a dot right before a letter.
+        // An exponent without digits. The lexer does not produce such a
+        // number today; the check stays in case it ever does.
         if !n.starts_with("0x") && !n.starts_with("0X") && matches!(last, b'e' | b'E' | b'+' | b'-')
         {
             return true;
