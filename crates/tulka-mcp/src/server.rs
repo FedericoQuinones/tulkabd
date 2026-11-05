@@ -87,6 +87,8 @@ pub struct TulkaServer {
     tool_router: ToolRouter<Self>,
     /// How many tool calls are running now.
     in_flight: Arc<watch::Sender<usize>>,
+    /// The version reported to clients: the app's.
+    version: String,
 }
 
 /// Counts a running tool call for as long as it lives.
@@ -124,7 +126,14 @@ impl TulkaServer {
             state,
             tool_router: Self::tool_router(),
             in_flight: Arc::new(watch::channel(0).0),
+            version: env!("CARGO_PKG_VERSION").to_string(),
         }
+    }
+
+    /// Reports `version` (the app's) to clients instead of this crate's.
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = version.into();
+        self
     }
 
     /// A handle to wait for running calls once the session is over.
@@ -230,7 +239,7 @@ impl TulkaServer {
 impl ServerHandler for TulkaServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("tulkabd", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new("tulkabd", self.version.clone()))
             .with_instructions(INSTRUCTIONS)
     }
 }
