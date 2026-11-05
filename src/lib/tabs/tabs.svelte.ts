@@ -1246,25 +1246,26 @@ export class TabsStore {
   }
 
   /**
-   * Replaces the whole workspace with a restored one (see `restore` in workspace/session). Nothing
-   * connects: a bound tab opens its session on its first Run. Untitled numbering continues after
-   * the highest restored `untitled-N`.
+   * Puts a restored workspace in place (see `restore` in workspace/session). Nothing connects: a
+   * bound tab opens its session on its first Run. Untitled numbering continues after the highest
+   * restored `untitled-N`. Tabs the user opened before the restore finished are not dropped: they
+   * join the restored active group, after the restored tabs, and the last of them is shown.
    */
   replaceWorkspace(w: { list: Tab[]; tabGroups: TabGroup[]; layout: Layout; activeGroupId: string }): void {
-    const old = this.list.map((x) => x.pane);
-    this.list = w.list;
+    const early = this.list;
+    this.list = [...w.list, ...early];
     this.tabGroups = w.tabGroups;
     this.layout = w.layout;
     this.activeGroupId = w.activeGroupId;
-    this.passwordRequests = [];
-    this.nameRequest = null;
-    this.unsavedPrompt = null;
-    this.endPrompt();
-    this.pending.clear();
-    this.wanted.clear();
+    const group = this.group(w.activeGroupId);
+    if (group && early.length > 0) {
+      group.tabIds.push(...early.map((x) => x.id));
+      group.activeId = early[early.length - 1].id;
+      this.shown++;
+    }
     for (const tab of w.list) this.track(tab);
-    this.counter = Math.max(0, ...w.list.map((x) => Number(/^untitled-(\d+)$/.exec(x.title)?.[1] ?? 0)));
-    for (const p of old) void p?.close();
+    const restored = w.list.map((x) => Number(/^untitled-(\d+)$/.exec(x.title)?.[1] ?? 0));
+    this.counter = Math.max(this.counter, 0, ...restored);
   }
 
   /**

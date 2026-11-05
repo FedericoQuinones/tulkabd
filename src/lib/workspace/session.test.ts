@@ -680,3 +680,18 @@ test("a restored definition tab offers Retry only while its connection exists", 
   expect(document.querySelector(".notice")?.textContent).toContain(t("tabs.restoredWithoutConnection"));
   expect(retry()).toHaveLength(0);
 });
+
+test("tabs opened before the restore finishes join the restored workspace", async () => {
+  tabs.open({ kind: "query", sql: "SELECT 'saved'" });
+  const json = JSON.stringify(snapshot(tabs));
+  await tabs.reset();
+  const early = tabs.open({ kind: "query", sql: "SELECT 'early'" });
+  const pane = tabs.list.find((x) => x.id === early)!.pane!;
+  vi.mocked(ipc.closeSession).mockClear();
+  restore(tabs, parseSession(json)!, known);
+  expect(tabs.list.map((x) => x.pane!.text())).toEqual(["SELECT 'saved'", "SELECT 'early'"]);
+  expect(tabs.list.find((x) => x.id === early)!.pane).toBe(pane);
+  expect(tabs.groupOf(early)).not.toBe("");
+  expect(tabs.activeId).toBe(early);
+  expect(ipc.closeSession).not.toHaveBeenCalled();
+});
