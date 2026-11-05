@@ -11,6 +11,7 @@
   "explorer.empty": "No connections yet",
   "explorer.new": "New connection",
   "status.ready": "Ready",
+  "status.connecting": "Connecting...",
   "status.noConnection": "No connection",
   "results.rowsShown": "{shown} of {total} rows",
   "explorer.connectFailed": "Could not connect: {error}",

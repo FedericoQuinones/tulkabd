@@ -254,6 +254,7 @@
     status={activePane?.status ?? "idle"}
     session={activePane?.session ?? null}
     cursor={activePane?.cursor ?? { line: 1, col: 1 }}
+    error={tabs.active?.connectError ?? null}
     onreconnect={() => tabs.reconnectActive()}
   />
 </div>

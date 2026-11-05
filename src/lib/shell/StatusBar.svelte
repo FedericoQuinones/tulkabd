@@ -9,15 +9,21 @@
     session: SessionInfo | null;
     cursor: { line: number; col: number };
     onreconnect: () => void;
+    /** Why the tab's last connect failed. */
+    error?: string | null;
   }
-  let { status, session, cursor, onreconnect }: Props = $props();
+  let { status, session, cursor, onreconnect, error = null }: Props = $props();
 </script>
 
 <footer class="status">
   {#if status === "disconnected"}
     <span class="lost">{t("status.disconnected")} · <button onclick={onreconnect}>{t("pane.reconnect")}</button></span>
+  {:else if status === "connecting"}
+    <span>{t("status.connecting")}</span>
   {:else if session}
     <span>{t("status.connected")}</span>
+  {:else if error}
+    <span class="lost" role="alert">{t("status.noConnection")} · {error}</span>
   {:else}
     <span>{t("status.noConnection")}</span>
   {/if}
