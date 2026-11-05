@@ -92,10 +92,10 @@ export const END_RETRY_MS = 50;
 /** Attempts before giving up on a tab whose query does not stop. */
 export const END_RETRIES = 100;
 
-/** Longest wait for a tab to say how many transactions it holds before it counts as unknown. */
 /** Pause between looks at whether the dialog in the way has been answered. */
 export const MODAL_POLL_MS = 50;
 
+/** Longest wait for a tab to say how many transactions it holds before it counts as unknown. */
 export const CHECK_TIMEOUT_MS = 3000;
 const GUARD_LOG_WAIT_MS = 500;
 
@@ -801,7 +801,10 @@ export class TabsStore {
     while (this.modalOpen()) {
       await new Promise<void>((resolve) => {
         this.promptWaiters.push(resolve);
-        setTimeout(resolve, MODAL_POLL_MS);
+        setTimeout(() => {
+          this.promptWaiters = this.promptWaiters.filter((w) => w !== resolve);
+          resolve();
+        }, MODAL_POLL_MS);
       });
     }
   }
