@@ -104,10 +104,12 @@ pub struct AiState {
     config_error: Option<String>,
     secrets: Arc<dyn SecretStore>,
     drivers: HashMap<&'static str, Arc<dyn Driver>>,
-    /// The app's metadata cache, if it exists.
-    cache: Mutex<Option<Arc<MetaCache>>>,
+    /// The app's metadata cache, if it exists, with the identity of the file
+    /// it was opened from (see [`file_id`]).
+    cache: Mutex<(Option<Arc<MetaCache>>, Option<FileId>)>,
     /// Where to look for the cache while it does not exist yet (the app
-    /// creates it the first time it runs).
+    /// creates it the first time it runs), and whether it is still the same
+    /// file: the app deletes and recreates it when it is damaged.
     cache_path: Option<PathBuf>,
     /// Where queries are recorded.
     runlog: Arc<SharedRunLog>,
@@ -132,7 +134,7 @@ impl AiState {
             config_error: None,
             secrets,
             drivers: drivers.into_iter().map(|d| (d.id(), d)).collect(),
-            cache: Mutex::new(cache),
+            cache: Mutex::new((cache, None)),
             cache_path: None,
             runlog,
             slots: Semaphore::new(MAX_SERVER_CALLS),
@@ -147,23 +149,28 @@ impl AiState {
     pub fn open_default() -> Self {
         let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore::new());
         let drivers: Vec<Arc<dyn Driver>> = vec![Arc::new(MssqlDriver)];
-        let cache_path = MetaCache::default_path();
-        let cache = cache_path
-            .as_deref()
-            .and_then(MetaCache::open_existing)
-            .map(Arc::new);
         let runlog = Arc::new(SharedRunLog::open_default());
         let state = match ConfigStore::open_default() {
-            Ok(config) => Self::new(config, secrets, drivers, cache, runlog),
+            Ok(config) => Self::new(config, secrets, drivers, None, runlog),
             Err(e) => Self {
                 config_error: Some(e.to_string()),
-                ..Self::new(ConfigStore::at(""), secrets, drivers, cache, runlog)
+                ..Self::new(ConfigStore::at(""), secrets, drivers, None, runlog)
             },
         };
-        Self {
-            cache_path,
-            ..state
+        match MetaCache::default_path() {
+            Some(path) => state.with_cache_file(path),
+            None => state,
         }
+    }
+
+    /// Reads the metadata cache from the file at `path`, when it exists, and
+    /// opens it again whenever the file is replaced.
+    pub fn with_cache_file(mut self, path: PathBuf) -> Self {
+        let id = file_id(&path);
+        let cache = MetaCache::open_existing(&path).map(Arc::new);
+        *self.cache.get_mut().unwrap_or_else(PoisonError::into_inner) = (cache, id);
+        self.cache_path = Some(path);
+        self
     }
 
     /// The MCP client's name, recorded with each run (cut to 100 characters).
@@ -330,22 +337,36 @@ impl AiState {
 
     /// The cache, opened now if the app created it after this process began.
     async fn current_cache(&self) -> Option<Arc<MetaCache>> {
-        let known = self
-            .cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        if known.is_some() {
-            return known;
+        let Some(path) = self.cache_path.clone() else {
+            return self
+                .cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .0
+                .clone();
+        };
+        // A handle on a file that was deleted and recreated reads the old
+        // one: reopen when the file is not the one the handle came from.
+        let now = file_id(&path);
+        {
+            let slot = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+            if let (Some(cache), known) = &*slot {
+                if now.is_some() && *known == now {
+                    return Some(cache.clone());
+                }
+            }
         }
-        let path = self.cache_path.clone()?;
-        let opened = blocking(move || MetaCache::open_existing(&path))
-            .await
-            .ok()
-            .flatten()
-            .map(Arc::new)?;
-        *self.cache.lock().unwrap_or_else(PoisonError::into_inner) = Some(opened.clone());
-        Some(opened)
+        let opened = if now.is_some() {
+            blocking(move || MetaCache::open_existing(&path))
+                .await
+                .ok()
+                .flatten()
+                .map(Arc::new)
+        } else {
+            None
+        };
+        *self.cache.lock().unwrap_or_else(PoisonError::into_inner) = (opened.clone(), now);
+        opened
     }
 
     /// Runs `f` on the metadata cache, off the async runtime. `None` without
@@ -356,6 +377,25 @@ impl AiState {
     ) -> Option<T> {
         let cache = self.current_cache().await?;
         blocking(move || f(&cache)).await.ok()
+    }
+}
+
+/// Which file a path points at: device and inode on Unix, where a file that
+/// is deleted and created again gets a new inode. Elsewhere a file in use
+/// cannot be deleted, so any existing file counts as the same.
+type FileId = (u64, u64);
+
+fn file_id(path: &std::path::Path) -> Option<FileId> {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        Some((0, 0))
     }
 }
 

@@ -1043,6 +1043,77 @@ async fn list_connections_warns_about_an_administrator_login_once() {
     assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_recreated_cache_file_is_read_again() {
+    use tulka_app::ai::AiState;
+    use tulka_app::tulka_store::MetaCache;
+
+    let mut f = Fixture::standard();
+    let id = id_of(&f, "Local");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tulkabd.db");
+    let seed = |cache: &MetaCache, table: &str| {
+        let snapshot = DatabaseSnapshot {
+            objects: vec![DbObject {
+                schema: "dbo".into(),
+                name: table.into(),
+                kind: ObjectKind::Table,
+            }],
+            columns: Vec::new(),
+        };
+        cache.replace_database(&id, "sales", &snapshot, 1).unwrap();
+    };
+    let found = |out: &ToolText, table: &str| out.text.contains(&format!("dbo.{table}"));
+
+    // The cache does not exist yet when the state starts.
+    f.state = AiState::new(
+        f.config.clone(),
+        f.secrets.clone(),
+        vec![f.driver.clone()],
+        None,
+        f.runlog.clone(),
+    )
+    .with_cache_file(path.clone());
+    assert!(!found(
+        &search_objects(&f.state, search("old_t")).await,
+        "old_t"
+    ));
+
+    let app = MetaCache::open(&path);
+    seed(&app, "old_t");
+    assert!(found(
+        &search_objects(&f.state, search("old_t")).await,
+        "old_t"
+    ));
+
+    // The app deletes the file and builds it again.
+    drop(app);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    let app = MetaCache::open(&path);
+    seed(&app, "new_t");
+    assert!(found(
+        &search_objects(&f.state, search("new_t")).await,
+        "new_t"
+    ));
+    assert!(!found(
+        &search_objects(&f.state, search("old_t")).await,
+        "old_t"
+    ));
+
+    // A deleted file leaves nothing to read.
+    drop(app);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    assert!(!found(
+        &search_objects(&f.state, search("new_t")).await,
+        "new_t"
+    ));
+}
+
 #[tokio::test]
 async fn metadata_sessions_wait_at_most_five_seconds_for_a_lock() {
     let f = Fixture::standard();
