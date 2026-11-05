@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { modal } from "../dialogFocus";
   import { onMount } from "svelte";
   import { t } from "../i18n/t";
   import type { ConnectionConfig } from "../ipc";
@@ -26,7 +27,7 @@
     }
   }}
 >
-  <div class="panel" role="dialog" aria-modal="true" aria-labelledby="pw-title">
+  <div class="panel" role="dialog" aria-modal="true" aria-labelledby="pw-title" use:modal>
   <form
     onsubmit={(e) => {
       e.preventDefault();
