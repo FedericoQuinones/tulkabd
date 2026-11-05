@@ -235,15 +235,23 @@ async function checkFiles(store: TabsStore, files: { pane: PaneState; path: stri
     return;
   }
   if (!Array.isArray(exists)) return;
+  const present: Promise<unknown>[] = [];
   files.forEach(({ pane, path }, i) => {
-    if (exists[i] !== false) return;
     const tab = store.list.find((x) => x.pane === pane);
     if (tab?.file?.path !== path) return;
+    if (exists[i] === true) {
+      // The text in the session may be old: another program can have changed the file since.
+      // An unsaved tab keeps its own text.
+      if (!tab.dirty) present.push(store.reloadFile(tab.id, true));
+      return;
+    }
+    if (exists[i] !== false) return;
     tab.file = undefined;
     tab.dirty = true;
     const notice = t("tabs.restoredWithoutFile", { path });
     pane.notice = pane.notice ? `${pane.notice} ${notice}` : notice;
   });
+  await Promise.all(present);
 }
 
 /**
@@ -258,6 +266,8 @@ export function restore(store: TabsStore, s: SessionV1, known: { connectionIds: 
   store.replaceWorkspace({ list, tabGroups, layout: s.layout, activeGroupId: s.activeGroupId });
   const files = list.flatMap((tab) => (tab.file && tab.pane ? [{ pane: tab.pane, path: tab.file.path }] : []));
   if (files.length) void checkFiles(store, files);
+  // Saved queries are read again too, for the same reason; an unsaved tab keeps its text.
+  for (const x of list) if (x.savedQuery && !x.dirty) void store.reloadSavedQuery(x.id);
   for (const x of s.tabs) {
     if (x.kind === "definition" && known.connectionIds.has(x.connectionId)) void store.retry(x.id);
   }

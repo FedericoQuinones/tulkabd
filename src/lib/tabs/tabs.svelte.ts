@@ -31,6 +31,8 @@ export interface TabFile {
   path: string;
   encoding: FileEncoding;
   lineEnding: LineEnding;
+  /** Last change of the file when this tab read or wrote it (Unix ms); unknown when 0 or missing. */
+  modifiedMs?: number;
 }
 
 export interface Tab {
@@ -291,7 +293,9 @@ export class TabsStore {
     if (spec.kind === "query" && spec.sql) pane.initialDoc = spec.sql;
     const tab: Tab = { id, kind: "query", title, pane, connectError: null, dirty: false };
     if (saved) tab.savedQuery = { database: saved.database, name: saved.name };
-    if (file) tab.file = { path: file.path, encoding: file.encoding, lineEnding: file.lineEnding };
+    if (file) {
+      tab.file = { path: file.path, encoding: file.encoding, lineEnding: file.lineEnding, modifiedMs: file.modifiedMs };
+    }
     if (spec.kind === "definition") {
       tab.connectionId = spec.connectionId;
       tab.database = spec.database;
@@ -992,7 +996,13 @@ export class TabsStore {
           connectionId: connectionId ?? undefined,
           database: connectionId ? (database ?? undefined) : undefined,
           sql: file.text,
-          file: { path: file.path, name: file.name, encoding: file.encoding, lineEnding: file.lineEnding },
+          file: {
+            path: file.path,
+            name: file.name,
+            encoding: file.encoding,
+            lineEnding: file.lineEnding,
+            modifiedMs: file.modifiedMs,
+          },
         });
       }
     });
@@ -1009,6 +1019,52 @@ export class TabsStore {
       return;
     }
     if (paths.length) await this.openFiles(paths);
+  }
+
+  /**
+   * Reads a file tab's file again and shows it, unless the tab was edited meanwhile (or, with
+   * `onlyIfClean`, is unsaved). The tab is then saved as of that read. True when it was reloaded.
+   */
+  async reloadFile(id: string, onlyIfClean = false): Promise<boolean> {
+    const tab = this.list.find((x) => x.id === id);
+    const pane = tab?.pane;
+    const path = tab?.file?.path;
+    if (!pane || path === undefined) return false;
+    const edits = pane.edits;
+    let read: Awaited<ReturnType<typeof ipc.readSqlFile>>;
+    try {
+      read = await ipc.readSqlFile(path);
+    } catch {
+      return false;
+    }
+    const now = this.list.find((x) => x.id === id);
+    if (!read || !now?.pane || now.file?.path !== path || now.pane.edits !== edits) return false;
+    if (onlyIfClean && now.dirty) return false;
+    now.file = { path, encoding: read.encoding, lineEnding: read.lineEnding, modifiedMs: read.modifiedMs };
+    if (read.text !== now.pane.text()) now.pane.reloadText(read.text);
+    now.dirty = false;
+    this.clearSaveNotice(now.pane);
+    return true;
+  }
+
+  /** Reads a saved query tab's file again and shows it, unless the tab is unsaved or was edited meanwhile. */
+  async reloadSavedQuery(id: string): Promise<boolean> {
+    const tab = this.list.find((x) => x.id === id);
+    const pane = tab?.pane;
+    const q = tab?.savedQuery;
+    if (!pane || !q || tab.dirty) return false;
+    const edits = pane.edits;
+    let text: string;
+    try {
+      text = await ipc.readSavedQuery(q.database, q.name);
+    } catch {
+      return false;
+    }
+    const now = this.list.find((x) => x.id === id);
+    if (typeof text !== "string" || !now?.pane || now.dirty || now.pane.edits !== edits) return false;
+    if (now.savedQuery?.database !== q.database || now.savedQuery.name !== q.name) return false;
+    if (text !== now.pane.text()) now.pane.reloadText(text);
+    return true;
   }
 
   private tabOfFile(path: string): Tab | undefined {

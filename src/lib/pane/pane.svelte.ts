@@ -125,6 +125,17 @@ export class PaneState {
   }
 
   /**
+   * Swaps the document for text read again from its file or saved query. Not an edit and not
+   * undoable (a mounted editor takes it the way it takes `loadText`).
+   */
+  reloadText(text: string) {
+    this.loadedText = null;
+    this.initialDoc = text;
+    this.editorState = null;
+    this.docVersion++;
+  }
+
+  /**
    * Closes the backend session, if one is open or being opened. Closing while an open is in
    * flight makes the backend reject that open, so it never lands after a newer one.
    */

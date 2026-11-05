@@ -17,6 +17,8 @@ vi.mock("../ipc", () => ({
   completionMetadata: vi.fn(),
   onAppEvent: vi.fn(),
   sqlFilesExist: vi.fn(),
+  readSqlFile: vi.fn(),
+  readSavedQuery: vi.fn(),
   transactionCount: vi.fn(),
 }));
 
@@ -142,11 +144,11 @@ test("restore never asks to allow paths", async () => {
   restore(tabs, parseSession(json)!, known);
   await flush();
   expect(ipc.sqlFilesExist).toHaveBeenCalledWith(["/home/u/a.sql"]);
-  // The only ipc call a restore makes for its files is the existence check.
+  // A restore only checks the files exist and reads them again; it never asks to allow a path.
   const called = Object.entries(ipc)
     .filter(([, fn]) => vi.isMockFunction(fn) && fn.mock.calls.length > 0)
     .map(([name]) => name);
-  expect(called).toEqual(["sqlFilesExist"]);
+  expect(called.sort()).toEqual(["readSqlFile", "sqlFilesExist"]);
 });
 
 /** A saved session with file tabs on `paths`, each with unsaved text and not dirty. */
@@ -159,6 +161,64 @@ async function sessionWithFiles(paths: string[]): Promise<string> {
   await tabs.reset();
   return json;
 }
+
+const fromDisk = (path: string, text: string, modifiedMs = 7) => ({
+  path,
+  name: path.split("/").pop()!,
+  text,
+  encoding: "utf8" as const,
+  lineEnding: "lf" as const,
+  modifiedMs,
+});
+
+test("a restored clean file tab shows the file as it is on disk now", async () => {
+  const json = await sessionWithFiles(["/sql/a.sql"]);
+  vi.mocked(ipc.readSqlFile).mockResolvedValue(fromDisk("/sql/a.sql", "SELECT 'changed elsewhere'"));
+  restore(tabs, parseSession(json)!, known);
+  await flush();
+  const tab = tabs.list[0];
+  expect(tab.pane!.text()).toBe("SELECT 'changed elsewhere'");
+  expect(tab.dirty).toBe(false);
+  expect(tab.file).toMatchObject({ path: "/sql/a.sql", encoding: "utf8", lineEnding: "lf", modifiedMs: 7 });
+});
+
+test("a restored unsaved file tab keeps its own text", async () => {
+  const id = tabs.open({ kind: "query", sql: "SELECT 'mine'" });
+  const tab = tabs.list.find((x) => x.id === id)!;
+  tab.file = { path: "/sql/a.sql", encoding: "utf8", lineEnding: "lf" };
+  tab.dirty = true;
+  const json = JSON.stringify(snapshot(tabs));
+  await tabs.reset();
+  vi.mocked(ipc.readSqlFile).mockResolvedValue(fromDisk("/sql/a.sql", "SELECT 'theirs'"));
+  restore(tabs, parseSession(json)!, known);
+  await flush();
+  expect(ipc.readSqlFile).not.toHaveBeenCalled();
+  expect(tabs.list[0].pane!.text()).toBe("SELECT 'mine'");
+  expect(tabs.list[0].dirty).toBe(true);
+});
+
+test("a file that cannot be read again leaves the restored text", async () => {
+  const json = await sessionWithFiles(["/sql/a.sql"]);
+  vi.mocked(ipc.readSqlFile).mockRejectedValue("not_text");
+  restore(tabs, parseSession(json)!, known);
+  await flush();
+  expect(tabs.list[0].pane!.text()).toBe("SELECT '/sql/a.sql'");
+  expect(tabs.list[0].file?.path).toBe("/sql/a.sql");
+});
+
+test("a restored clean saved query tab reads the query again; an unsaved one keeps its text", async () => {
+  const a = tabs.open({ kind: "query", sql: "old A", savedQuery: { database: "Sales", name: "A" } });
+  const b = tabs.open({ kind: "query", sql: "mine B", savedQuery: { database: "Sales", name: "B" } });
+  tabs.list.find((x) => x.id === b)!.dirty = true;
+  void a;
+  const json = JSON.stringify(snapshot(tabs));
+  await tabs.reset();
+  vi.mocked(ipc.readSavedQuery).mockImplementation(async (_db, name) => `new ${name}`);
+  restore(tabs, parseSession(json)!, known);
+  await flush();
+  expect(tabs.list.map((x) => x.pane!.text())).toEqual(["new A", "mine B"]);
+  expect(ipc.readSavedQuery).toHaveBeenCalledTimes(1);
+});
 
 test("a restored file tab whose file is gone keeps its text, loses the file and says so", async () => {
   const json = await sessionWithFiles(["/sql/here.sql", "/sql/gone.sql"]);
