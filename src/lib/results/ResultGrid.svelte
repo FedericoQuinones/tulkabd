@@ -98,7 +98,11 @@
   $effect(() => {
     if (!gridEl) return;
     untrack(() => {
-      if (scroll > 0) gridEl!.scrollTop = scroll;
+      if (scroll > 0) {
+        gridEl!.scrollTop = scroll;
+        // The browser may clamp it (fewer rows now): the window of rows follows what it kept.
+        scrollTop = gridEl!.scrollTop;
+      }
     });
   });
 
