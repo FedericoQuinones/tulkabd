@@ -202,10 +202,11 @@ export class PaneState {
         this.database = null;
         this.status = "idle";
       }
+      const error = String(e) === "not_found" ? t("tabs.connectionMissing") : String(e);
       if (before === "disconnected" && String(e) !== "password_required") {
-        this.messages.push({ kind: "error", text: t("pane.reconnectFailed", { error: String(e) }), line: null });
+        this.messages.push({ kind: "error", text: t("pane.reconnectFailed", { error }), line: null });
       }
-      return String(e) === "password_required" ? { kind: "passwordRequired" } : { kind: "error", error: String(e) };
+      return String(e) === "password_required" ? { kind: "passwordRequired" } : { kind: "error", error };
     }
   }
 

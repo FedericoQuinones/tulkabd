@@ -70,6 +70,12 @@ test("disconnected event then an other rejection stays disconnected", async () =
   expect(pane.status).toBe("disconnected");
 });
 
+test("open maps not_found to a readable error", async () => {
+  vi.mocked(ipc.openSession).mockRejectedValueOnce("not_found");
+  const r = await pane.open(conn);
+  expect(r).toEqual({ kind: "error", error: "That connection no longer exists." });
+});
+
 test("a stale run does not change state after Reconnect starts", async () => {
   const r = startRun();
   r.emit({ kind: "disconnected", reason: "x" });

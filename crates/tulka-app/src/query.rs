@@ -21,7 +21,7 @@ use crate::runlog;
 use crate::state::{AppState, SharedBuffer, TabState, Tabs};
 use crate::types::{
     Clipboard, CopyMode, CopyOutcome, RunOutcome, RunSummary, SessionInfo, UiEvent, BUSY, CLOSED,
-    DISCONNECTED,
+    DISCONNECTED, NOT_FOUND,
 };
 
 /// Most rows returned by one `fetch_rows`.
@@ -60,7 +60,7 @@ pub async fn open_session(
         .iter()
         .find(|c| c.id == connection_id)
         .cloned()
-        .ok_or_else(|| "the connection does not exist".to_string())?;
+        .ok_or_else(|| NOT_FOUND.to_string())?;
     let password = resolve_password(state, &conn, password).await?;
     let driver = state.driver(&conn.driver)?;
     let database = database.filter(|d| !d.is_empty());

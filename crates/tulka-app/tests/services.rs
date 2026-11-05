@@ -474,6 +474,15 @@ async fn unavailable_keyring_saves_without_password_then_requires_it() {
 }
 
 #[tokio::test]
+async fn open_session_on_an_unknown_connection_fails_with_not_found() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let err = open_session(&f.state, "t1".into(), "nope".into(), None, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err, NOT_FOUND);
+}
+
+#[tokio::test]
 async fn saving_without_password_keeps_the_saved_one() {
     let f = fixture(Arc::new(MemoryStore::default()));
     let first = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
