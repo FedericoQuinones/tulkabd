@@ -763,6 +763,64 @@ test("reconnecting a live tab without a transaction reopens at once", async () =
   expect(ipc.openSession).toHaveBeenCalledTimes(1);
 });
 
+test("reconnect waits for an open close prompt, then asks about the transaction", async () => {
+  const first = await liveTab();
+  const second = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValue(1);
+  await tabs.requestClose(first);
+  tabs.reconnect(second);
+  await flush();
+  expect(tabs.closePrompt?.scope).toBe("tab");
+  tabs.cancelClose();
+  await flush();
+  expect(tabs.closePrompt?.scope).toBe("reconnect");
+  expect(tabs.closePrompt?.items.map((x) => x.tabId)).toEqual([second]);
+});
+
+test("reconnect waits for an open close prompt, then reopens at once without a transaction", async () => {
+  const first = await liveTab();
+  const second = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValueOnce(1);
+  await tabs.requestClose(first);
+  vi.mocked(ipc.openSession).mockClear();
+  tabs.reconnect(second);
+  await flush();
+  expect(ipc.openSession).not.toHaveBeenCalled();
+  tabs.cancelClose();
+  await flush();
+  expect(tabs.closePrompt).toBeNull();
+  expect(ipc.openSession).toHaveBeenCalledTimes(1);
+});
+
+test("a reconnect waiting for a prompt does nothing when its tab is closed meanwhile", async () => {
+  const first = await liveTab();
+  const second = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValueOnce(1);
+  await tabs.requestClose(first);
+  vi.mocked(ipc.openSession).mockClear();
+  tabs.reconnect(second);
+  await flush();
+  tabs.close(second);
+  tabs.cancelClose();
+  await flush();
+  expect(tabs.closePrompt).toBeNull();
+  expect(ipc.openSession).not.toHaveBeenCalled();
+});
+
+test("pressing reconnect twice while a prompt is open queues a single reconnect", async () => {
+  const first = await liveTab();
+  const second = await liveTab();
+  vi.mocked(ipc.transactionCount).mockResolvedValueOnce(1);
+  await tabs.requestClose(first);
+  vi.mocked(ipc.openSession).mockClear();
+  tabs.reconnect(second);
+  tabs.reconnect(second);
+  await flush();
+  tabs.cancelClose();
+  await flush();
+  expect(ipc.openSession).toHaveBeenCalledTimes(1);
+});
+
 test("closing the window with the guard dialog open logs a cancelled run", async () => {
   const id = await liveTab();
   const pane = tabs.list.find((x) => x.id === id)!.pane!;
