@@ -247,6 +247,8 @@
   "results.copy": "Copy",
   "results.copyAi": "Copy for AI",
   "results.truncated": "Showing first {max} rows",
+  "results.memoryCut": "Showing first {max} rows (memory limit)",
+  "results.notKept": "Not kept (memory limit)",
   "results.toast.copied": "Copied · {rows} rows",
   "results.toast.copiedOne": "Copied · 1 row",
   "results.toast.copiedAi": "Copied for AI · {rows} rows · ≈ {tokens} tokens",

@@ -57,6 +57,7 @@ beforeEach(() => {
       ],
       total: 20,
       truncated: false,
+      memoryCut: false,
     },
   ];
 });
@@ -335,6 +336,17 @@ test("the truncation notice names the limit the run used, not the current prefer
   open();
   expect(document.querySelector(".warn")?.textContent).toBe("Showing first 1,000 rows");
   prefs.value.maxRows = 100_000;
+});
+
+test("a memory cut says so, with the real row count, and later empty sets say they were not kept", async () => {
+  pane.results[0].truncated = true;
+  pane.results[0].memoryCut = true;
+  pane.results[0].total = 66_183;
+  open();
+  expect(document.querySelector(".warn")?.textContent?.trim()).toBe("Showing first 66,183 rows (memory limit)");
+  pane.results[0].total = 0;
+  await settle();
+  expect(document.querySelector(".warn")?.textContent?.trim()).toBe("Not kept (memory limit)");
 });
 
 test("coming back to the tab keeps the result set shown and the grid scroll", async () => {
