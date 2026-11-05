@@ -66,7 +66,7 @@ test("activating the tab again does not query again; Refresh does", async () => 
 });
 
 test("reloads when the connection comes back", async () => {
-  explorer.conns["c1"] = { status: "offline", message: null, databases: null, indexing: [] };
+  explorer.conns["c1"] = { status: "offline", message: null, databases: null, indexing: [], failed: [] };
   await show();
   explorer.conns["c1"].status = "connected";
   await settle();
@@ -84,7 +84,7 @@ test("a failed load shows the error with Retry, and is not cached", async () => 
 });
 
 test("a view showing not connected loads when the connection comes up", async () => {
-  explorer.conns["c1"] = { status: "offline", message: null, databases: null, indexing: [] };
+  explorer.conns["c1"] = { status: "offline", message: null, databases: null, indexing: [], failed: [] };
   vi.mocked(ipc.tableStructure).mockRejectedValueOnce("not_connected");
   await show();
   expect(ipc.tableStructure).toHaveBeenCalledTimes(1);
@@ -95,7 +95,7 @@ test("a view showing not connected loads when the connection comes up", async ()
 });
 
 test("a reconnect or an edit of the connection drops the cached structures of its other tables", async () => {
-  explorer.conns["c1"] = { status: "offline", message: null, databases: null, indexing: [] };
+  explorer.conns["c1"] = { status: "offline", message: null, databases: null, indexing: [], failed: [] };
   await show();
   hide();
   const other = { ...props, name: "Customers" };

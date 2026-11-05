@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
-import type { ConnectionConfig, PaletteHit, SearchResponse } from "../ipc";
+import type { AppEvent, ConnectionConfig, PaletteHit, SearchResponse } from "../ipc";
 
 vi.mock("../ipc", () => ({
   connectExplorer: vi.fn(),
@@ -80,6 +80,23 @@ test("a response that arrives after a newer keystroke is dropped", async () => {
   await old;
   expect(palette.query).toBe("pe");
   expect(palette.flat.map((h) => h.object.name)).toEqual(["Pedidos"]);
+});
+
+test("the palette searches again when the startup index finishes loading", async () => {
+  let emit!: (e: AppEvent) => void;
+  vi.mocked(ipc.onAppEvent).mockImplementation(async (cb) => {
+    emit = cb;
+    return () => {};
+  });
+  vi.mocked(ipc.searchObjects).mockResolvedValue(response([], 1));
+  palette.show();
+  await flush();
+  await palette.search("ped");
+  expect(palette.response?.hits).toEqual([]);
+  vi.mocked(ipc.searchObjects).mockResolvedValue(response([hit({ name: "Pedidos" })]));
+  emit({ kind: "indexLoaded" });
+  await flush();
+  expect(palette.response?.hits.map((h) => h.object.name)).toEqual(["Pedidos"]);
 });
 
 test("groups hits by folder › connection › database, keeping the ranking order", () => {
@@ -267,6 +284,19 @@ test("a connect that fails after the password prompt reopens the palette with th
   expect(palette.isOpen).toBe(true);
   expect(palette.query).toBe("ped");
   expect(palette.error).toBe("Could not connect to Local: Login failed");
+});
+
+test("a connection deleted meanwhile shows an error in the palette", async () => {
+  const open = vi.spyOn(tabs, "open").mockReturnValue("t");
+  vi.mocked(ipc.connectExplorer).mockRejectedValueOnce("not_found");
+  vi.mocked(ipc.searchObjects).mockResolvedValue(response([hit({ name: "Pedidos", connectionId: "c2", connectionName: "Local", connected: false })]));
+  palette.show();
+  await palette.search("ped");
+  await palette.choose("open");
+  await flush();
+  expect(open).not.toHaveBeenCalled();
+  expect(palette.isOpen).toBe(true);
+  expect(palette.error).toBe("Could not connect to Local: That connection no longer exists.");
 });
 
 test("saved queries come after the objects, so Enter on the first row opens the best object", async () => {

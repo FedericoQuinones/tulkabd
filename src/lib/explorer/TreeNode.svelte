@@ -120,6 +120,8 @@
     <span class="lab">{row.db.name}</span>
     {#if row.db.noAccess}
       <span class="tail">{t("explorer.noAccess")}</span>
+    {:else if row.failed}
+      <span class="tail">{t("explorer.indexFailed")}</span>
     {:else if row.indexing}
       <span class="tail">{t("explorer.indexing")}</span>
     {/if}

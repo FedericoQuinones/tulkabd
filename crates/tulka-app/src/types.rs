@@ -62,6 +62,7 @@ pub enum ConnectionStatus {
 /// `{"kind": "explorerStatus", "connectionId": "..", "status": "error", "message": ".."}`,
 /// `{"kind": "indexProgress", "connectionId": "..", "database": "..", "done": true, "noAccess": false}`,
 /// `{"kind": "indexIdle", "connectionId": ".."}`,
+/// `{"kind": "indexLoaded"}`,
 /// `{"kind": "runLogged", "entry": {..}}`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(
@@ -88,6 +89,9 @@ pub enum AppEvent {
     },
     /// The connection's indexing queue is empty. Not sent after an error.
     IndexIdle { connection_id: String },
+    /// The search index finished loading at startup: a search made before
+    /// may have missed rows.
+    IndexLoaded,
     /// A run was added to the run log.
     RunLogged { entry: RunLogEntry },
     /// The run log was reopened from its file: entry ids changed, read it again.
@@ -512,6 +516,7 @@ mod tests {
                 },
                 json!({"kind": "indexIdle", "connectionId": "c1"}),
             ),
+            (AppEvent::IndexLoaded, json!({"kind": "indexLoaded"})),
             (
                 AppEvent::RunLogged {
                     entry: RunLogEntry {
