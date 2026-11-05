@@ -36,6 +36,8 @@ export interface ConnRuntime {
   databases: CachedDatabase[] | null;
   /** Databases being indexed right now. */
   indexing: string[];
+  /** Databases whose indexing ended without ever saving a snapshot (an error other than no access). */
+  failed: string[];
 }
 
 type Loaded<T> = T[] | { error: string };
@@ -89,7 +91,7 @@ class ExplorerStore {
 
   /** Runtime state of a connection, created on first use. Not for use while deriving rows. */
   state(id: string): ConnRuntime {
-    this.conns[id] ??= { status: "offline", message: null, databases: null, indexing: [] };
+    this.conns[id] ??= { status: "offline", message: null, databases: null, indexing: [], failed: [] };
     return this.conns[id];
   }
 
@@ -127,6 +129,7 @@ class ExplorerStore {
         this.userOffline.delete(e.connectionId);
         st.status = "connecting";
         st.message = null;
+        st.failed = [];
       } else if (e.status === "connected") {
         st.status = "connected";
         st.message = null;
@@ -141,10 +144,15 @@ class ExplorerStore {
       if (!e.done) {
         // Progress can trail an error status; it must not look like indexing then.
         const live = st.status === "connected" || st.status === "connecting";
+        st.failed = st.failed.filter((d) => d !== e.database);
         if (live && !st.indexing.includes(e.database)) st.indexing.push(e.database);
       } else {
         st.indexing = st.indexing.filter((d) => d !== e.database);
-        void this.loadDatabases(e.connectionId);
+        void this.loadDatabases(e.connectionId).then(() => {
+          // Done but still never indexed (and not for lack of access): the snapshot failed.
+          const d = st.databases?.find((x) => x.name === e.database);
+          if (d && d.indexedAt === null && !d.noAccess && !st.failed.includes(d.name)) st.failed.push(d.name);
+        });
         this.invalidate(e.connectionId, e.database);
       }
     } else {
@@ -558,8 +566,10 @@ class ExplorerStore {
       if (!this.visible(fs, key, inMatch)) continue;
       const childIn = inMatch || (fs?.match.has(key) ?? false);
       const open = !db.noAccess && this.open(fs, key);
+      const failed = !!st?.failed.includes(db.name) && db.indexedAt === null && !db.noAccess;
       const indexing =
-        st?.indexing.includes(db.name) || (db.indexedAt === null && !db.noAccess && live && !extra.has(db.name));
+        st?.indexing.includes(db.name) ||
+        (db.indexedAt === null && !db.noAccess && live && !extra.has(db.name) && !failed);
       out.push({
         key,
         level,
@@ -570,6 +580,7 @@ class ExplorerStore {
         connectionId: id,
         db,
         indexing: !!indexing,
+        failed,
       });
       if (open) this.groups(ctx, id, db, level + 1, childIn);
     }

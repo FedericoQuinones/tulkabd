@@ -312,6 +312,21 @@ test("indexProgress marks indexing and refreshes the counters", async () => {
   expect(counts).toEqual([12, 3, 4]);
 });
 
+test("a database whose snapshot failed shows an error, not indexing", async () => {
+  explorer.expanded.add("c2");
+  const st = explorer.state("c2");
+  st.status = "connected";
+  st.databases = [db("Ventas", { indexedAt: null })];
+  vi.mocked(ipc.explorerDatabases).mockResolvedValue([db("Ventas", { indexedAt: null })]);
+  explorer.handleEvent({ kind: "indexProgress", connectionId: "c2", database: "Ventas", done: false, noAccess: false });
+  explorer.handleEvent({ kind: "indexProgress", connectionId: "c2", database: "Ventas", done: true, noAccess: false });
+  await flush();
+  await flush();
+  const r = explorer.rows.find((x) => x.kind === "database");
+  expect(r?.kind === "database" && r.indexing).toBe(false);
+  expect(r?.kind === "database" && r.failed).toBe(true);
+});
+
 test("progress after an error does not bring back indexing", () => {
   explorer.expanded.add("c2");
   const st = explorer.state("c2");

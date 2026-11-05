@@ -275,6 +275,7 @@
   "explorer.none": "None",
   "explorer.noAccess": "No access",
   "explorer.indexing": "indexing…",
+  "explorer.indexFailed": "indexing failed",
   "explorer.group.table": "Tables",
   "explorer.group.view": "Views",
   "explorer.group.procedure": "Procedures",
