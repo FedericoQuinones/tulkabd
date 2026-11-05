@@ -209,7 +209,7 @@ pub const AI_MAX_ROWS_MAX: u32 = 10_000;
 pub const AI_MAX_ROWS_DEFAULT: u32 = 500;
 /// Smallest, largest and default query timeout for an AI assistant, in seconds.
 pub const AI_TIMEOUT_MIN_S: u32 = 1;
-pub const AI_TIMEOUT_MAX_S: u32 = 3_600;
+pub const AI_TIMEOUT_MAX_S: u32 = 300;
 pub const AI_TIMEOUT_DEFAULT_S: u32 = 30;
 
 /// Whether `color` is written as `#rrggbb`.
@@ -900,7 +900,7 @@ mod tests {
             r#"{"version": 1, "preferences": {"aiMaxRows": 99999, "aiQueryTimeoutS": 99999}}"#,
         )
         .preferences;
-        assert_eq!((p.ai_max_rows, p.ai_query_timeout_s), (10_000, 3_600));
+        assert_eq!((p.ai_max_rows, p.ai_query_timeout_s), (10_000, 300));
     }
 
     #[test]
