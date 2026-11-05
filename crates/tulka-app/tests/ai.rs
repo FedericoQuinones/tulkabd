@@ -783,7 +783,10 @@ async fn rejected_sql_never_reaches_the_driver_and_is_logged_blocked() {
     assert!(unparsed.is_error);
     assert!(unparsed
         .text
-        .starts_with("Not run: the query has an unclosed string, identifier or comment."));
+        .starts_with("Not run: tulkabd could not read the query safely."));
+    assert!(unparsed
+        .text
+        .contains("space between a number and the word"));
     assert!(unparsed.text.contains("[año]"));
     assert!(f.driver.script.sqls.lock().unwrap().is_empty());
     assert!(f.driver.script.connects.lock().unwrap().is_empty());
