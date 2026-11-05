@@ -110,6 +110,22 @@ test("the metadata cache fetches once per connection and database until it is in
   expect(fetch).toHaveBeenCalledTimes(3);
 });
 
+test("GO separates batches by the same rules as the Rust split_batches", () => {
+  const at = (sql: string) => aliasMap(sql, sql.length);
+  // A GO alone on a line (any case, blanks, trailing comment) ends the batch.
+  expect(at("SELECT 1 FROM a x\nGO\nSELECT 2 FROM b y")).toEqual({ y: "dbo.b" });
+  expect(at("SELECT 1 FROM a x\n  go  \nSELECT 2 FROM b y")).toEqual({ y: "dbo.b" });
+  expect(at("SELECT 1 FROM a x\nGo -- done\nSELECT 2 FROM b y")).toEqual({ y: "dbo.b" });
+  expect(at("SELECT 1 FROM a x\nGO--done\nSELECT 2 FROM b y")).toEqual({ y: "dbo.b" });
+  // GO with a count, or with other text on its line, is not a separator.
+  expect(at("SELECT 1 FROM a x\nGO 5\nSELECT 2 FROM b y")).toEqual({ x: "dbo.a", y: "dbo.b" });
+  expect(at("SELECT 1 FROM a x GO\nSELECT 2 FROM b y")).toEqual({ x: "dbo.a", y: "dbo.b" });
+  expect(at("SELECT 1 FROM a x\nWHERE go = 1")).toEqual({ x: "dbo.a" });
+  // GO inside a string or a block comment is no separator.
+  expect(at("SELECT 'a\nGO\n' FROM a x")).toEqual({ x: "dbo.a" });
+  expect(at("/*\nGO\n*/ SELECT 1 FROM a x")).toEqual({ x: "dbo.a" });
+});
+
 test("a failed fetch is not cached", async () => {
   const fetch = vi.fn().mockRejectedValueOnce("not_connected").mockResolvedValueOnce(meta);
   const cache = new MetadataCache(fetch);

@@ -114,13 +114,26 @@ function tokenize(sql: string): Tok[] {
   return out;
 }
 
+/**
+ * Whether `t` is a `GO` batch separator, as in `split_batches` (Rust): `GO` in any case, alone on its line
+ * except for blanks and an optional trailing `--` comment. `GO 5`, `SELECT 1 GO` and `go = 1` are not.
+ */
+function isGoLine(sql: string, t: Tok): boolean {
+  if (t.kind !== "word" || t.value.toUpperCase() !== "GO") return false;
+  const lineStart = sql.lastIndexOf("\n", t.from - 1) + 1;
+  if (sql.slice(lineStart, t.from).trim() !== "") return false;
+  const nl = sql.indexOf("\n", t.to);
+  const rest = sql.slice(t.to, nl < 0 ? sql.length : nl);
+  return rest.trim() === "" || rest.startsWith("--") || /^\s+--/.test(rest);
+}
+
 /** Tokens of the statement around `cursor`: statements end at `;` or a `GO` line. */
-function statementAt(toks: Tok[], cursor: number): Tok[] {
+function statementAt(sql: string, toks: Tok[], cursor: number): Tok[] {
   let start = 0;
   let end = toks.length;
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i];
-    const sep = t.kind === "semi" || (t.kind === "word" && t.value.toUpperCase() === "GO");
+    const sep = t.kind === "semi" || isGoLine(sql, t);
     if (!sep) continue;
     if (t.to <= cursor) start = i + 1;
     else {
@@ -151,6 +164,7 @@ function resolveSchema(name: string, meta?: CompletionMetadata): string {
  */
 export function aliasMap(sql: string, cursor: number, meta?: CompletionMetadata): Record<string, string> {
   const toks = statementAt(
+    sql,
     tokenize(sql).filter((t) => t.kind !== "skip"),
     cursor,
   );
