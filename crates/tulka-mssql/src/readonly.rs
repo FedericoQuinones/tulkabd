@@ -197,7 +197,65 @@ fn name_of(text: &str, t: &Token) -> String {
         _ => raw.to_string(),
     };
     // SQL Server ignores trailing spaces in an identifier: `[x ]` is `x`.
-    inner.trim_end().to_lowercase()
+    // The ideographic space counts as one after folding.
+    fold_name(&inner).trim_end().to_string()
+}
+
+/// Folds a name the way an accent- and width-insensitive collation compares
+/// it: full-width forms to ASCII, accents removed from Latin letters, lower
+/// case. Names with characters from other lookalike ranges are refused
+/// before this matters (see [`has_lookalikes`]).
+fn fold_name(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            '\u{3000}' => ' ',
+            c => c,
+        })
+        .map(base_letter)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// A Latin-1 Supplement or Latin Extended-A letter without its accent;
+/// other characters unchanged.
+fn base_letter(c: char) -> char {
+    match c {
+        '\u{C0}'..='\u{C5}' | '\u{E0}'..='\u{E5}' | '\u{100}'..='\u{105}' => 'a',
+        '\u{C6}' | '\u{E6}' => 'a',
+        '\u{C7}' | '\u{E7}' | '\u{106}'..='\u{10D}' => 'c',
+        '\u{D0}' | '\u{F0}' | '\u{10E}'..='\u{111}' => 'd',
+        '\u{C8}'..='\u{CB}' | '\u{E8}'..='\u{EB}' | '\u{112}'..='\u{11B}' => 'e',
+        '\u{11C}'..='\u{123}' => 'g',
+        '\u{124}'..='\u{127}' => 'h',
+        '\u{CC}'..='\u{CF}' | '\u{EC}'..='\u{EF}' | '\u{128}'..='\u{133}' => 'i',
+        '\u{134}'..='\u{135}' => 'j',
+        '\u{136}'..='\u{138}' => 'k',
+        '\u{139}'..='\u{142}' => 'l',
+        '\u{D1}' | '\u{F1}' | '\u{143}'..='\u{14B}' => 'n',
+        '\u{D2}'..='\u{D6}' | '\u{D8}' | '\u{F2}'..='\u{F6}' | '\u{F8}' => 'o',
+        '\u{14C}'..='\u{153}' => 'o',
+        '\u{154}'..='\u{159}' => 'r',
+        '\u{DF}' | '\u{15A}'..='\u{161}' | '\u{17F}' => 's',
+        '\u{162}'..='\u{167}' => 't',
+        '\u{D9}'..='\u{DC}' | '\u{F9}'..='\u{FC}' | '\u{168}'..='\u{173}' => 'u',
+        '\u{174}'..='\u{175}' => 'w',
+        '\u{DD}' | '\u{FD}' | '\u{FF}' | '\u{176}'..='\u{178}' => 'y',
+        '\u{179}'..='\u{17E}' => 'z',
+        c => c,
+    }
+}
+
+/// Whether a quoted name has characters a collation may fold to something
+/// else and that [`fold_name`] does not know: the rest of the half- and
+/// full-width block, mathematical alphanumerics, letterlike symbols,
+/// combining marks and variation selectors. Such names are refused.
+fn has_lookalikes(name: &str) -> bool {
+    name.chars().any(|c| {
+        matches!(c as u32,
+            0x0300..=0x036F | 0x2100..=0x214F | 0xFE00..=0xFE0F | 0xFF00
+            | 0xFF5F..=0xFFEF | 0x1D400..=0x1D7FF)
+    })
 }
 
 /// Longest entry of `FORBIDDEN`; longer words cannot match.
@@ -491,6 +549,9 @@ fn check_batch(
             continue;
         }
 
+        if t.kind == Kind::Quoted && has_lookalikes(lexer::src(text, t)) {
+            return Some(found(ReadOnlyReason::Unparsed, None, line));
+        }
         if matches!(t.kind, Kind::Word | Kind::Quoted) {
             let name = name_of(text, t);
             if DENIED_NAMES.binary_search(&name.as_str()).is_ok()
@@ -699,6 +760,10 @@ mod tests {
             "SELECT * FROM sys.dm_exec_input_buffer(52, NULL)",
             "SELECT * FROM sys . dm_exec_sql_text(NULL)",
             "SELECT * FROM sys.[sql_logins ]",
+            "SELECT * FROM sys.[ＳＱＬ_logins]",
+            "SELECT * FROM sys.[sql_lógins]",
+            "SELECT * FROM sys.[ŠQL_loġins\u{3000}]",
+            "SELECT * FROM [ｓｙｓ].[sql_logins]",
             "SELECT * FROM [sys].[fn_get_audit_file  ]('a', DEFAULT, DEFAULT)",
             "SELECT * FROM sys.\"sql_logins \"",
             "SELECT LOGINPROPERTY('sa', 'PasswordHash')",
@@ -713,6 +778,32 @@ mod tests {
             let v = violation(sql).unwrap_or_else(|| panic!("accepted: {sql}"));
             assert_eq!(v.reason, Forbidden, "{sql}");
         }
+    }
+
+    #[test]
+    fn lookalike_names_are_refused_and_accented_names_still_work() {
+        for sql in [
+            "SELECT * FROM [t\u{0301}]",
+            "SELECT * FROM [\u{1D41A}b]",
+            "SELECT * FROM [a\u{2102}]",
+            "SELECT * FROM [a\u{FE0F}]",
+            "SELECT * FROM [a\u{FF61}]",
+            "SELECT \"x\u{FFEF}\" FROM t",
+        ] {
+            let v = violation(sql).unwrap_or_else(|| panic!("accepted: {sql}"));
+            assert_eq!(v.reason, Unparsed, "{sql}");
+        }
+        for sql in [
+            "SELECT * FROM [Clientes_Año]",
+            "SELECT [Ñandú], [Çatalán], [ＡＢＣ] FROM [Pedidos_Ünicos]",
+        ] {
+            assert!(violation(sql).is_none(), "{sql}");
+        }
+        assert_eq!(
+            referenced_databases("SELECT * FROM [ＯＴＨＥＲ].dbo.t"),
+            ["other"]
+        );
+        assert_eq!(referenced_databases("SELECT * FROM [Ótro].dbo.t"), ["otro"]);
     }
 
     #[test]
