@@ -251,6 +251,28 @@ and reads past end-of-message up to `DONE_ATTN`. If upstream only fixes
 `cancel_query`, the multi-message drain can be dropped but `CancelHandle` must
 stay.
 
+## 6. Server errors in order: `QueryItem::Error`
+
+**What.** `QueryStream` yields `QueryItem::Error(TokenError)` for every ERROR
+token, in the order the server sent it, interleaved with the rows, messages
+and completions around it. Upstream keeps only the first error and returns it
+as the stream's last item. That behaviour stays: the stream still ends with
+`Err(Error::Server(first_error))`, so callers that ignore the new item
+(`into_results`, `into_row_stream`, ...) behave as before.
+
+**Why.** A batch such as `RAISERROR('e1',16,1); SELECT 1; RAISERROR('e2',16,1)`
+keeps running after a statement-terminating error. A SQL client must show
+each error where it happened; with upstream, they arrive at the end and all
+but the first are lost.
+
+**Files.**
+- `src/tds/stream/query.rs`: `QueryItem::Error`, the `poll_next` arm,
+  `surfaced` (so `forward_to_metadata` stops at it), the item helpers ignore
+  it, a unit test.
+- `tests/tulka_patches.rs`: a live test.
+
+**Drop when** upstream yields every ERROR token from `QueryStream`.
+
 ## 4. Build plumbing
 
 - `Cargo.toml`: a `[[test]]` entry for `tests/tulka_patches.rs` (the published

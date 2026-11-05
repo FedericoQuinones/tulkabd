@@ -321,6 +321,64 @@ async fn error_reports_editor_line() {
     result.unwrap();
 }
 
+/// The `(kind, text)` of the messages in `events`, in order.
+fn messages(events: &[ExecEvent]) -> Vec<(MessageKind, String)> {
+    events
+        .iter()
+        .filter_map(|ev| match ev {
+            ExecEvent::Message { kind, text, .. } => Some((*kind, text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn error_count(events: &[ExecEvent]) -> usize {
+    messages(events)
+        .iter()
+        .filter(|(k, _)| *k == MessageKind::Error)
+        .count()
+}
+
+#[tokio::test]
+async fn every_error_arrives_in_order() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let (result, events) = collect(
+        s.as_mut(),
+        "PRINT 'a'; RAISERROR('e1',16,1); PRINT 'b'; SELECT 1; RAISERROR('e2',16,1); SELECT 2",
+    )
+    .await;
+    // The batch failed with its first error.
+    assert!(
+        matches!(&result, Err(DriverError::Query { message, .. }) if message == "e1"),
+        "{result:?}"
+    );
+    let all: Vec<String> = events
+        .iter()
+        .filter_map(|ev| match ev {
+            ExecEvent::Message { kind, text, .. } => Some(format!("{kind:?} {text}")),
+            ExecEvent::ResultStart { index, .. } => Some(format!("result {index}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        all,
+        ["Info a", "Error e1", "Info b", "result 0", "Error e2", "result 1"]
+    );
+
+    let (result, events) = collect(s.as_mut(), "SELECT 1/0; SELECT 2").await;
+    assert!(
+        matches!(result, Err(DriverError::Query { .. })),
+        "{result:?}"
+    );
+    assert_eq!(rows(&events), vec![vec![Value::Int(2)]]);
+    assert_eq!(error_count(&events), 1);
+    // The session is still usable.
+    let (result, _) = collect(s.as_mut(), "SELECT 1").await;
+    result.unwrap();
+}
+
 #[tokio::test]
 async fn failed_batch_stops_the_script() {
     let Some(p) = test_params() else { return };
