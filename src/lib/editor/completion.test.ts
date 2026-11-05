@@ -2,7 +2,7 @@ import { expect, test, vi } from "vitest";
 import { CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
 import { EditorState } from "@codemirror/state";
 import type { CompletionMetadata } from "../ipc";
-import { aliasMap, completionSource, MetadataCache } from "./completion";
+import { aliasMap, batchRange, completionSource, MetadataCache } from "./completion";
 
 const meta: CompletionMetadata = {
   schemas: ["dbo", "ventas", "we]ird"],
@@ -124,6 +124,19 @@ test("GO separates batches by the same rules as the Rust split_batches", () => {
   // GO inside a string or a block comment is no separator.
   expect(at("SELECT 'a\nGO\n' FROM a x")).toEqual({ x: "dbo.a" });
   expect(at("/*\nGO\n*/ SELECT 1 FROM a x")).toEqual({ x: "dbo.a" });
+});
+
+test("only the batch around the cursor is looked at", async () => {
+  const doc = "SELECT 1 FROM Pedidos p\nGO\nSELECT p.| FROM ventas.Clientes p\nGO\nSELECT 3 FROM Pedidos p";
+  expect(labels(await complete(doc))).toEqual(["Id", "Nombre"]);
+  const sql = "SELECT 'a\nGO\n' FROM a x\nGO\nSELECT 1 FROM b y";
+  expect(batchRange(sql, 0)).toEqual([0, sql.indexOf("\nGO\nSELECT 1")]);
+  expect(batchRange(sql, sql.length)).toEqual([sql.indexOf("SELECT 1"), sql.length]);
+  // A cursor on the GO line is in the batch before it.
+  const go = "SELECT 1\nGO\nSELECT 2";
+  expect(batchRange(go, go.indexOf("GO") + 1)).toEqual([0, 8]);
+  // A GO inside a string left open is part of the string, so there is no second batch.
+  expect(await complete("SELECT 'x\nGO\nSEL|")).toBeNull();
 });
 
 test("a failed fetch is not cached", async () => {
