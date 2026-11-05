@@ -83,8 +83,8 @@ class PrefsStore {
 
   /**
    * Applies `patch` and saves the whole object. The backend's answer (brought into
-   * range) replaces the local value. A read-only config refuses to save: the change then holds
-   * for this session only and the error is rethrown.
+   * range) replaces the local value. A config that refuses to save (read-only) reverts the
+   * change to the last confirmed values and rethrows the error.
    */
   update(patch: Partial<Preferences>): Promise<Preferences> {
     const run = this.#queue.then(() => this.#write(patch));
