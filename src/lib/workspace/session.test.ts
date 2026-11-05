@@ -19,6 +19,7 @@ vi.mock("../ipc", () => ({
   sqlFilesExist: vi.fn(),
   readSqlFile: vi.fn(),
   readSavedQuery: vi.fn(),
+  sqlFileModified: vi.fn(),
   transactionCount: vi.fn(),
 }));
 
@@ -694,4 +695,57 @@ test("tabs opened before the restore finishes join the restored workspace", asyn
   expect(tabs.groupOf(early)).not.toBe("");
   expect(tabs.activeId).toBe(early);
   expect(ipc.closeSession).not.toHaveBeenCalled();
+});
+
+/** A saved session with an unsaved file tab on /sql/a.sql based on the file as of time 100. */
+async function dirtyFileSession(): Promise<string> {
+  const id = tabs.open({ kind: "query", sql: "SELECT 'mine'" });
+  const tab = tabs.list.find((x) => x.id === id)!;
+  tab.file = { path: "/sql/a.sql", encoding: "utf8", lineEnding: "lf", modifiedMs: 100 };
+  tab.dirty = true;
+  const json = JSON.stringify(snapshot(tabs));
+  await tabs.reset();
+  return json;
+}
+
+test("a file tab's modified time is saved and restored; a bad one drops the tab", async () => {
+  const json = await dirtyFileSession();
+  expect(parseSession(json)!.tabs[0]).toMatchObject({ file: { modifiedMs: 100 } });
+  const bad = JSON.parse(json);
+  bad.tabs[0].file.modifiedMs = "soon";
+  expect(parseSession(JSON.stringify(bad))!.tabs).toHaveLength(0);
+});
+
+test("a restored unsaved file tab whose file changed meanwhile says so and keeps its baseline", async () => {
+  const json = await dirtyFileSession();
+  vi.mocked(ipc.sqlFileModified).mockResolvedValue(250);
+  restore(tabs, parseSession(json)!, known);
+  await flush();
+  const tab = tabs.list[0];
+  expect(tab.pane!.notice).toContain(t("files.changedOnDisk"));
+  expect(tab.pane!.text()).toBe("SELECT 'mine'");
+  expect(tab.file?.modifiedMs).toBe(100);
+  // Saving goes through the conflict dialog instead of overwriting.
+  tabs.activate(tab.id);
+  await tabs.saveActive();
+  expect(tabs.fileConflict?.tabId).toBe(tab.id);
+});
+
+test("a restored unsaved file tab whose file did not change gets no notice", async () => {
+  const json = await dirtyFileSession();
+  vi.mocked(ipc.sqlFileModified).mockResolvedValue(100);
+  restore(tabs, parseSession(json)!, known);
+  await flush();
+  expect(tabs.list[0].pane!.notice).toBeNull();
+});
+
+test("an early tab on a file the session restored shows the restored tab instead", async () => {
+  const json = await dirtyFileSession();
+  const restoredId = JSON.parse(json).tabs[0].id;
+  const early = tabs.open({ kind: "query", sql: "SELECT 'disk'" });
+  tabs.list.find((x) => x.id === early)!.file = { path: "/sql//a.sql", encoding: "utf8", lineEnding: "lf" };
+  vi.mocked(ipc.sqlFileModified).mockResolvedValue(100);
+  restore(tabs, parseSession(json)!, known);
+  expect(tabs.list.map((x) => x.id)).toEqual([restoredId]);
+  expect(tabs.activeId).toBe(restoredId);
 });

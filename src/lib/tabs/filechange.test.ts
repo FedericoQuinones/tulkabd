@@ -139,14 +139,16 @@ test("on focus an unsaved tab whose file changed keeps its text and shows a noti
   expect(tab.pane!.notice).toBe(t("files.changedOnDisk"));
 });
 
-test("closing with Save over a changed file keeps the tab and says why", async () => {
+test("closing with Save over a changed file keeps the tab and asks Overwrite or Reload", async () => {
   const tab = await fileTab("SELECT 2");
   vi.mocked(ipc.sqlFileModified).mockResolvedValue(150);
   await tabs.requestClose(tab.id);
   await tabs.answerUnsaved(true);
   expect(ipc.writeSqlFile).not.toHaveBeenCalled();
   expect(tabs.list.some((x) => x.id === tab.id)).toBe(true);
-  expect(tabs.unsavedPrompt?.error).toBeTruthy();
+  // The disk conflict dialog takes over from the unsaved prompt.
+  expect(tabs.unsavedPrompt).toBeNull();
+  expect(tabs.fileConflict?.tabId).toBe(tab.id);
 });
 
 test("the same file spelled two ways opens one tab", async () => {

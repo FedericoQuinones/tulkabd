@@ -315,3 +315,36 @@ test("autosave started after the guard does not listen a second time", async () 
   stopAutosave();
   stop();
 });
+
+test("a restore that never finishes does not keep the window from closing", async () => {
+  vi.useFakeTimers();
+  try {
+    prefs.value = { ...DEFAULT_PREFERENCES, restoreSession: false };
+    const stop = tabs.guardWindow(new Promise(() => {}));
+    await vi.advanceTimersByTimeAsync(0);
+    const preventDefault = vi.fn();
+    const closing = closeRequested!({ preventDefault });
+    await vi.advanceTimersByTimeAsync(SAVE_TIMEOUT_MS + 10);
+    await closing;
+    expect(tabs.unsavedPrompt).toBeNull();
+    expect(preventDefault).not.toHaveBeenCalled();
+    stop();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("the window close is held while the name dialog or a disk conflict is open", async () => {
+  const id = edited("SELECT 1");
+  await armWindowClose();
+  tabs.fileConflict = { tabId: id, title: "x" };
+  const preventDefault = vi.fn();
+  await closeRequested!({ preventDefault });
+  expect(preventDefault).toHaveBeenCalled();
+  tabs.fileConflict = null;
+  tabs.nameRequest = { title: "t", initial: "", onsubmit: async () => null, oncancel: () => {} };
+  const again = vi.fn();
+  await closeRequested!({ preventDefault: again });
+  expect(again).toHaveBeenCalled();
+});
+

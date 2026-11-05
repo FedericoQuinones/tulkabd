@@ -24,7 +24,7 @@ export type SessionTab =
       database: string | null;
       text: string;
       savedQuery?: { database: string; name: string };
-      file?: { path: string; encoding: Encoding; lineEnding: LineEnding };
+      file?: { path: string; encoding: Encoding; lineEnding: LineEnding; modifiedMs?: number };
       dirty: boolean;
     }
   | { id: string; kind: "structure"; connectionId: string; database: string; schema: string; name: string }
@@ -51,7 +51,10 @@ function sessionTab(store: TabsStore, tab: Tab, text: (pane: PaneState) => strin
   const { connectionId, database } = store.binding(tab);
   const out: SessionTab = { id: tab.id, kind: "query", title: tab.title, connectionId, database, text: text(tab.pane!), dirty: tab.dirty };
   if (tab.savedQuery) out.savedQuery = { database: tab.savedQuery.database, name: tab.savedQuery.name };
-  if (tab.file) out.file = { path: tab.file.path, encoding: tab.file.encoding, lineEnding: tab.file.lineEnding };
+  if (tab.file) {
+    out.file = { path: tab.file.path, encoding: tab.file.encoding, lineEnding: tab.file.lineEnding };
+    if (tab.file.modifiedMs) out.file.modifiedMs = tab.file.modifiedMs;
+  }
   return out;
 }
 
@@ -122,7 +125,8 @@ function validTab(v: unknown): v is SessionTab {
     isObject(f) &&
     isString(f.path) &&
     ["utf8", "utf8Bom", "utf16Le", "utf16Be"].includes(f.encoding as string) &&
-    (f.lineEnding === "lf" || f.lineEnding === "crlf")
+    (f.lineEnding === "lf" || f.lineEnding === "crlf") &&
+    (f.modifiedMs === undefined || (typeof f.modifiedMs === "number" && Number.isFinite(f.modifiedMs)))
   );
 }
 
@@ -219,6 +223,23 @@ function restoredTab(s: SessionTab, known: { connectionIds: Set<string> }): Tab 
 }
 
 /**
+ * An unsaved restored tab keeps its text, and the modified time it was based on. When the file has
+ * a different one now, the tab says so; the baseline stays, so saving asks what to do.
+ */
+async function noteDiskChange(store: TabsStore, pane: PaneState, path: string, known: number): Promise<void> {
+  let current: number;
+  try {
+    current = await ipc.sqlFileModified(path);
+  } catch {
+    return;
+  }
+  const tab = store.list.find((x) => x.pane === pane);
+  if (tab?.file?.path !== path || !current || current === known) return;
+  const notice = t("files.changedOnDisk");
+  if (!pane.notice?.includes(notice)) pane.notice = pane.notice ? `${pane.notice} ${notice}` : notice;
+}
+
+/**
  * Checks the restored tabs' files are still there (the backend remembers the ones the user picked or
  * dropped in earlier runs; any other path counts as missing). A tab
  * whose file is gone stops being a file tab (Ctrl+S would recreate a file the user moved or deleted):
@@ -243,6 +264,7 @@ async function checkFiles(store: TabsStore, files: { pane: PaneState; path: stri
       // The text in the session may be old: another program can have changed the file since.
       // An unsaved tab keeps its own text.
       if (!tab.dirty) present.push(store.reloadFile(tab.id, true));
+      else if (tab.file.modifiedMs) present.push(noteDiskChange(store, pane, path, tab.file.modifiedMs));
       return;
     }
     if (exists[i] !== false) return;

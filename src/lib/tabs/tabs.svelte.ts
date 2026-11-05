@@ -93,6 +93,9 @@ export const END_RETRY_MS = 50;
 export const END_RETRIES = 100;
 
 /** Longest wait for a tab to say how many transactions it holds before it counts as unknown. */
+/** Pause between looks at whether the dialog in the way has been answered. */
+export const MODAL_POLL_MS = 50;
+
 export const CHECK_TIMEOUT_MS = 3000;
 const GUARD_LOG_WAIT_MS = 500;
 
@@ -172,9 +175,12 @@ export function fileErrorText(e: unknown): string {
  * case ignored where file systems usually do (Windows and macOS).
  */
 export function pathKey(path: string): string {
-  const folded = typeof navigator !== "undefined" && /Win|Mac/.test(navigator.platform);
-  const key = path.replace(/[\\/]+/g, "/").replace(/(.)\/$/, "$1");
-  return folded ? key.toLowerCase() : key;
+  const platform = typeof navigator !== "undefined" ? navigator.platform : "";
+  let key = path;
+  // Backslashes separate folders only on Windows (elsewhere they are part of a name).
+  if (/Win/.test(platform)) key = key.replace(/^\\\\\?\\/, "").replace(/\\/g, "/");
+  key = key.replace(/\/{2,}/g, "/").replace(/(.)\/$/, "$1");
+  return /Win|Mac/.test(platform) ? key.toLowerCase() : key;
 }
 
 const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
@@ -455,7 +461,7 @@ export class TabsStore {
    */
   async requestClose(id: string): Promise<void> {
     const tab = this.list.find((x) => x.id === id);
-    if (!tab || this.closePrompt || this.unsavedPrompt) return;
+    if (!tab || this.modalOpen()) return;
     if (this.isDirty(tab)) {
       this.unsavedPrompt = { scope: "tab", tabs: [{ tabId: id, title: tab.title }], busy: false, error: null };
       return;
@@ -493,8 +499,13 @@ export class TabsStore {
       return;
     }
     this.unsavedPrompt = { ...prompt, busy: true, error: null };
-    const saved = await this.saveTab(tab);
+    const saved = await this.saveTab(tab, "ask");
     if (this.unsavedPrompt?.scope !== "tab") return;
+    if (this.fileConflict) {
+      // The file changed on disk: that dialog decides; the tab stays open.
+      this.unsavedPrompt = null;
+      return;
+    }
     if (saved && !tab.dirty) {
       this.unsavedPrompt = null;
       await this.closeChecked(id);
@@ -517,7 +528,14 @@ export class TabsStore {
         const tab = this.list.find((x) => x.id === tabId);
         if (!tab || !this.isDirty(tab)) continue;
         if (!tab.savedQuery && !tab.file) nameless++;
-        else if (!(await this.saveTab(tab)) || tab.dirty) failed ??= t("unsaved.failed", { title: tab.title });
+        else {
+          const saved = await this.saveTab(tab, "ask");
+          if (this.fileConflict) {
+            this.unsavedPrompt = null;
+            return;
+          }
+          if (!saved || tab.dirty) failed ??= t("unsaved.failed", { title: tab.title });
+        }
       }
       if (this.unsavedPrompt?.scope !== "window") return;
       const left = this.list.filter((x) => this.isDirty(x));
@@ -590,7 +608,7 @@ export class TabsStore {
 
   /** The window is being closed: ask about unsaved tabs, then once for every tab that holds, or may hold, a transaction. */
   private async confirmWindowClose(event: { preventDefault: () => void }): Promise<void> {
-    if (this.closePrompt || this.unsavedPrompt) {
+    if (this.modalOpen()) {
       // Answering an earlier prompt: the window stays until that is done.
       event.preventDefault();
       return;
@@ -747,7 +765,7 @@ export class TabsStore {
       await this.promptIdle();
       checks = await Promise.all(affected().map((x) => this.checkTab(x)));
       // Another prompt took over while counting: wait for it and count again.
-      if (!this.closePrompt) break;
+      if (!this.modalOpen()) break;
     }
     const plan = closePlan(checks);
     const asked = new Set(plan.ask ? plan.tabs.map((c) => c.tabId) : []);
@@ -768,12 +786,24 @@ export class TabsStore {
     tab.pane.notice = t("tabs.connectionDeleted");
   }
 
+  /** A dialog is asking the user something; another must not open over it. */
+  private modalOpen(): boolean {
+    return !!(this.closePrompt || this.unsavedPrompt || this.nameRequest || this.fileConflict);
+  }
+
   private promptWaiters: (() => void)[] = [];
 
-  /** Resolves once no close prompt is showing. */
-  private promptIdle(): Promise<void> {
-    if (!this.closePrompt) return Promise.resolve();
-    return new Promise((resolve) => this.promptWaiters.push(resolve));
+  /**
+   * Resolves once no dialog is showing: woken when a close prompt ends, and looking again every
+   * MODAL_POLL_MS for the other dialogs.
+   */
+  private async promptIdle(): Promise<void> {
+    while (this.modalOpen()) {
+      await new Promise<void>((resolve) => {
+        this.promptWaiters.push(resolve);
+        setTimeout(resolve, MODAL_POLL_MS);
+      });
+    }
   }
 
   /** Dismisses the close prompt and lets whatever waited for it go on. */
@@ -842,7 +872,7 @@ export class TabsStore {
         if (!tab) return;
         check = await this.checkTab(tab);
         // Another prompt took over while counting: wait for it and count again.
-        if (!this.closePrompt) break;
+        if (!this.modalOpen()) break;
       }
       const pane = this.list.find((x) => x.id === id)?.pane;
       // Closed meanwhile.
@@ -1180,21 +1210,17 @@ export class TabsStore {
   }
 
   /**
-   * The open tab of a saved query. With `connectionId` (a tree click), one bound to that
-   * connection and the query's database, or still connecting to them, comes first; any other tab
-   * of the query is the fallback, so the same query is never open twice (two tabs would
-   * overwrite each other's saves).
+   * The open tab of a saved query. With `connectionId` (a tree click), only one bound to that
+   * connection and the query's database, or still connecting to them; any one otherwise.
    */
   private tabOf(q: { database: string; name: string }, connectionId: string | null = null): Tab | undefined {
-    const same = this.list.filter((x) => x.savedQuery?.database === q.database && x.savedQuery.name === q.name);
-    if (connectionId === null) return same[0];
-    return (
-      same.find((x) => {
-        const bound = this.binding(x);
-        const b = bound.connectionId !== null ? bound : (this.wanted.get(x.id) ?? bound);
-        return b.connectionId === connectionId && b.database === q.database;
-      }) ?? same[0]
-    );
+    return this.list.find((x) => {
+      if (x.savedQuery?.database !== q.database || x.savedQuery.name !== q.name) return false;
+      if (connectionId === null) return true;
+      const bound = this.binding(x);
+      const b = bound.connectionId !== null ? bound : (this.wanted.get(x.id) ?? bound);
+      return b.connectionId === connectionId && b.database === q.database;
+    });
   }
 
   /**
@@ -1254,7 +1280,20 @@ export class TabsStore {
    * join the restored active group, after the restored tabs, and the last of them is shown.
    */
   replaceWorkspace(w: { list: Tab[]; tabGroups: TabGroup[]; layout: Layout; activeGroupId: string }): void {
-    const early = this.list;
+    // A file the user opened early that the session restored too shows the restored tab.
+    const restoredFiles = new Map(w.list.flatMap((x) => (x.file ? [[pathKey(x.file.path), x.id] as const] : [])));
+    let duplicate: string | undefined;
+    const early = this.list.filter((x) => {
+      const same = x.file && !x.dirty ? restoredFiles.get(pathKey(x.file.path)) : undefined;
+      if (same === undefined) return true;
+      duplicate = same;
+      this.dropRequest(x.id);
+      this.pending.delete(x.id);
+      this.wanted.delete(x.id);
+      if (x.pane) x.pane.onedit = null;
+      void x.pane?.close();
+      return false;
+    });
     this.list = [...w.list, ...early];
     this.tabGroups = w.tabGroups;
     this.layout = w.layout;
@@ -1264,6 +1303,13 @@ export class TabsStore {
       group.tabIds.push(...early.map((x) => x.id));
       group.activeId = early[early.length - 1].id;
       this.shown++;
+    } else if (duplicate !== undefined) {
+      const g = this.group(this.groupOf(duplicate));
+      if (g) {
+        g.activeId = duplicate;
+        this.activeGroupId = g.id;
+        this.shown++;
+      }
     }
     for (const tab of w.list) this.track(tab);
     const restored = w.list.map((x) => Number(/^untitled-(\d+)$/.exec(x.title)?.[1] ?? 0));
@@ -1379,7 +1425,8 @@ export class TabsStore {
   private listenForClose(ready: Promise<unknown>): () => void {
     let stopped = false;
     const beforeClose = async () => {
-      await ready.catch(() => {});
+      // A restore that hangs must not keep the window from closing.
+      await settleWithin(ready, SAVE_TIMEOUT_MS);
       await this.flushOnClose?.();
     };
     let unlisten: (() => void) | null = null;
