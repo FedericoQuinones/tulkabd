@@ -88,5 +88,4 @@ jobs:
             target/release/bundle/dmg/*.dmg
             target/release/bundle/deb/*.deb
             target/release/bundle/rpm/*.rpm
-            target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
