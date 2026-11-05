@@ -207,19 +207,22 @@ impl Explorer {
             .spawn(move || {
                 // Set even if loading panics, or every index update would
                 // wait forever.
-                let _loaded = MarkLoaded(&loader);
-                let entries = loader
-                    .cache
-                    .all_objects()
-                    .into_iter()
-                    .map(|(connection_id, database, object)| SearchEntry {
-                        connection_id,
-                        database,
-                        object,
-                    })
-                    .collect();
-                let built = SearchIndex::build(entries);
-                *loader.index.write().unwrap_or_else(PoisonError::into_inner) = built;
+                {
+                    let _loaded = MarkLoaded(&loader);
+                    let entries = loader
+                        .cache
+                        .all_objects()
+                        .into_iter()
+                        .map(|(connection_id, database, object)| SearchEntry {
+                            connection_id,
+                            database,
+                            object,
+                        })
+                        .collect();
+                    let built = SearchIndex::build(entries);
+                    *loader.index.write().unwrap_or_else(PoisonError::into_inner) = built;
+                }
+                // After the guard: a search made on this event must not count the load as indexing.
                 loader.emit(AppEvent::IndexLoaded);
             });
         if spawned.is_err() {
