@@ -11,6 +11,7 @@
   import type { ColumnFilter, Value } from "../ipc";
   import type { PaneResult } from "../pane/reduce";
   import { cellText } from "./cellText";
+  import { fitWidth, MIN_COLUMN_WIDTH, recallWidths, rememberWidth } from "./columnWidths";
   import ColumnMenu from "./ColumnMenu.svelte";
   import { gridKey, type Cell } from "./gridKeys";
   import { isSelected, type GridSelection } from "./selection";
@@ -54,7 +55,7 @@
   const NUMERIC = new Set(["int", "bigint", "smallint", "tinyint", "decimal", "numeric", "float", "real", "money", "smallmoney"]);
   const gridId = `result-grid-${++nextGridId}`;
 
-  // The parent keys this component by run, so the cache and widths die with the run.
+  // The parent keys this component by run, so the cache dies with the run.
   let version = $state(0);
   const cache = new WindowCache(
     (offset, limit) => ipc.fetchRows(tabId, resultIndex, offset, limit),
@@ -96,7 +97,8 @@
   let programmatic: number | null = null;
   let viewportHeight = $state(0);
   let gridEl = $state<HTMLDivElement>();
-  let widths = $state<number[]>([]);
+  // Widths the user set earlier in this tab, by column name, survive a re-run.
+  let widths = $state<number[]>(untrack(() => recallWidths(tabId, result.columns.map((c) => c.name))));
   let columnMenu = $state<{ column: number; x: number; y: number; trigger: HTMLElement } | null>(null);
   let cellMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
@@ -286,13 +288,31 @@
     gridEl?.focus({ preventScroll: true });
   }
 
-  const MIN_WIDTH = 48;
+  function setWidth(col: number, width: number) {
+    const w = Math.max(MIN_COLUMN_WIDTH, width);
+    widths[col] = w;
+    const name = columns[col]?.name;
+    if (name !== undefined) rememberWidth(tabId, name, w);
+  }
+
+  /** Double-click on the grip: fits the column to its header and the cells in view. */
+  function fitColumn(col: number) {
+    if (!gridEl) return;
+    const head = gridEl.querySelector<HTMLElement>(`[role=columnheader][aria-colindex="${col + 2}"]`);
+    const name = head?.querySelector<HTMLElement>(".name");
+    const arrow = head?.querySelector<HTMLElement>(".arrow");
+    // The sort button's padding, its gap, the filter button and the header's right padding.
+    const header = name ? 12 + name.scrollWidth + (arrow ? arrow.offsetWidth + 4 : 0) + 4 + 18 + 6 : 0;
+    const cells = [...gridEl.querySelectorAll<HTMLElement>(`[data-col="${col}"]`)].map((c) => c.scrollWidth);
+    setWidth(col, fitWidth(header, cells));
+  }
+
   function resizeKey(e: KeyboardEvent, col: number) {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
     e.preventDefault();
     e.stopPropagation();
     const step = e.shiftKey ? 50 : 10;
-    widths[col] = Math.max(MIN_WIDTH, colWidth(col) + (e.key === "ArrowRight" ? step : -step));
+    setWidth(col, colWidth(col) + (e.key === "ArrowRight" ? step : -step));
   }
 
   let stopResize: (() => void) | undefined;
@@ -302,7 +322,7 @@
     const startX = e.clientX;
     const startW = colWidth(col);
     const move = (ev: PointerEvent) => {
-      widths[col] = Math.max(MIN_WIDTH, startW + ev.clientX - startX);
+      setWidth(col, startW + ev.clientX - startX);
     };
     const stop = () => {
       window.removeEventListener("pointermove", move);
@@ -389,9 +409,10 @@
             aria-orientation="vertical"
             aria-label={t("results.resize", { name: c.name })}
             aria-valuenow={colWidth(i)}
-            aria-valuemin={MIN_WIDTH}
+            aria-valuemin={MIN_COLUMN_WIDTH}
             tabindex="0"
             onpointerdown={(e) => startResize(e, i)}
+            ondblclick={() => fitColumn(i)}
             onkeydown={(e) => resizeKey(e, i)}
           ></span>
         </div>
