@@ -51,7 +51,7 @@ beforeEach(async () => {
   vi.mocked(ipc.transactionCount).mockResolvedValue(0);
   vi.mocked(ipc.logCancelledRun).mockResolvedValue();
   vi.mocked(ipc.saveQuery).mockResolvedValue();
-  vi.mocked(ipc.writeSqlFile).mockResolvedValue();
+  vi.mocked(ipc.writeSqlFile).mockResolvedValue(1);
   vi.mocked(ipc.onQuitRequested).mockResolvedValue(() => {});
   destroy.mockClear();
   closeRequested = null;

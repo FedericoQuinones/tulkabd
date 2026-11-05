@@ -637,3 +637,39 @@ async fn stored_paths_that_are_not_sql_files_are_not_allowed() {
     let st = state(&dir).with_session(Arc::new(SessionStore::open(&db)));
     assert_eq!(read_sql_file(&st, path).await.unwrap_err(), NOT_ALLOWED);
 }
+
+#[tokio::test]
+async fn a_files_modified_time_is_read_with_it_and_follows_a_write() {
+    let dir = TempDir::new().unwrap();
+    let st = state(&dir);
+    let file = dir.path().join("q.sql");
+    std::fs::write(&file, "SELECT 1").unwrap();
+    let path = path_string(&file);
+
+    // Not allowed: nothing is learnt about the file.
+    assert_eq!(
+        sql_file_modified(&st, path.clone()).await.unwrap_err(),
+        NOT_ALLOWED
+    );
+    allow_paths(&st, vec![path.clone()]);
+
+    let opened = read_sql_file(&st, path.clone()).await.unwrap();
+    assert!(opened.modified_ms > 0);
+    assert_eq!(
+        sql_file_modified(&st, path.clone()).await.unwrap(),
+        opened.modified_ms
+    );
+    let written = write_sql_file(
+        &st,
+        path.clone(),
+        "SELECT 2".into(),
+        opened.encoding,
+        opened.line_ending,
+    )
+    .await
+    .unwrap();
+    assert_eq!(sql_file_modified(&st, path.clone()).await.unwrap(), written);
+
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(sql_file_modified(&st, path).await.unwrap_err(), NOT_FOUND);
+}

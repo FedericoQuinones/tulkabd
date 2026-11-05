@@ -38,6 +38,7 @@ const opened = (path: string, text = `SELECT '${path}';`): OpenedFile => ({
   text,
   encoding: "utf16Le",
   lineEnding: "crlf",
+  modifiedMs: 100,
 });
 
 let cmp: ReturnType<typeof mount> | undefined;
@@ -48,7 +49,7 @@ beforeEach(async () => {
   vi.mocked(ipc.openSession).mockImplementation(async (_tab, _conn, database) => session(database ?? "master"));
   vi.mocked(ipc.listSavedQueries).mockResolvedValue([]);
   vi.mocked(ipc.saveQuery).mockResolvedValue();
-  vi.mocked(ipc.writeSqlFile).mockResolvedValue();
+  vi.mocked(ipc.writeSqlFile).mockResolvedValue(1);
   vi.mocked(ipc.readSqlFile).mockImplementation(async (path) => opened(path));
   connections.list = [conn];
   queries.reset();
@@ -151,7 +152,7 @@ test("typing while the file is written leaves the tab unsaved", async () => {
   const tab = tabs.active!;
   tab.dirty = true;
   let release!: () => void;
-  vi.mocked(ipc.writeSqlFile).mockReturnValue(new Promise<void>((r) => (release = r)));
+  vi.mocked(ipc.writeSqlFile).mockReturnValue(new Promise<number>((r) => (release = () => r(1))));
   const saving = tabs.saveActive();
   tab.pane!.edited();
   release();
