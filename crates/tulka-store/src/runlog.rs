@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -15,9 +16,10 @@ const RUNLOG_VERSION: i64 = 1;
 /// How long the app waits on a file locked by another process. The MCP
 /// server writes to the same file, and on Windows a commit can hold the lock
 /// for a few hundred milliseconds.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// How often a store that fell back to memory tries its file again.
 const REOPEN_EVERY: Duration = Duration::from_secs(2);
-const BUSY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How long another process (the MCP server) waits on a busy file before it
 /// gives up on one write.
@@ -161,6 +163,8 @@ pub struct RunLogStore {
     /// Set while the log lives in memory only because the file could not be
     /// opened; the next calls try the file again.
     retry: Mutex<Option<Retry>>,
+    /// Set when the file replaced the in-memory log, which changes the ids.
+    reopened: AtomicBool,
 }
 
 /// The file a store fell back from, and when it last tried it.
@@ -297,6 +301,30 @@ fn cap_sql(sql: &str) -> (&str, bool) {
 }
 
 /// Writes one run, cutting its text and client name to their caps.
+/// Writes `e` as it is (the id is assigned again), keeping its truncation flag.
+fn insert_entry(conn: &Connection, e: &RunLogEntry) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO run (at_ms, connection_id, connection_name, color, database, sql,
+                          sql_truncated, outcome, rows, elapsed_ms, source, client)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            e.at_ms,
+            e.connection_id,
+            e.connection_name,
+            e.color,
+            e.database,
+            e.sql,
+            e.sql_truncated,
+            e.outcome.as_str(),
+            e.rows.map(|n| n as i64),
+            e.elapsed_ms.map(|n| n as i64),
+            e.source.as_str(),
+            e.client,
+        ],
+    )
+    .map(|_| ())
+}
+
 fn insert_run(conn: &Connection, run: &NewRun) -> Result<RunLogEntry, String> {
     let (sql, sql_truncated) = cap_sql(&run.sql);
     let client: Option<String> = run
@@ -399,6 +427,7 @@ impl RunLogStore {
             Ok(conn) => RunLogStore {
                 conn: Mutex::new(conn),
                 retry: Mutex::new(None),
+                reopened: AtomicBool::new(false),
             },
             Err(_) => {
                 let store = Self::in_memory();
@@ -427,26 +456,22 @@ impl RunLogStore {
             return;
         };
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        for e in list_entries(&conn, None, u32::MAX).into_iter().rev() {
-            let _ = insert_run(
-                &file,
-                &NewRun {
-                    at_ms: e.at_ms,
-                    connection_id: e.connection_id,
-                    connection_name: e.connection_name,
-                    color: e.color,
-                    database: e.database,
-                    sql: e.sql,
-                    outcome: e.outcome,
-                    rows: e.rows,
-                    elapsed_ms: e.elapsed_ms,
-                    source: e.source,
-                    client: e.client,
-                },
-            );
+        // All or nothing: on a failure the memory log stays as it is and the
+        // move is tried again later, so nothing is lost or duplicated.
+        if file.execute_batch("BEGIN IMMEDIATE").is_err() {
+            return;
+        }
+        let moved = list_entries(&conn, None, u32::MAX)
+            .iter()
+            .rev()
+            .try_for_each(|e| insert_entry(&file, e));
+        if moved.is_err() || file.execute_batch("COMMIT").is_err() {
+            let _ = file.execute_batch("ROLLBACK");
+            return;
         }
         *conn = file;
         *retry = None;
+        self.reopened.store(true, Ordering::Release);
     }
 
     /// `<data dir>/runlog.db`; in memory when there is no data dir.
@@ -471,7 +496,14 @@ impl RunLogStore {
         RunLogStore {
             conn: Mutex::new(conn),
             retry: Mutex::new(None),
+            reopened: AtomicBool::new(false),
         }
+    }
+
+    /// Whether the file replaced the in-memory log since the last call. The
+    /// ids of the entries are then not the ones handed out before.
+    pub fn take_reopened(&self) -> bool {
+        self.reopened.swap(false, Ordering::AcqRel)
     }
 
     fn lock(&self) -> MutexGuard<'_, Connection> {
@@ -936,6 +968,30 @@ mod tests {
             .map(|e| e.sql)
             .collect();
         assert_eq!(in_file, ["during", "old"]);
+        assert!(store.take_reopened());
+        assert!(!store.take_reopened());
+    }
+
+    #[test]
+    fn moving_to_the_file_keeps_the_truncation_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        RunLogStore::open(&path);
+        let other = Connection::open(&path).unwrap();
+        other
+            .pragma_update(None, "locking_mode", "EXCLUSIVE")
+            .unwrap();
+        other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let store = RunLogStore::open(&path);
+        let big = "x".repeat(MAX_LOGGED_SQL_BYTES + 10);
+        assert!(store.insert(&run(&big, 1)).unwrap().sql_truncated);
+        other.execute_batch("ROLLBACK").unwrap();
+        drop(other);
+        std::thread::sleep(REOPEN_EVERY + Duration::from_millis(200));
+        let got = store.list(None, 10);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].sql_truncated);
+        assert_eq!(got[0].sql.len(), MAX_LOGGED_SQL_BYTES);
     }
 
     #[test]
