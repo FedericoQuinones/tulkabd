@@ -274,6 +274,8 @@
   "explorer.loading": "Loading…",
   "explorer.noDatabases": "No databases",
   "explorer.none": "None",
+  "explorer.showing": "Showing {shown} of {total}",
+  "explorer.showMore": "Show {n} more",
   "explorer.noAccess": "No access",
   "explorer.indexing": "indexing…",
   "explorer.indexFailed": "indexing failed",

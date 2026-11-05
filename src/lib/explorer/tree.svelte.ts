@@ -48,6 +48,9 @@ interface Load {
 
 type Loaded<T> = T[] | { error: string };
 
+/** Children rendered per object group until the user asks for more; 10k tables must not mean 10k rows. */
+export const OBJECT_PAGE = 500;
+
 /** Hears the end of a connect: `null` when connected, else the error. */
 export type ConnectThen = (error: string | null) => void;
 
@@ -68,6 +71,8 @@ class ExplorerStore {
   objects = $state.raw<Record<string, Loaded<DbObject>>>({});
   /** Columns by object key. */
   columns = $state.raw<Record<string, Loaded<ColumnInfo>>>({});
+  /** How many objects of a group are shown, by group key (default `OBJECT_PAGE`). */
+  private limits = $state.raw<Record<string, number>>({});
   filter = $state("");
   hits = $state.raw<PaletteHit[]>([]);
   /** The query `hits` answer. */
@@ -664,7 +669,18 @@ class ExplorerStore {
       } else {
         objects = fs?.hits.get(key) ?? [];
       }
-      for (const o of objects) this.objectRow(out, c, db.name, o, level + 1, key);
+      const limit = this.limits[key] ?? OBJECT_PAGE;
+      const shown = objects.length > limit ? objects.slice(0, limit) : objects;
+      for (const o of shown) this.objectRow(out, c, db.name, o, level + 1, key);
+      if (objects.length > limit) {
+        const more = Math.min(OBJECT_PAGE, objects.length - limit);
+        out.push(
+          this.notice(key, "more", level + 1, "muted", t("explorer.showing", { shown: limit, total: objects.length }), {
+            label: t("explorer.showMore", { n: more }),
+            run: () => (this.limits = { ...this.limits, [key]: (this.limits[key] ?? OBJECT_PAGE) + OBJECT_PAGE }),
+          }),
+        );
+      }
     }
   }
 
@@ -906,6 +922,7 @@ class ExplorerStore {
     this.conns = {};
     this.objects = {};
     this.columns = {};
+    this.limits = {};
     this.filter = "";
     this.hits = [];
     this.hitsQuery = "";
