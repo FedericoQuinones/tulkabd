@@ -114,6 +114,9 @@ pub(crate) const CANCELLED: &str = "The query was cancelled.";
 
 pub(crate) const OUTPUT_CUT: &str = "Output cut at 100,000 characters; narrow the query.";
 
+/// The same for the tools that look things up rather than run SQL.
+pub(crate) const OUTPUT_CUT_SEARCH: &str = "Output cut at 100,000 characters; narrow the search.";
+
 /// Marks a result set that has more rows than were returned.
 pub(crate) const LIMIT_REACHED: &str =
     "limit reached: more rows exist; narrow the query or use TOP";

@@ -69,7 +69,7 @@ impl ToolText {
         if self.text.chars().count() <= AI_MAX_OUTPUT_CHARS {
             return self;
         }
-        let notice = format!("\n{}", self::format::OUTPUT_CUT);
+        let notice = format!("\n{}", self::format::OUTPUT_CUT_SEARCH);
         let room = AI_MAX_OUTPUT_CHARS.saturating_sub(notice.chars().count());
         let end = self
             .text
@@ -365,7 +365,7 @@ mod tests {
         let text = vec![line; 2000].join("\n");
         let cut = ToolText::ok(text).within_budget();
         assert!(cut.text.chars().count() <= AI_MAX_OUTPUT_CHARS);
-        assert!(cut.text.ends_with(format::OUTPUT_CUT));
+        assert!(cut.text.ends_with(format::OUTPUT_CUT_SEARCH));
         assert!(!cut.is_error);
         let short = ToolText::ok("small").within_budget();
         assert_eq!(short.text, "small");
