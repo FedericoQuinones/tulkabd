@@ -381,3 +381,15 @@ test("reconnecting with the guard dialog open logs a cancelled run first", async
   expect(pane.guardPrompt).toBeNull();
   expect(vi.mocked(ipc.logCancelledRun).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(ipc.closeSession).mock.invocationCallOrder.at(-1)!);
 });
+
+test("a USE inside the script moves the pane to the database the run ended in", async () => {
+  const r = startRun();
+  r.d.resolve({ ...ok, database: "Sales" });
+  await r.done;
+  expect(pane.database).toBe("Sales");
+  // Picking the old database is a real switch now, not an early return.
+  vi.mocked(ipc.useDatabase).mockResolvedValue();
+  await pane.changeDatabase("master");
+  expect(ipc.useDatabase).toHaveBeenCalledWith("t1", "master");
+  expect(pane.database).toBe("master");
+});

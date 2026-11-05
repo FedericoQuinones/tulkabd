@@ -331,6 +331,7 @@ export class PaneState {
       });
       if (id !== this.runId) return;
       this.summary = summary;
+      if (summary.database) this.database = summary.database;
       if (this.isDisconnected()) return;
       if (summary.outcome === "disconnected") this.markDisconnected();
       else {

@@ -127,6 +127,7 @@ pub(crate) async fn check(
         finished_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         outcome,
         findings,
+        database: None,
     }))
 }
 

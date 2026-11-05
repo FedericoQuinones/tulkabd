@@ -100,6 +100,8 @@ export interface RunSummary {
   outcome: "ok" | "error" | "cancelled" | "disconnected" | "blocked" | "needsConfirmation";
   /** The dangerous statements found; empty unless the outcome is `blocked` or `needsConfirmation`. */
   findings: GuardFinding[];
+  /** The session's database after the run (a `USE` in the script changes it); absent when unknown. */
+  database?: string | null;
 }
 export type Selection =
   | { kind: "all" }

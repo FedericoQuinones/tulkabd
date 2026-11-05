@@ -278,6 +278,10 @@ pub struct RunSummary {
     /// `blocked` or `needsConfirmation`.
     #[serde(default)]
     pub findings: Vec<GuardFinding>,
+    /// The session's database after the run (a `USE` in the script changes
+    /// it); `None` when it could not be read or the run did not execute.
+    #[serde(default)]
+    pub database: Option<String>,
 }
 
 /// Returned by `open_session`.
@@ -426,10 +430,11 @@ mod tests {
             finished_at: "2026-10-21T14:03:00.123Z".into(),
             outcome: RunOutcome::Cancelled,
             findings: vec![],
+            database: Some("sales".into()),
         };
         assert_eq!(
             to_json(&s),
-            json!({"elapsedMs": 42, "finishedAt": "2026-10-21T14:03:00.123Z", "outcome": "cancelled", "findings": []})
+            json!({"elapsedMs": 42, "finishedAt": "2026-10-21T14:03:00.123Z", "outcome": "cancelled", "findings": [], "database": "sales"})
         );
         for (o, text) in [
             (RunOutcome::Ok, "ok"),

@@ -275,6 +275,18 @@ where
         _ => {}
     }
 
+    // A `USE` in the script changes the session's database: read it back.
+    let database = if outcome == RunOutcome::Disconnected {
+        None
+    } else {
+        session.current_database().await.ok()
+    };
+    if let Some(name) = &database {
+        let mut tabs = state.tabs();
+        if let Some(tab) = checkout.tab(&mut tabs) {
+            tab.database.clone_from(name);
+        }
+    }
     checkout.checkin(session, outcome == RunOutcome::Disconnected);
     let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     let logged = match outcome {
@@ -289,6 +301,7 @@ where
         finished_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         outcome,
         findings: Vec::new(),
+        database,
     })
 }
 
