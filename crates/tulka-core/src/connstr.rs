@@ -31,9 +31,11 @@ pub struct ParsedConnection {
     pub connect_timeout_s: Option<u32>,
     /// Well-known settings this app does not use, by their canonical names
     /// (`Application Name`, `Pooling`, ...).
+    #[serde(default)]
     pub ignored_keys: Vec<String>,
     /// Other keys that were not understood. They are only counted: their
     /// names come from the paste and may be a piece of a password.
+    #[serde(default)]
     pub unknown_keys: u32,
 }
 
@@ -753,6 +755,13 @@ mod tests {
         let p = parse("sqlserver://h?mystery=%ZZ&encrypt=false");
         assert_eq!(p.encrypt, Some(false));
         assert_eq!(err("sqlserver://h?encrypt=%ZZ"), "bad_value:Encrypt");
+    }
+
+    #[test]
+    fn counts_default_when_missing_from_json() {
+        let p: ParsedConnection = serde_json::from_str(r#"{"server":"h"}"#).unwrap();
+        assert_eq!(p.unknown_keys, 0);
+        assert!(p.ignored_keys.is_empty());
     }
 
     #[test]
