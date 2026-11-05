@@ -2,6 +2,16 @@
 
 A lightweight, cross-platform desktop client for Microsoft SQL Server, built with Tauri 2, Rust and Svelte.
 
+## Install
+
+Download the installer for your system from the [GitHub Releases](https://github.com/FedericoQuinones/tulkabd/releases) page.
+
+- **Windows:** run the `.msi` or `.exe` installer. The builds are not code-signed, so SmartScreen may warn you: choose **More info**, then **Run anyway**.
+- **macOS:** open the `.dmg` and drag tulkabd to Applications. The builds are not signed or notarized, so on first launch right-click the app and choose **Open**, or clear the quarantine flag: `xattr -dr com.apple.quarantine /Applications/tulkabd.app`
+- **Linux:** install the `.deb` (`sudo apt install ./tulkabd_*.deb`) or the `.rpm` (`sudo dnf install ./tulkabd-*.rpm`).
+
+To build from source instead, see the requirements below.
+
 ## Requirements
 
 - [Rust](https://rustup.rs) 1.90 or newer (stable toolchain)
