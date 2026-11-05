@@ -263,6 +263,45 @@ async fn live_attempted_writes_change_nothing() {
     );
 }
 
+/// A schema lock held by another session must not hold `describe_table` for
+/// the whole time limit: the metadata session gives up on a lock after 5 s.
+#[tokio::test]
+async fn live_describe_does_not_wait_forever_on_a_schema_lock() {
+    let Some(l) = live().await else { return };
+    let inside = ConnectParams {
+        database: Some(l.database.clone()),
+        ..l.server.clone()
+    };
+    let mut holder = MssqlDriver.connect(&inside).await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    holder
+        .execute(
+            "BEGIN TRAN; ALTER TABLE dbo.clientes ADD extra int NULL",
+            tx,
+        )
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let out = describe_table(
+        &l.state,
+        "Live".into(),
+        Some(l.database.clone()),
+        "clientes".into(),
+    )
+    .await;
+    // The default limit is 30 s: stopping sooner is the lock timeout.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "{:?}: {}",
+        started.elapsed(),
+        out.text
+    );
+    println!("lock wait {:?}: {}", started.elapsed(), out.text);
+    drop(holder);
+}
+
 #[tokio::test]
 async fn live_rowcount_limit() {
     let Some(l) = live().await else { return };
