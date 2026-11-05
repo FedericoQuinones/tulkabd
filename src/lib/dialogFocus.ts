@@ -1,5 +1,5 @@
 const FOCUSABLE =
-  'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+  'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], summary, [tabindex]:not([tabindex="-1"])';
 
 /**
  * Svelte action for a modal panel: Tab and Shift+Tab cycle inside it, and when it goes away the
@@ -19,7 +19,7 @@ export function modal(node: HTMLElement) {
     const first = items[0];
     const last = items[items.length - 1];
     const current = document.activeElement as HTMLElement | null;
-    const inside = current !== null && items.includes(current);
+    const inside = current !== null && node.contains(current);
     if (e.shiftKey && (current === first || !inside)) {
       e.preventDefault();
       last.focus();
