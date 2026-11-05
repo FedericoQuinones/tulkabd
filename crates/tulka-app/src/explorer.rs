@@ -98,6 +98,10 @@ struct Conn {
     /// Databases the connection exposes.
     databases: Vec<String>,
     queue: VecDeque<String>,
+    /// Which databases the connection exposes (from its config at connect).
+    scope: DatabaseScope,
+    /// A full refresh asked the task to list the databases again.
+    relist: bool,
     /// The database being indexed.
     current: Option<String>,
     /// An indexing task is draining `queue`.
@@ -432,6 +436,88 @@ impl Explorer {
         Ok(())
     }
 
+    fn want_relist(&self, connection_id: &str) {
+        if let Some(c) = self.conns().get_mut(connection_id) {
+            c.relist = true;
+        }
+    }
+
+    /// Takes the "list the databases again" request of the entry of `epoch`;
+    /// returns the scope to apply when there was one.
+    fn take_relist(&self, connection_id: &str, epoch: u64) -> Option<DatabaseScope> {
+        let mut conns = self.conns();
+        let conn = conns.get_mut(connection_id).filter(|c| c.epoch == epoch)?;
+        std::mem::take(&mut conn.relist).then(|| conn.scope.clone())
+    }
+
+    /// Lists the databases of the server again and brings the entry, its
+    /// queue, the cache and the search index in line with the answer, as
+    /// `connect_explorer` does. A single-database server or a failed query
+    /// changes nothing; a lost connection is reported and returned.
+    async fn relist(
+        self: &Arc<Self>,
+        connection_id: &str,
+        epoch: u64,
+        slot: &AsyncMutex<Slot>,
+        scope: &DatabaseScope,
+    ) -> Result<(), ()> {
+        let listed = {
+            let mut slot = slot.lock().await;
+            if slot.closed || slot.rebind.is_some() {
+                return Ok(());
+            }
+            let result = match slot.session.as_mut() {
+                Some(session) => session.list_databases().await.map_err(LiveError::Driver),
+                None => Err(LiveError::Closed),
+            };
+            slot.check(result)
+        };
+        let mut databases = match listed {
+            Ok(databases) => databases,
+            Err(LiveError::Driver(e @ DriverError::Disconnected(_))) => {
+                self.lost(connection_id, epoch, &e);
+                return Err(());
+            }
+            Err(_) => return Ok(()),
+        };
+        retain_in_scope(&mut databases, scope);
+        {
+            let mut conns = self.conns();
+            let Some(conn) = conns.get_mut(connection_id).filter(|c| c.epoch == epoch) else {
+                return Err(());
+            };
+            conn.queue.retain(|d| databases.contains(d));
+            for db in &databases {
+                if !conn.databases.contains(db) && !conn.queue.contains(db) {
+                    conn.queue.push_back(db.clone());
+                }
+            }
+            conn.databases.clone_from(&databases);
+        }
+        let (id, names) = (connection_id.to_string(), databases);
+        let vanished: Vec<String> = self
+            .with_cache(move |cache| {
+                let before = cache.databases(&id);
+                cache.set_databases(&id, &names);
+                before
+                    .into_iter()
+                    .map(|d| d.name)
+                    .filter(|d| !names.contains(d))
+                    .collect()
+            })
+            .await;
+        if !vanished.is_empty() {
+            let id = connection_id.to_string();
+            self.update_index(move |index| {
+                for db in &vanished {
+                    index.replace_database(&id, db, &[]);
+                }
+            })
+            .await;
+        }
+        Ok(())
+    }
+
     fn next_database(&self, connection_id: &str, epoch: u64) -> Next {
         let mut conns = self.conns();
         let Some(conn) = conns.get_mut(connection_id).filter(|c| c.epoch == epoch) else {
@@ -497,6 +583,16 @@ async fn index_task(
     mut stop: watch::Receiver<bool>,
 ) {
     loop {
+        if let Some(scope) = explorer.take_relist(&connection_id, epoch) {
+            let listed = tokio::select! {
+                biased;
+                _ = stop.wait_for(|stopped| *stopped) => return,
+                r = explorer.relist(&connection_id, epoch, &slot, &scope) => r,
+            };
+            if listed.is_err() {
+                return;
+            }
+        }
         let database = match explorer.next_database(&connection_id, epoch) {
             Next::Index(db) => db,
             Next::Idle => {
@@ -665,6 +761,8 @@ pub async fn connect_explorer(
         slot: Arc::new(AsyncMutex::new(slot)),
         databases: databases.clone(),
         queue: VecDeque::new(),
+        scope: conn.databases.clone(),
+        relist: false,
         current: None,
         running: false,
         task: None,
@@ -768,7 +866,11 @@ pub async fn refresh_metadata(
         Some(db) => state.explorer.enqueue(&connection_id, vec![db], true),
         None => {
             let order = index_order(state, &connection_id, &databases);
-            state.explorer.enqueue(&connection_id, order, false)
+            state.explorer.enqueue(&connection_id, order, false)?;
+            // The databases may have changed on the server: the indexing
+            // task lists them again before its next database.
+            state.explorer.want_relist(&connection_id);
+            Ok(())
         }
     }
 }
@@ -791,7 +893,9 @@ pub async fn clear_metadata_cache(state: &AppState) {
     for (id, databases) in connected {
         let order = index_order(state, &id, &databases);
         // Fails only if a disconnect came in meanwhile, which is fine.
-        let _ = state.explorer.enqueue(&id, order, false);
+        if state.explorer.enqueue(&id, order, false).is_ok() {
+            state.explorer.want_relist(&id);
+        }
     }
 }
 

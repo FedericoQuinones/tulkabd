@@ -37,7 +37,7 @@ enum Behavior {
 
 #[derive(Default)]
 struct Inner {
-    databases: Vec<String>,
+    databases: Mutex<Vec<String>>,
     single_database: bool,
     behaviors: Mutex<HashMap<String, Behavior>>,
     /// Databases passed to `snapshot`, in call order.
@@ -69,7 +69,7 @@ struct Inner {
 impl Inner {
     fn new(databases: &[&str]) -> Self {
         Inner {
-            databases: databases.iter().map(|d| d.to_string()).collect(),
+            databases: Mutex::new(databases.iter().map(|d| d.to_string()).collect()),
             ..Inner::default()
         }
     }
@@ -179,7 +179,7 @@ impl Session for MetaSession {
     }
 
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError> {
-        Ok(self.inner.databases.clone())
+        Ok(self.inner.databases.lock().unwrap().clone())
     }
 
     async fn use_database(&mut self, name: &str) -> Result<(), DriverError> {
@@ -1339,4 +1339,53 @@ async fn disconnect_does_not_wait_for_a_stuck_live_call() {
     })
     .await
     .expect("the session was never closed");
+}
+
+#[tokio::test]
+async fn a_full_refresh_lists_the_databases_again() {
+    let f = fx(Inner::new(&["a", "b"]));
+    save(&f, conn("c1", "Main", None)).await;
+    connect_explorer(&f.state, "c1".into(), None).await.unwrap();
+    f.events.wait_idle("c1").await;
+    assert_eq!(search(&f, "V_b").await.hits.len(), 1);
+
+    // `b` is dropped and `c` created on the server.
+    *f.driver.databases.lock().unwrap() = vec!["a".into(), "c".into()];
+    refresh_metadata(&f.state, "c1".into(), None).await.unwrap();
+    let hit = search_settled(&f, "V_c", 1).await;
+    assert_eq!(hit.hits.len(), 1);
+    f.events.wait_idle("c1").await;
+
+    let names: Vec<String> = explorer_databases(&f.state, "c1".into())
+        .await
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert_eq!(names, ["a", "c"]);
+    assert!(search(&f, "V_b").await.hits.is_empty());
+    // A database that is not exposed any more cannot be refreshed.
+    assert_eq!(
+        refresh_metadata(&f.state, "c1".into(), Some("b".into()))
+            .await
+            .unwrap_err(),
+        NOT_FOUND
+    );
+
+    *f.driver.databases.lock().unwrap() = vec!["a".into()];
+    clear_metadata_cache(&f.state).await;
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            let names: Vec<String> = explorer_databases(&f.state, "c1".into())
+                .await
+                .into_iter()
+                .map(|d| d.name)
+                .collect();
+            if names == ["a"] {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the vanished database stayed");
 }
