@@ -10,8 +10,8 @@ use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::{Notify, RwLock};
 use tokio::time::Instant;
 use tulka_core::{
-    estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, Column, DatabaseScope,
-    DriverError, ExecEvent, MessageKind, NumberFormat, Session, Value,
+    estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, to_excel_value, Column,
+    DatabaseScope, DriverError, ExecEvent, MessageKind, NumberFormat, Session, Value,
 };
 use tulka_store::RunLogOutcome;
 
@@ -438,7 +438,14 @@ pub async fn copy_results(
             .blocking_read()
             .with_selection(&selection, |columns, rows| match mode {
                 CopyMode::Excel => {
-                    let text = to_excel_tsv(columns, rows, separator);
+                    // One cell copies as its bare value, to paste into
+                    // a single Excel cell; anything larger keeps the header.
+                    let text = match (&selection, columns, rows) {
+                        (Selection::Cells { .. }, [_], [row]) if row.len() == 1 => {
+                            to_excel_value(&row[0], separator)
+                        }
+                        _ => to_excel_tsv(columns, rows, separator),
+                    };
                     let outcome = CopyOutcome {
                         rows: rows.len(),
                         tokens: 0,
