@@ -2387,3 +2387,96 @@ async fn an_undeletable_secret_is_reported() {
 
     assert!(delete_connection(&f.state, saved.id.clone()).await.unwrap());
 }
+
+/// Stores and reads fine, but `set` can be made to fail.
+struct SetFailStore {
+    inner: MemoryStore,
+    set_error: Mutex<Option<SecretError>>,
+}
+
+impl SecretStore for SetFailStore {
+    fn set(&self, id: &str, secret: &str) -> Result<(), SecretError> {
+        if let Some(e) = self.set_error.lock().unwrap().clone() {
+            return Err(e);
+        }
+        self.inner.set(id, secret)
+    }
+    fn get(&self, id: &str) -> Result<Option<String>, SecretError> {
+        self.inner.get(id)
+    }
+    fn delete(&self, id: &str) -> Result<(), SecretError> {
+        self.inner.delete(id)
+    }
+}
+
+fn set_fail_store() -> Arc<SetFailStore> {
+    Arc::new(SetFailStore {
+        inner: MemoryStore::default(),
+        set_error: Mutex::new(None),
+    })
+}
+
+/// Makes the next write of the config file fail (the target is a folder).
+fn break_config(f: &Fixture) {
+    let path = f._dir.path().join("config.json");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_config_save_leaves_the_old_secret_and_flag() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    break_config(&f);
+
+    // Retargeted without a password: the secret must not be deleted.
+    let mut moved = saved.clone();
+    moved.server = "other-host".into();
+    assert!(save_connection(&f.state, moved.clone(), None)
+        .await
+        .is_err());
+    assert_eq!(f.secrets.get(&saved.id).unwrap().as_deref(), Some(PASSWORD));
+    assert!(list_connections(&f.state).await[0].password_saved);
+
+    // Retargeted with a new password: the old target keeps its own password.
+    assert!(save_connection(&f.state, moved, Some("new-pw".into()))
+        .await
+        .is_err());
+    assert_eq!(f.secrets.get(&saved.id).unwrap().as_deref(), Some(PASSWORD));
+}
+
+#[tokio::test]
+async fn a_failed_secret_store_rolls_the_flag_back() {
+    let store = set_fail_store();
+    let f = fixture(store.clone());
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+
+    *store.set_error.lock().unwrap() = Some(SecretError::Other("boom".into()));
+    let mut moved = saved.clone();
+    moved.server = "other-host".into();
+    assert!(
+        save_connection(&f.state, moved.clone(), Some("new-pw".into()))
+            .await
+            .is_err()
+    );
+    let listed = list_connections(&f.state).await;
+    assert_eq!(listed, vec![saved.clone()]);
+
+    // Keychain unavailable for the new password: saved without one, and the
+    // old secret is reported as left behind.
+    *store.set_error.lock().unwrap() = Some(SecretError::Unavailable("locked".into()));
+    let result = save_connection(&f.state, moved, Some("new-pw".into()))
+        .await
+        .unwrap();
+    assert!(result.keyring_unavailable && result.secret_orphaned);
+    assert!(!result.connection.password_saved);
+    let listed = list_connections(&f.state).await;
+    assert!(!listed[0].password_saved);
+    assert_eq!(listed[0].server, "other-host");
+}

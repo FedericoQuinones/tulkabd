@@ -56,41 +56,12 @@ pub async fn save_connection(
     let mut current = state.connections.lock().await;
     let existing = current.connections.iter().position(|c| c.id == conn.id);
 
-    let mut keyring_unavailable = false;
-    let mut secret_orphaned = false;
-    match password {
-        Some(password) => {
-            let secrets: Arc<dyn SecretStore> = state.secrets.clone();
-            let id = conn.id.clone();
-            match blocking(move || secrets.set(&id, &password)).await? {
-                Ok(()) => conn.password_saved = true,
-                Err(SecretError::Unavailable(_)) => {
-                    conn.password_saved = false;
-                    keyring_unavailable = true;
-                }
-                Err(e) => return Err(format!("could not store the password: {e}")),
-            }
-        }
-        None => {
-            // The stored secret was entered for the stored server and user;
-            // it is kept only while the connection still points at them.
-            let keep = existing.is_some_and(|i| {
-                current.connections[i].password_saved
-                    && may_reuse_saved_password(&current.connections[i], &conn)
-            });
-            let had = existing.is_some_and(|i| current.connections[i].password_saved);
-            if had && !keep {
-                let secrets = state.secrets.clone();
-                let id = conn.id.clone();
-                match blocking(move || secrets.delete(&id)).await? {
-                    Ok(()) => {}
-                    Err(SecretError::Unavailable(_)) => secret_orphaned = true,
-                    Err(e) => return Err(format!("could not delete the password: {e}")),
-                }
-            }
-            conn.password_saved = keep;
-        }
-    }
+    let had_secret = existing.is_some_and(|i| current.connections[i].password_saved);
+    // The stored secret was entered for the stored server and user; without a
+    // new password it is kept only while the connection still points at them.
+    let keep = had_secret
+        && existing.is_some_and(|i| may_reuse_saved_password(&current.connections[i], &conn));
+    conn.password_saved = password.is_some() || keep;
 
     // The folder is changed only by `move_connection`: an edit keeps the
     // stored one, and a new connection must name an existing folder.
@@ -102,12 +73,56 @@ pub async fn save_connection(
     // Choosing another level ends an "off until the app closes" override, as
     // `set_connection_guard` does; saving other edits leaves it alone.
     let guard_changed = existing.is_some_and(|i| current.connections[i].guard != conn.guard);
-    let mut next = current.clone();
+    let previous = current.clone();
+    let mut next = previous.clone();
     match existing {
         Some(i) => next.connections[i] = conn.clone(),
         None => next.connections.push(conn.clone()),
     }
+    // The config goes first: if it fails nothing in the keychain has changed,
+    // so the stored connection never ends up with a secret meant for another
+    // target, nor a `password_saved` flag over a deleted one.
     *current = persist(state, next).await?;
+
+    let mut keyring_unavailable = false;
+    let mut secret_orphaned = false;
+    match password {
+        Some(password) => {
+            let secrets: Arc<dyn SecretStore> = state.secrets.clone();
+            let id = conn.id.clone();
+            let failure = blocking(move || secrets.set(&id, &password)).await?.err();
+            if let Some(e) = failure {
+                // The new secret was not stored: the flag must not claim it.
+                conn.password_saved = false;
+                let mut fixed = current.clone();
+                if let Some(c) = fixed.connections.iter_mut().find(|c| c.id == conn.id) {
+                    c.password_saved = false;
+                }
+                match e {
+                    SecretError::Unavailable(_) => {
+                        keyring_unavailable = true;
+                        // An older secret may remain, now for another target.
+                        secret_orphaned = had_secret;
+                        *current = persist(state, fixed).await?;
+                    }
+                    e => {
+                        // Back to the connection as it was (its secret is untouched).
+                        *current = persist(state, previous).await?;
+                        return Err(format!("could not store the password: {e}"));
+                    }
+                }
+            }
+        }
+        None if had_secret && !keep => {
+            let secrets = state.secrets.clone();
+            let id = conn.id.clone();
+            // The connection is saved already; a secret that cannot be
+            // removed is reported, not an error.
+            secret_orphaned = blocking(move || secrets.delete(&id)).await?.is_err();
+        }
+        None => {}
+    }
+
     if guard_changed {
         crate::guard::set_guard_off_for_session(state, &conn.id, false);
     }
