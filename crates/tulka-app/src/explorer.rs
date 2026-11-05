@@ -569,7 +569,7 @@ pub async fn connect_explorer(
         .iter()
         .find(|c| c.id == connection_id)
         .cloned()
-        .ok_or_else(|| "the connection does not exist".to_string())?;
+        .ok_or_else(|| NOT_FOUND.to_string())?;
     // Before the keychain read, so a disconnect meanwhile cancels this attempt.
     let epoch = explorer.begin_attempt(&connection_id);
     let password = match resolve_password(state, &conn, password).await {
