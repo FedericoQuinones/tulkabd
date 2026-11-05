@@ -154,7 +154,7 @@ test("a close_session failure is logged and shown in the messages", async () => 
   warn.mockRestore();
 });
 
-test("a close_session failure while reconnecting survives the open and the next run", async () => {
+test("a close_session failure while reconnecting survives the open and only the next run", async () => {
   const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.mocked(ipc.closeSession).mockRejectedValueOnce("backend gone");
   await pane.open(conn);
@@ -163,6 +163,9 @@ test("a close_session failure while reconnecting survives the open and the next 
   vi.mocked(ipc.runQuery).mockResolvedValue({ elapsedMs: 1, finishedAt: "", outcome: "ok", findings: [] });
   await pane.run("SELECT 1", 0);
   expect(shown()).toBe(true);
+  // Only the first run after the failure shows it.
+  await pane.run("SELECT 1", 0);
+  expect(shown()).toBe(false);
   warn.mockRestore();
 });
 

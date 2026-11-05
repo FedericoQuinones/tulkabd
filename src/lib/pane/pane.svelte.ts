@@ -304,7 +304,9 @@ export class PaneState {
     this.runCount++;
     this.runMaxRows = prefs.confirmed.maxRows;
     this.results = [];
+    // The close failure is shown once, on the first run after it.
     this.messages = this.closeNotice ? [this.closeNotice] : [];
+    this.closeNotice = null;
     this.summary = null;
     // `body` is a view over this pane so the pure reducer can fill it.
     const self = this;
