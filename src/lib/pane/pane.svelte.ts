@@ -140,7 +140,17 @@ export class PaneState {
     // A newer open began while logging: it replaces this session, and a close sent now would
     // hit the new one.
     if (!owned || token !== this.runId) return;
-    await ipc.closeSession(this.tabId).catch(() => {});
+    await this.closeBackend();
+  }
+
+  /** Closes the backend session; a failure is logged and shown in the Messages, not swallowed. */
+  private async closeBackend(): Promise<void> {
+    try {
+      await ipc.closeSession(this.tabId);
+    } catch (e) {
+      console.warn("close_session failed", e);
+      this.messages.push({ kind: "error", text: t("pane.closeFailed", { error: String(e) }), line: null });
+    }
   }
 
   /** Drops the session and the connection binding but keeps the editor text. */
@@ -178,7 +188,7 @@ export class PaneState {
       await this.discardGuard();
       if (this.hasSession) {
         this.hasSession = false;
-        await ipc.closeSession(this.tabId).catch(() => {});
+        await this.closeBackend();
       }
       const info = await ipc.openSession(this.tabId, conn.id, database, password);
       if (token !== this.runId) {

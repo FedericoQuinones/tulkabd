@@ -200,6 +200,7 @@
   "pane.useDatabaseFailed": "Could not switch database: {error}",
   "pane.disconnected": "Disconnected",
   "pane.reconnect": "Reconnect",
+  "pane.closeFailed": "Could not close the previous session: {error}",
   "pane.reconnectFailed": "Could not reconnect: {error}",
   "status.connected": "1 server connected",
   "status.server": "SQL Server {version} · user {user}",
