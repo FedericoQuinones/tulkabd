@@ -761,6 +761,46 @@ async fn output_is_cut_at_the_character_budget_and_the_query_cancelled() {
 }
 
 #[tokio::test]
+async fn names_outside_the_selected_databases_are_refused() {
+    let mut local = connection("Local", Environment::Local, AiAccess::ReadOnly);
+    local.databases = DatabaseScope::Selected {
+        names: vec!["erp".into(), "crm".into()],
+    };
+    let f = Fixture::with(vec![local], Vec::new());
+    for sql in [
+        "SELECT * FROM otherdb.sys.tables",
+        "SELECT * FROM [OtherDb].[sys].[tables]",
+        "SELECT * FROM \"otherdb\"..t",
+        "SELECT * FROM erp.dbo.t JOIN master.sys.databases d ON 1=1",
+    ] {
+        let out = run(&f, sql).await;
+        assert!(out.is_error, "{sql}");
+        assert!(
+            out.text
+                .starts_with("Not run: the query names the database `"),
+            "{sql}: {}",
+            out.text
+        );
+        assert!(out.text.contains("(erp, crm)"));
+    }
+    assert!(f.driver.script.sqls.lock().unwrap().is_empty());
+    assert!(f.driver.script.connects.lock().unwrap().is_empty());
+    assert!(f
+        .runlog
+        .list(None, 10)
+        .iter()
+        .all(|e| e.outcome == RunLogOutcome::Blocked));
+    // Selected databases, in any letter case, and two-part names pass.
+    for sql in [
+        "SELECT * FROM ERP.dbo.t",
+        "SELECT * FROM [crm]..t",
+        "SELECT * FROM dbo.t",
+    ] {
+        assert!(!run(&f, sql).await.is_error, "{sql}");
+    }
+}
+
+#[tokio::test]
 async fn rejected_sql_never_reaches_the_driver_and_is_logged_blocked() {
     let f = Fixture::standard();
     let cases = [

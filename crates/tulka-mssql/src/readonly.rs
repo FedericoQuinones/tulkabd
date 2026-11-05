@@ -201,6 +201,48 @@ const LINKED_SERVER_DOTS: u32 = 3;
 /// Longest offending word kept in a violation.
 const MAX_WORD_CHARS: usize = 40;
 
+/// The databases that three-part names in `sql` point at (`db.schema.obj`,
+/// `db..obj`), in lower case, without brackets or quotes, each once. Run
+/// after [`violation`] passed: text that does not lex gives nothing here
+/// because it was already refused.
+pub fn referenced_databases(sql: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for batch in split_batches(sql) {
+        let text = &batch.text;
+        let Ok(tokens) = lexer::lex(text) else {
+            continue;
+        };
+        let is_name = |t: &Token| matches!(t.kind, Kind::Word | Kind::Quoted);
+        let mut i = 0;
+        while i < tokens.len() {
+            if !is_name(&tokens[i]) {
+                i += 1;
+                continue;
+            }
+            // A dotted name: parts separated by dots, a part may be empty.
+            let mut parts = vec![name_of(text, &tokens[i])];
+            i += 1;
+            while i < tokens.len() && is_punct(text, &tokens[i], ".") {
+                i += 1;
+                match tokens.get(i) {
+                    Some(t) if is_name(t) => {
+                        parts.push(name_of(text, t));
+                        i += 1;
+                    }
+                    _ => parts.push(String::new()),
+                }
+            }
+            if parts.len() >= 3 {
+                let db = &parts[parts.len() - 3];
+                if !db.is_empty() && !out.contains(db) {
+                    out.push(db.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Tells why `sql` is not a plain read-only query, or `None` when it is.
 /// Batches separated by `GO` are checked one by one; the first problem wins.
 pub fn violation(sql: &str) -> Option<ReadOnlyViolation> {
@@ -591,6 +633,33 @@ mod tests {
         ] {
             check(sql, None);
         }
+    }
+
+    #[test]
+    fn finds_the_databases_of_three_part_names() {
+        let dbs = |sql: &str| referenced_databases(sql);
+        assert_eq!(dbs("SELECT 1"), Vec::<String>::new());
+        assert_eq!(
+            dbs("SELECT * FROM dbo.t JOIN sys.tables x ON 1=1"),
+            Vec::<String>::new()
+        );
+        assert_eq!(dbs("SELECT * FROM Other.sys.tables"), ["other"]);
+        assert_eq!(dbs("SELECT * FROM [Other DB].[dbo].[t]"), ["other db"]);
+        assert_eq!(dbs("SELECT * FROM \"Other\".dbo.t"), ["other"]);
+        assert_eq!(dbs("SELECT * FROM [a]]b].dbo.t"), ["a]b"]);
+        assert_eq!(dbs("SELECT * FROM Other..t"), ["other"]);
+        assert_eq!(
+            dbs("SELECT * FROM a . dbo . t, A.dbo.u, b.dbo.v"),
+            ["a", "b"]
+        );
+        assert_eq!(
+            dbs("SELECT 1; SELECT * FROM x.dbo.t\nGO\nSELECT * FROM y.dbo.t"),
+            ["x", "y"]
+        );
+        // A schema-qualified column looks the same.
+        assert_eq!(dbs("SELECT dbo.t.id FROM dbo.t"), ["dbo"]);
+        // Text in strings and comments is not a name.
+        assert_eq!(dbs("SELECT 'a.b.c' -- d.e.f"), Vec::<String>::new());
     }
 
     #[test]

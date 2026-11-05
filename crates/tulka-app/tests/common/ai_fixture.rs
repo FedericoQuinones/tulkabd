@@ -94,6 +94,10 @@ impl Driver for FakeDriver {
     fn read_only_violation(&self, sql: &str) -> Option<ReadOnlyViolation> {
         tulka_mssql::readonly::violation(sql)
     }
+
+    fn referenced_databases(&self, sql: &str) -> Vec<String> {
+        tulka_mssql::readonly::referenced_databases(sql)
+    }
 }
 
 struct FakeSession {

@@ -216,4 +216,10 @@ pub trait Driver: Send + Sync {
             line: 0,
         })
     }
+
+    /// The databases that multi-part names in `sql` point at, in lower case.
+    /// Used to keep a query within the databases a connection selects.
+    fn referenced_databases(&self, _sql: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
