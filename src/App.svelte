@@ -8,6 +8,7 @@
   import ConnectionDialog from "./lib/connections/ConnectionDialog.svelte";
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
   import TransactionDialog from "./lib/tabs/TransactionDialog.svelte";
+  import UnsavedDialog from "./lib/tabs/UnsavedDialog.svelte";
   import { connections } from "./lib/connections/store.svelte";
   import ExplorerTree from "./lib/explorer/ExplorerTree.svelte";
   import { explorer } from "./lib/explorer/tree.svelte";
@@ -278,6 +279,9 @@
 {/if}
 {#if tabs.closePrompt}
   <TransactionDialog prompt={tabs.closePrompt} onanswer={(commit) => void tabs.answerClose(commit)} oncancel={() => tabs.cancelClose()} />
+{/if}
+{#if tabs.unsavedPrompt}
+  <UnsavedDialog prompt={tabs.unsavedPrompt} onanswer={(save) => void tabs.answerUnsaved(save)} oncancel={() => tabs.cancelUnsaved()} />
 {/if}
 {#if tabs.nameRequest}
   {#key tabs.nameRequest}

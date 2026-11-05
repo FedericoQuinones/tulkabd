@@ -119,6 +119,16 @@ export interface ClosePrompt {
   error: string | null;
 }
 
+/** The dialog asking whether to save the unsaved changes of a tab before it closes. */
+export interface UnsavedPrompt {
+  scope: "tab" | "window";
+  tabs: { tabId: string; title: string }[];
+  /** An answer is being carried out. */
+  busy: boolean;
+  /** Why the last answer failed; the tabs stay open. */
+  error: string | null;
+}
+
 /** Resolves when `p` settles or after `ms`, whichever comes first; never rejects. */
 function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -171,6 +181,8 @@ export class TabsStore {
   fileError = $state<string | null>(null);
   /** Open transactions the user must answer for before a tab or the window closes. */
   closePrompt = $state.raw<ClosePrompt | null>(null);
+  /** Unsaved changes the user must answer for before a tab closes. */
+  unsavedPrompt = $state.raw<UnsavedPrompt | null>(null);
 
   /** Grows whenever a tab is added or brought forward, so the shell can leave a screen covering the tabs. */
   shown = $state(0);
@@ -399,8 +411,32 @@ export class TabsStore {
     void tab.pane?.close();
   }
 
-  /** Closes a tab the way the UI asks for it: first asks what to do with an open transaction. */
+  /**
+   * True when closing the tab would lose text: it was edited since it was opened or saved. An
+   * untitled tab with no text has nothing to lose.
+   */
+  isDirty(tab: Tab): boolean {
+    if (!tab.pane || !tab.dirty) return false;
+    const untitled = !tab.savedQuery && !tab.file && tab.name === undefined;
+    return !(untitled && tab.pane.text() === "");
+  }
+
+  /**
+   * Closes a tab the way the UI asks for it: first asks what to do with unsaved changes, then with
+   * an open transaction.
+   */
   async requestClose(id: string): Promise<void> {
+    const tab = this.list.find((x) => x.id === id);
+    if (!tab || this.closePrompt || this.unsavedPrompt) return;
+    if (this.isDirty(tab)) {
+      this.unsavedPrompt = { scope: "tab", tabs: [{ tabId: id, title: tab.title }], busy: false, error: null };
+      return;
+    }
+    await this.closeChecked(id);
+  }
+
+  /** Closes a tab that has nothing unsaved, asking first about an open transaction. */
+  private async closeChecked(id: string): Promise<void> {
     const tab = this.list.find((x) => x.id === id);
     if (!tab || this.closePrompt) return;
     const plan = closePlan([await this.checkTab(tab)]);
@@ -408,6 +444,39 @@ export class TabsStore {
     if (!this.list.some((x) => x.id === id) || this.closePrompt) return;
     if (plan.ask) this.closePrompt = { scope: "tab", items: this.itemsOf(plan.tabs), busy: false, error: null };
     else this.close(id);
+  }
+
+  /** Carries out the user's answer to `unsavedPrompt`: save the changes, or leave them behind. */
+  async answerUnsaved(save: boolean): Promise<void> {
+    const prompt = this.unsavedPrompt;
+    if (!prompt || prompt.busy) return;
+    const id = prompt.tabs[0].tabId;
+    const tab = this.list.find((x) => x.id === id);
+    if (!tab || !save) {
+      this.unsavedPrompt = null;
+      if (tab) await this.closeChecked(id);
+      return;
+    }
+    if (!tab.savedQuery && !tab.file) {
+      // Not saved anywhere yet: the name dialog comes first, and the tab closes once it is saved.
+      this.unsavedPrompt = null;
+      this.askName(tab, tab.name ?? "", false, () => void this.closeChecked(id));
+      return;
+    }
+    this.unsavedPrompt = { ...prompt, busy: true, error: null };
+    const saved = await this.saveTab(tab);
+    if (this.unsavedPrompt?.scope !== "tab") return;
+    if (saved && !tab.dirty) {
+      this.unsavedPrompt = null;
+      await this.closeChecked(id);
+    } else {
+      this.unsavedPrompt = { ...prompt, busy: false, error: t("unsaved.failed", { title: tab.title }) };
+    }
+  }
+
+  /** Keeps the tab (or the window) open with its unsaved changes. */
+  cancelUnsaved(): void {
+    if (this.unsavedPrompt && !this.unsavedPrompt.busy) this.unsavedPrompt = null;
   }
 
   /** What the tab's session holds. A tab with no session or a lost one holds nothing. */
@@ -734,8 +803,13 @@ export class TabsStore {
    */
   async saveActive(): Promise<void> {
     const tab = this.active;
-    const pane = tab?.pane;
-    if (!tab || !pane) return;
+    if (tab?.pane) await this.saveTab(tab);
+  }
+
+  /** Saves a query tab as `saveActive` does; true when its text reached its saved query or file. */
+  private async saveTab(tab: Tab): Promise<boolean> {
+    const pane = tab.pane;
+    if (!pane) return false;
     if (tab.savedQuery) {
       const { database, name } = tab.savedQuery;
       const edits = pane.edits;
@@ -743,12 +817,12 @@ export class TabsStore {
         await queries.save(database, name, pane.text(), true);
       } catch (e) {
         this.saveNotice(pane, t("queries.saveFailed", { error: String(e) }));
-        return;
+        return false;
       }
       // Typing while the save was in flight leaves the tab unsaved.
       if (pane.edits === edits) tab.dirty = false;
       this.clearSaveNotice(pane);
-      return;
+      return true;
     }
     if (tab.file) {
       // Written back in place, in its own encoding and line endings; never asks for a name.
@@ -758,13 +832,14 @@ export class TabsStore {
         await ipc.writeSqlFile(path, pane.text(), encoding, lineEnding);
       } catch (e) {
         this.saveNotice(pane, t("files.saveFailed", { error: fileErrorText(e) }));
-        return;
+        return false;
       }
       if (pane.edits === edits) tab.dirty = false;
       this.clearSaveNotice(pane);
-      return;
+      return true;
     }
     this.askName(tab, tab.name ?? "");
+    return false;
   }
 
   /**
@@ -782,8 +857,9 @@ export class TabsStore {
   /**
    * Asks for a name (through `nameRequest`) and saves the tab's text under its database; without a
    * database it says so. With `copy` the tab is left as it is; otherwise it becomes the saved query.
+   * `onSaved` runs once the tab is saved and has no edits since.
    */
-  private askName(tab: Tab, initial: string, copy = false): void {
+  private askName(tab: Tab, initial: string, copy = false, onSaved?: () => void): void {
     const pane = tab.pane!;
     // A definition still loading (or that could not load) has nothing to save yet.
     if (tab.name !== undefined && pane.text() === "") return;
@@ -816,6 +892,7 @@ export class TabsStore {
         }
         this.markSaved(x, { database, name });
         if (x.pane.edits === edits) x.dirty = false;
+        if (!x.dirty) onSaved?.();
         return null;
       },
       oncancel: () => {
@@ -979,6 +1056,7 @@ export class TabsStore {
     this.activeGroupId = w.activeGroupId;
     this.passwordRequests = [];
     this.nameRequest = null;
+    this.unsavedPrompt = null;
     this.endPrompt();
     this.pending.clear();
     this.wanted.clear();
@@ -1098,6 +1176,7 @@ export class TabsStore {
     this.activeGroupId = g.id;
     this.passwordRequests = [];
     this.nameRequest = null;
+    this.unsavedPrompt = null;
     this.endPrompt();
     this.pending.clear();
     this.wanted.clear();
