@@ -433,6 +433,32 @@ test("a group of thousands of objects shows a page at a time", async () => {
   expect(more()).toBeUndefined();
 });
 
+test("changing a connection's server or deleting it drops what was read for it", async () => {
+  const group = keyOf.group("c2", "Ventas", "table");
+  const other = keyOf.group("c1", "Ventas", "table");
+  const seed = () => {
+    explorer.objects = { [group]: [{ schema: "dbo", name: "t", kind: "table" }], [other]: [] };
+    explorer.state("c2").databases = [db("Ventas")];
+  };
+  seed();
+  const edited = { ...local, server: "elsewhere" } as ConnectionConfig;
+  vi.mocked(ipc.saveConnection).mockResolvedValue({ connection: edited, keyringUnavailable: false });
+  await connections.save({ ...edited });
+  expect(Object.keys(explorer.objects)).toEqual([other]);
+  expect(explorer.state("c2").databases).toEqual([]);
+
+  // Same server: nothing is dropped.
+  seed();
+  await connections.save({ ...local, name: "Renamed" });
+  expect(Object.keys(explorer.objects)).toContain(group);
+
+  seed();
+  vi.mocked(ipc.deleteConnection).mockResolvedValue();
+  vi.mocked(ipc.listConnections).mockResolvedValue([sales, billing]);
+  await connections.remove("c2");
+  expect(Object.keys(explorer.objects)).toEqual([other]);
+});
+
 test("moving a folder into its own child does not call moveFolder", async () => {
   expect(canMoveFolder(folders, "fa", "fx")).toBe(false);
   expect(canMoveFolder(folders, "fa", "fa")).toBe(false);

@@ -9,6 +9,9 @@ class ConnectionStore {
   /** Ids of the connections whose guard is off until the app closes (mirrors the backend). */
   guardOff = $state<string[]>([]);
 
+  /** Called with a connection id when what was cached for it no longer applies (its server or scope changed, or it was deleted). */
+  onForget: ((id: string) => void) | null = null;
+
   /** Set when the connections file could not be read at startup. */
   startupError = $state<string | null>(null);
 
@@ -41,7 +44,14 @@ class ConnectionStore {
 
   /** Saves a connection; the password goes to the backend only and is not retained here. */
   async save(conn: ConnectionConfig, password?: string): Promise<SaveConnectionResult> {
+    const old = this.list.find((c) => c.id === conn.id);
     const result = await ipc.saveConnection(conn, password);
+    if (
+      old &&
+      (old.server !== conn.server || old.port !== conn.port || JSON.stringify(old.databases) !== JSON.stringify(conn.databases))
+    ) {
+      this.onForget?.(conn.id);
+    }
     // Saving with another guard level ends the until-restart override, so both lists are re-read.
     await Promise.all([this.refresh(), this.loadGuardOff()]);
     return result;
@@ -67,6 +77,7 @@ class ConnectionStore {
   async remove(id: string): Promise<void> {
     await ipc.deleteConnection(id);
     await this.refresh();
+    this.onForget?.(id);
   }
 }
 

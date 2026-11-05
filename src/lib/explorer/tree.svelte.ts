@@ -407,6 +407,23 @@ class ExplorerStore {
     return entry.done;
   }
 
+  /** Drops what was read for a connection: its databases, objects and columns (they may belong to another server now). */
+  forgetCached(id: string): void {
+    const own = (key: string) => {
+      const k = parseKey(key);
+      return (k?.[0] === "g" || k?.[0] === "o") && k[1] === id;
+    };
+    const keep = <T,>(m: Record<string, T>) => Object.fromEntries(Object.entries(m).filter(([key]) => !own(key)));
+    this.objects = keep(this.objects);
+    this.columns = keep(this.columns);
+    this.limits = keep(this.limits);
+    const st = this.conns[id];
+    if (st) {
+      st.databases = null;
+      if (connections.list.some((c) => c.id === id)) void this.loadDatabases(id);
+    }
+  }
+
   /** A database was re-indexed: reload what is open below it and drop the rest. */
   private invalidate(c: string, d: string): void {
     const sameDb = (key: string) => {
@@ -939,6 +956,7 @@ class ExplorerStore {
 }
 
 export const explorer = new ExplorerStore();
+connections.onForget = (id) => explorer.forgetCached(id);
 
 /** The context menu of a row, wired to the explorer store. */
 export const menuFor = (row: Row, ui: MenuActions): MenuItem[] => buildMenu(row, ui, explorer);
