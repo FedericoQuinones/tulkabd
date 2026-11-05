@@ -66,6 +66,7 @@ export type UiEvent =
   | { kind: "rowCount"; index: number; total: number; truncated: boolean; memoryCut: boolean }
   | { kind: "message"; messageKind: MessageKind; text: string; line: number | null }
   | { kind: "rowsAffected"; count: number }
+  | { kind: "rowsAffectedMany"; count: number; times: number }
   | { kind: "batchDone"; batch: number }
   | { kind: "disconnected"; reason: string };
 
@@ -102,6 +103,8 @@ export interface RunSummary {
   outcome: "ok" | "error" | "cancelled" | "disconnected" | "blocked" | "needsConfirmation";
   /** The dangerous statements found; empty unless the outcome is `blocked` or `needsConfirmation`. */
   findings: GuardFinding[];
+  /** The session's database after the run (a `USE` in the script changes it); absent when unknown. */
+  database?: string | null;
 }
 export type Selection =
   | { kind: "all" }

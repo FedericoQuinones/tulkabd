@@ -34,6 +34,15 @@ const ROW_COUNT_ROWS: usize = 500;
 /// ...or once the last one is this old, whichever comes first.
 const ROW_COUNT_INTERVAL: Duration = Duration::from_millis(50);
 /// Events buffered between the driver and the forwarder.
+/// Messages forwarded per run; later ones are counted and summed up in a
+/// final notice. Errors have their own, smaller allowance so they get through
+/// a flood of other messages but cannot flood the list themselves.
+const MAX_MESSAGES: usize = 10_000;
+const MAX_ERRORS: usize = 1_000;
+/// Consecutive "rows affected" reports are merged for up to this long.
+const AFFECTED_MERGE: Duration = Duration::from_millis(100);
+/// Result sets kept per run; later ones are drained and counted.
+const MAX_RESULT_SETS: usize = 100;
 const EVENT_QUEUE: usize = 32;
 
 pub(crate) fn no_session() -> String {
@@ -95,6 +104,8 @@ pub async fn open_session(
         database: current_database.clone(),
         session: Some(session),
         cancel: None,
+        starting: false,
+        stop_pending: false,
         results: Vec::new(),
         disconnected: false,
     };
@@ -181,6 +192,7 @@ pub async fn run_query<F>(
 where
     F: Fn(UiEvent) + Send + Sync,
 {
+    let _starting = Starting::begin(state, &tab_id);
     let generation = match crate::guard::check(state, &tab_id, &sql, confirmed).await? {
         crate::guard::Verdict::Hold(held) => {
             // A refused script is logged; one waiting for confirmation is not
@@ -211,6 +223,9 @@ where
     // as the script does; if it fires first it cancels the script the same
     // way Stop does.
     let cancel = session.cancel_handle();
+    if checkout.stop_pending {
+        let _ = cancel.cancel().await;
+    }
     let finished = Notify::new();
     let done = AtomicBool::new(false);
     let timer = async {
@@ -275,6 +290,18 @@ where
         _ => {}
     }
 
+    // A `USE` in the script changes the session's database: read it back.
+    let database = if outcome == RunOutcome::Disconnected {
+        None
+    } else {
+        session.current_database().await.ok()
+    };
+    if let Some(name) = &database {
+        let mut tabs = state.tabs();
+        if let Some(tab) = checkout.tab(&mut tabs) {
+            tab.database.clone_from(name);
+        }
+    }
     checkout.checkin(session, outcome == RunOutcome::Disconnected);
     let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     let logged = match outcome {
@@ -289,6 +316,7 @@ where
         finished_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         outcome,
         findings: Vec::new(),
+        database,
     })
 }
 
@@ -358,7 +386,15 @@ pub async fn cancel_query(state: &AppState, tab_id: String) -> Result<(), String
         .and_then(|t| t.cancel.clone());
     match handle {
         Some(handle) => handle.cancel().await.map_err(|e| e.to_string()),
-        None => Ok(()),
+        None => {
+            // The run may not have published its handle yet (the pane shows
+            // "running" first): remember the Stop, but only for a run that
+            // is starting, so an old Stop never cancels a later run.
+            if let Some(tab) = state.tabs().open.get_mut(&tab_id) {
+                tab.stop_pending = tab.starting;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -573,10 +609,51 @@ fn result_in(tab: &TabState, index: u32) -> Result<SharedBuffer, String> {
 /// [`Checkout::checkin`]; if that never happens (the command panicked or its
 /// future was dropped), dropping the guard marks the tab disconnected, since
 /// the session is gone.
+/// Marks the tab as starting a run until dropped (or until the run takes the
+/// session), so a Stop pressed in that window is remembered.
+struct Starting<'a> {
+    state: &'a AppState,
+    tab_id: &'a str,
+    generation: Option<u64>,
+}
+
+impl<'a> Starting<'a> {
+    fn begin(state: &'a AppState, tab_id: &'a str) -> Self {
+        let mut tabs = state.tabs();
+        let generation = tabs.open.get_mut(tab_id).map(|tab| {
+            tab.starting = true;
+            tab.stop_pending = false;
+            tab.generation
+        });
+        Starting {
+            state,
+            tab_id,
+            generation,
+        }
+    }
+}
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        let mut tabs = self.state.tabs();
+        if let Some(tab) = tabs
+            .open
+            .get_mut(self.tab_id)
+            .filter(|t| Some(t.generation) == self.generation)
+        {
+            tab.starting = false;
+            tab.stop_pending = false;
+        }
+    }
+}
+
 struct Checkout<'a> {
     state: &'a AppState,
     tab_id: &'a str,
     generation: u64,
+    /// A Stop arrived before the cancel handle was published; the run
+    /// applies it as soon as it starts.
+    stop_pending: bool,
     done: bool,
 }
 
@@ -600,15 +677,22 @@ impl<'a> Checkout<'a> {
         if tab.disconnected {
             return Err(DISCONNECTED.into());
         }
-        let session = tab.session.take().ok_or_else(|| BUSY.to_string())?;
+        let mut session = tab.session.take().ok_or_else(|| BUSY.to_string())?;
+        let mut stop_pending = false;
         if run {
+            // A cancel from an earlier run must not stop this one; a Stop
+            // pressed before the handle existed (`stop_pending`) must.
+            session.reset_cancel();
             tab.cancel = Some(session.cancel_handle().into());
             tab.results.clear();
+            stop_pending = std::mem::take(&mut tab.stop_pending);
+            tab.starting = false;
         }
         let checkout = Checkout {
             state,
             tab_id,
             generation: tab.generation,
+            stop_pending,
             done: false,
         };
         Ok((checkout, session))
@@ -722,12 +806,23 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
         // The capped-cell warning is shown once per run.
         let mut warned_capped = false;
         let mut warned_budget = false;
+        let mut gate = MessageGate::default();
         loop {
-            let next = match counter.deadline() {
+            let deadline = [counter.deadline(), gate.deadline()]
+                .into_iter()
+                .flatten()
+                .min();
+            let next = match deadline {
                 Some(deadline) => tokio::select! {
                     ev = rx.recv() => ev,
                     () = tokio::time::sleep_until(deadline) => {
-                        counter.flush(self.emit);
+                        let now = Instant::now();
+                        if counter.deadline().is_some_and(|d| d <= now) {
+                            counter.flush(self.emit);
+                        }
+                        if gate.deadline().is_some_and(|d| d <= now) {
+                            gate.flush_affected(self.emit);
+                        }
                         continue;
                     }
                 },
@@ -739,6 +834,9 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
                     let received = rows.len();
                     tally.saw_result = true;
                     tally.rows_received += received as u64;
+                    if index as usize >= MAX_RESULT_SETS {
+                        continue;
+                    }
                     if let Some((total, truncated, memory_cut, outcome)) =
                         self.push_rows(index, rows).await
                     {
@@ -764,19 +862,36 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
                 }
                 ExecEvent::ResultStart { index, columns } => {
                     tally.saw_result = true;
+                    if index as usize >= MAX_RESULT_SETS {
+                        gate.sets_dropped += 1;
+                        continue;
+                    }
                     counter.finish(self.emit);
+                    gate.flush_affected(self.emit);
                     // The buffer exists before the UI hears of the result.
                     self.start_result(index, columns.clone());
                     (self.emit)(UiEvent::ResultStart { index, columns });
                     counter.start(index);
                 }
+                ExecEvent::RowsAffected { count } => {
+                    counter.flush(self.emit);
+                    tally.saw_affected = true;
+                    tally.rows_affected += count;
+                    gate.affected(count);
+                }
+                ExecEvent::Message { kind, text, line } => {
+                    counter.flush(self.emit);
+                    gate.message(
+                        UiEvent::Message { kind, text, line },
+                        kind == MessageKind::Error,
+                        self.emit,
+                    );
+                }
                 other => {
                     counter.flush(self.emit);
                     tally.disconnected |= matches!(other, ExecEvent::Disconnected { .. });
-                    if let ExecEvent::RowsAffected { count } = other {
-                        tally.saw_affected = true;
-                        tally.rows_affected += count;
-                    }
+                    // Keeps the order: what was merged so far came before this.
+                    gate.flush_affected(self.emit);
                     if let Some(ev) = UiEvent::from_exec(other) {
                         (self.emit)(ev);
                     }
@@ -784,6 +899,7 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
             }
         }
         counter.finish(self.emit);
+        gate.finish(self.emit);
         tally
     }
 
@@ -830,6 +946,98 @@ impl<F: Fn(UiEvent)> Forwarder<'_, F> {
             buffer.memory_cut,
             outcome,
         ))
+    }
+}
+
+/// Keeps the message list of a run readable and bounded: consecutive "rows
+/// affected" reports become one, and past [`MAX_MESSAGES`] only errors get
+/// through; a final notice says how much was left out.
+#[derive(Default)]
+struct MessageGate {
+    /// Sum, count and first time of the merged reports not sent yet.
+    affected: Option<(u64, u32, Instant)>,
+    sent: usize,
+    errors_sent: usize,
+    omitted: u64,
+    errors_omitted: u64,
+    sets_dropped: u64,
+}
+
+impl MessageGate {
+    fn affected(&mut self, count: u64) {
+        match &mut self.affected {
+            Some((total, times, _)) => {
+                *total += count;
+                *times += 1;
+            }
+            None => self.affected = Some((count, 1, Instant::now())),
+        }
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.affected.map(|(_, _, first)| first + AFFECTED_MERGE)
+    }
+
+    fn flush_affected(&mut self, emit: &impl Fn(UiEvent)) {
+        let Some((count, times, _)) = self.affected.take() else {
+            return;
+        };
+        let ev = if times == 1 {
+            UiEvent::RowsAffected { count }
+        } else {
+            UiEvent::RowsAffectedMany { count, times }
+        };
+        self.send(ev, false, emit);
+    }
+
+    /// A message in order: whatever was merged before it goes first.
+    fn message(&mut self, ev: UiEvent, always: bool, emit: &impl Fn(UiEvent)) {
+        self.flush_affected(emit);
+        self.send(ev, always, emit);
+    }
+
+    fn send(&mut self, ev: UiEvent, always: bool, emit: &impl Fn(UiEvent)) {
+        let (sent, limit, omitted) = if always {
+            (&mut self.errors_sent, MAX_ERRORS, &mut self.errors_omitted)
+        } else {
+            (&mut self.sent, MAX_MESSAGES, &mut self.omitted)
+        };
+        if *sent < limit {
+            *sent += 1;
+            emit(ev);
+        } else {
+            *omitted += 1;
+        }
+    }
+
+    /// Sends what is still merged and the notices about what was left out.
+    fn finish(&mut self, emit: &impl Fn(UiEvent)) {
+        self.flush_affected(emit);
+        let warn = |text: String| UiEvent::Message {
+            kind: MessageKind::Warning,
+            text,
+            line: None,
+        };
+        if self.omitted + self.errors_omitted > 0 {
+            let mut text = format!(
+                "{} more messages omitted (limit {MAX_MESSAGES} per run",
+                self.omitted + self.errors_omitted
+            );
+            if self.errors_omitted > 0 {
+                text.push_str(&format!(
+                    "; {} of them errors, limit {MAX_ERRORS}",
+                    self.errors_omitted
+                ));
+            }
+            text.push_str(").");
+            emit(warn(text));
+        }
+        if self.sets_dropped > 0 {
+            emit(warn(format!(
+                "{} more result sets were read but not kept (limit {MAX_RESULT_SETS} per run).",
+                self.sets_dropped
+            )));
+        }
     }
 }
 
@@ -1014,6 +1222,8 @@ mod tests {
                 database: "master".into(),
                 session: Some(Box::new(Inert)),
                 cancel: None,
+                starting: false,
+                stop_pending: false,
                 results: Vec::new(),
                 disconnected: false,
             },
@@ -1036,6 +1246,189 @@ mod tests {
         let (state, _dir) = state_with_tab(2);
         assert!(Checkout::take(&state, "t1", true, Some(2)).is_ok());
         assert!(state.tabs().open["t1"].session.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stop_before_the_handle_exists_is_applied_by_the_next_take_once() {
+        let (state, _dir) = state_with_tab(1);
+        let _starting = Starting::begin(&state, "t1");
+        cancel_query(&state, "t1".into()).await.unwrap();
+        let (checkout, session) = Checkout::take(&state, "t1", true, None).unwrap();
+        assert!(checkout.stop_pending);
+        checkout.checkin(session, false);
+        // Consumed: the run after it is not stopped.
+        let (checkout, _session) = Checkout::take(&state, "t1", true, None).unwrap();
+        assert!(!checkout.stop_pending);
+    }
+
+    #[tokio::test]
+    async fn a_stop_with_no_run_starting_is_not_remembered() {
+        let (state, _dir) = state_with_tab(1);
+        // A Stop that arrives after a run ended, before the next one began.
+        cancel_query(&state, "t1".into()).await.unwrap();
+        assert!(!state.tabs().open["t1"].stop_pending);
+        let (checkout, _session) = Checkout::take(&state, "t1", true, None).unwrap();
+        assert!(!checkout.stop_pending);
+    }
+
+    #[tokio::test]
+    async fn the_start_flag_ends_with_the_take_or_when_the_run_gives_up() {
+        let (state, _dir) = state_with_tab(1);
+        {
+            let _starting = Starting::begin(&state, "t1");
+            assert!(state.tabs().open["t1"].starting);
+        }
+        assert!(!state.tabs().open["t1"].starting);
+        let starting = Starting::begin(&state, "t1");
+        cancel_query(&state, "t1".into()).await.unwrap();
+        let (checkout, _session) = Checkout::take(&state, "t1", true, None).unwrap();
+        assert!(checkout.stop_pending && !state.tabs().open["t1"].starting);
+        drop(starting);
+        assert!(!state.tabs().open["t1"].stop_pending);
+    }
+
+    /// Runs `events` through a Forwarder and returns what the UI heard.
+    async fn forward(events: Vec<ExecEvent>) -> (Vec<UiEvent>, RunTally) {
+        let (state, _dir) = state_with_tab(1);
+        let heard = std::sync::Mutex::new(Vec::new());
+        let emit = |ev: UiEvent| heard.lock().unwrap().push(ev);
+        let f = Forwarder {
+            state: &state,
+            tab_id: "t1",
+            generation: 1,
+            emit: &emit,
+            max_rows: 1000,
+            budget: std::sync::Mutex::new(ByteBudget::default()),
+        };
+        let (tx, rx) = mpsc::channel(events.len().max(1));
+        for ev in events {
+            tx.send(ev).await.unwrap();
+        }
+        drop(tx);
+        let tally = f.run(rx).await;
+        let heard = heard.lock().unwrap().clone();
+        (heard, tally)
+    }
+
+    fn info(text: &str) -> ExecEvent {
+        ExecEvent::Message {
+            kind: MessageKind::Info,
+            text: text.into(),
+            line: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn consecutive_rows_affected_are_merged_into_one_event() {
+        let mut events: Vec<ExecEvent> = (0..1000)
+            .map(|_| ExecEvent::RowsAffected { count: 2 })
+            .collect();
+        events.push(info("done"));
+        events.push(ExecEvent::RowsAffected { count: 5 });
+        let (heard, tally) = forward(events).await;
+        assert_eq!(
+            heard,
+            vec![
+                UiEvent::RowsAffectedMany {
+                    count: 2000,
+                    times: 1000
+                },
+                UiEvent::Message {
+                    kind: MessageKind::Info,
+                    text: "done".into(),
+                    line: None
+                },
+                UiEvent::RowsAffected { count: 5 },
+            ]
+        );
+        assert_eq!(tally.rows(), Some(2005));
+    }
+
+    #[tokio::test]
+    async fn errors_have_their_own_cap_and_the_notice_counts_them() {
+        let events: Vec<ExecEvent> = (0..20_000)
+            .map(|i| ExecEvent::Message {
+                kind: MessageKind::Error,
+                text: format!("err {i}"),
+                line: None,
+            })
+            .collect();
+        let (heard, _) = forward(events).await;
+        let errors = heard
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    UiEvent::Message {
+                        kind: MessageKind::Error,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(errors, MAX_ERRORS);
+        let Some(UiEvent::Message { text, .. }) = heard.last() else {
+            panic!("no notice");
+        };
+        assert!(
+            text.starts_with("19000 more messages omitted")
+                && text.contains("19000 of them errors"),
+            "{text}"
+        );
+        assert_eq!(heard.len(), MAX_ERRORS + 1);
+    }
+
+    #[tokio::test]
+    async fn messages_stop_at_the_cap_but_errors_and_the_notice_get_through() {
+        let mut events: Vec<ExecEvent> = (0..MAX_MESSAGES + 25)
+            .map(|i| info(&i.to_string()))
+            .collect();
+        events.push(ExecEvent::Message {
+            kind: MessageKind::Error,
+            text: "boom".into(),
+            line: Some(1),
+        });
+        let (heard, _) = forward(events).await;
+        let texts: Vec<_> = heard
+            .iter()
+            .filter_map(|e| match e {
+                UiEvent::Message { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        // The cap, the error past it, and the notice.
+        assert_eq!(texts.len(), MAX_MESSAGES + 2);
+        assert_eq!(texts[MAX_MESSAGES], "boom");
+        assert!(texts[MAX_MESSAGES + 1].starts_with("25 more messages omitted"));
+    }
+
+    #[tokio::test]
+    async fn result_sets_past_the_cap_are_drained_and_counted() {
+        let mut events = Vec::new();
+        for index in 0..MAX_RESULT_SETS as u32 + 3 {
+            events.push(ExecEvent::ResultStart {
+                index,
+                columns: vec![Column {
+                    name: "c".into(),
+                    type_name: "int".into(),
+                }],
+            });
+            events.push(ExecEvent::Rows {
+                index,
+                rows: vec![vec![Value::Int(1)]],
+            });
+        }
+        let (heard, tally) = forward(events).await;
+        let starts = heard
+            .iter()
+            .filter(|e| matches!(e, UiEvent::ResultStart { .. }))
+            .count();
+        assert_eq!(starts, MAX_RESULT_SETS);
+        assert_eq!(tally.rows_received, MAX_RESULT_SETS as u64 + 3);
+        assert!(matches!(
+            heard.last(),
+            Some(UiEvent::Message { text, .. }) if text.starts_with("3 more result sets")
+        ));
     }
 
     #[tokio::test]

@@ -58,6 +58,9 @@ export function reduceEvent(body: PaneBody, e: UiEvent, lineOffset: number): voi
     case "rowsAffected":
       body.messages.push({ kind: "info", text: t("pane.rowsAffected", { count: e.count }), line: null });
       break;
+    case "rowsAffectedMany":
+      body.messages.push({ kind: "info", text: t("pane.rowsAffectedMany", { count: e.count, times: e.times }), line: null });
+      break;
     case "batchDone":
       break;
     case "disconnected":

@@ -607,7 +607,6 @@ impl Session for MssqlSession {
     }
 
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError> {
-        self.cancel_requested.store(false, Ordering::SeqCst);
         self.run_events(sql, tx).await
     }
 
@@ -646,6 +645,10 @@ impl Session for MssqlSession {
             "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION"
         };
         self.query_rows(sql).await.map(|_| ())
+    }
+
+    fn reset_cancel(&mut self) {
+        self.cancel_requested.store(false, Ordering::SeqCst);
     }
 
     fn cancel_handle(&self) -> Box<dyn CancelHandle> {
