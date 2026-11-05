@@ -63,6 +63,25 @@ impl ToolText {
         }
     }
 
+    /// Keeps the text within `AI_MAX_OUTPUT_CHARS`: it is cut at a line end
+    /// and the notice says so, so the assistant narrows its request.
+    pub(crate) fn within_budget(mut self) -> Self {
+        if self.text.chars().count() <= AI_MAX_OUTPUT_CHARS {
+            return self;
+        }
+        let notice = format!("\n{}", self::format::OUTPUT_CUT);
+        let room = AI_MAX_OUTPUT_CHARS.saturating_sub(notice.chars().count());
+        let end = self
+            .text
+            .char_indices()
+            .nth(room)
+            .map_or(self.text.len(), |(i, _)| i);
+        let kept = &self.text[..end];
+        let kept = kept.rfind('\n').map_or(kept, |i| &kept[..i]);
+        self.text = format!("{kept}{notice}");
+        self
+    }
+
     pub(crate) fn error(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
@@ -334,4 +353,21 @@ fn folder_path(folders: &[Folder], folder_id: Option<&str>) -> Option<String> {
     }
     names.reverse();
     Some(names.join("/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_answers_are_cut_with_a_notice() {
+        let line = "x".repeat(99);
+        let text = vec![line; 2000].join("\n");
+        let cut = ToolText::ok(text).within_budget();
+        assert!(cut.text.chars().count() <= AI_MAX_OUTPUT_CHARS);
+        assert!(cut.text.ends_with(format::OUTPUT_CUT));
+        assert!(!cut.is_error);
+        let short = ToolText::ok("small").within_budget();
+        assert_eq!(short.text, "small");
+    }
 }

@@ -20,9 +20,14 @@ pub(super) fn environment_name(v: &Visible) -> String {
         .unwrap_or_default()
 }
 
+/// The answer of `list_connections`, within the output budget.
+pub async fn list_connections(s: &AiState) -> ToolText {
+    list_connections_text(s).await.within_budget()
+}
+
 /// One row per connection shared with the AI: its label, environment and
 /// databases. No server and no user.
-pub async fn list_connections(s: &AiState) -> ToolText {
+async fn list_connections_text(s: &AiState) -> ToolText {
     let visible = match s.visible().await {
         Ok(v) => v,
         Err(e) => return e,
@@ -55,9 +60,14 @@ pub async fn list_connections(s: &AiState) -> ToolText {
     ))
 }
 
+/// The answer of `list_databases`, within the output budget.
+pub async fn list_databases(s: &AiState, connection: String) -> ToolText {
+    list_databases_text(s, connection).await.within_budget()
+}
+
 /// The databases of a connection: the selected ones, or, with all of them,
 /// those the server lists now (the cache when it cannot be reached).
-pub async fn list_databases(s: &AiState, connection: String) -> ToolText {
+async fn list_databases_text(s: &AiState, connection: String) -> ToolText {
     let visible = match s.visible().await {
         Ok(v) => v,
         Err(e) => return e,
@@ -155,11 +165,16 @@ fn kind_name(kind: ObjectKind) -> &'static str {
     }
 }
 
+/// The answer of `search_objects`, within the output budget.
+pub async fn search_objects(s: &AiState, req: SearchRequest) -> ToolText {
+    search_objects_text(s, req).await.within_budget()
+}
+
 /// Finds tables, views and procedures (or columns) whose name contains every
 /// word of the query, among the connections shared with the AI. It reads the
 /// cache the app keeps, except for one named database that is not in it,
 /// which is read from the server.
-pub async fn search_objects(s: &AiState, req: SearchRequest) -> ToolText {
+async fn search_objects_text(s: &AiState, req: SearchRequest) -> ToolText {
     let terms: Vec<String> = req.query.split_whitespace().map(str::to_string).collect();
     if terms.is_empty() {
         return ToolText::error("Give at least one word to search for.");
@@ -372,10 +387,22 @@ async fn live_search(
     Ok(hits)
 }
 
+/// The answer of `describe_table`, within the output budget.
+pub async fn describe_table(
+    s: &AiState,
+    connection: String,
+    database: Option<String>,
+    table: String,
+) -> ToolText {
+    describe_table_text(s, connection, database, table)
+        .await
+        .within_budget()
+}
+
 /// Columns, foreign keys and indexes of a table or view. `table` is
 /// `schema.name`, `[schema].[name]` or `name`; without a schema, the cache
 /// tells which one holds it (`dbo` if it is not there).
-pub async fn describe_table(
+async fn describe_table_text(
     s: &AiState,
     connection: String,
     database: Option<String>,
