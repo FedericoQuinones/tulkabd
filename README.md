@@ -4,7 +4,7 @@ A lightweight, cross-platform desktop client for Microsoft SQL Server, built wit
 
 ## Requirements
 
-- [Rust](https://rustup.rs) 1.88 or newer (stable toolchain)
+- [Rust](https://rustup.rs) 1.90 or newer (stable toolchain)
 - [Node.js](https://nodejs.org) 22
 - [pnpm](https://pnpm.io)
 - Docker (only for integration tests)
