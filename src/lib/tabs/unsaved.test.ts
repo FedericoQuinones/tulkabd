@@ -1,4 +1,4 @@
-import { beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { ConnectionConfig } from "../ipc";
 
 vi.mock("../ipc", () => ({
@@ -44,6 +44,11 @@ function edited(text: string, spec: Parameters<typeof tabs.open>[0] = { kind: "q
   pane.edited();
   return id;
 }
+
+const stops: (() => void)[] = [];
+afterEach(() => {
+  for (const stop of stops.splice(0)) stop();
+});
 
 beforeEach(async () => {
   vi.resetAllMocks();
@@ -164,7 +169,7 @@ test("after Don't save an open transaction is still asked about", async () => {
 
 
 async function armWindowClose(save: (json: string) => Promise<void> = async () => {}) {
-  tabs.startAutosave(save);
+  stops.push(tabs.startAutosave(save));
   await flush();
   expect(closeRequested).not.toBeNull();
 }
@@ -251,7 +256,7 @@ test("a session save that hits the timeout makes the window ask", async () => {
   vi.useFakeTimers();
   try {
     edited("SELECT 1");
-    tabs.startAutosave(() => new Promise(() => {}));
+    stops.push(tabs.startAutosave(() => new Promise(() => {})));
     await vi.advanceTimersByTimeAsync(0);
     const preventDefault = vi.fn();
     const closing = closeRequested!({ preventDefault });
@@ -262,4 +267,51 @@ test("a session save that hits the timeout makes the window ask", async () => {
   } finally {
     vi.useRealTimers();
   }
+});
+
+test("the window close is heard before the restore is done and waits for it", async () => {
+  prefs.value = { ...DEFAULT_PREFERENCES, restoreSession: false };
+  let done!: () => void;
+  const stop = tabs.guardWindow(new Promise<void>((r) => (done = r)));
+  await flush();
+  expect(closeRequested).not.toBeNull();
+  const preventDefault = vi.fn();
+  const closing = closeRequested!({ preventDefault });
+  await flush();
+  // Nothing decided yet: the restore has not finished.
+  expect(tabs.unsavedPrompt).toBeNull();
+  edited("SELECT 1");
+  done();
+  await closing;
+  expect(preventDefault).toHaveBeenCalled();
+  expect(tabs.unsavedPrompt?.scope).toBe("window");
+  stop();
+});
+
+test("Cmd+Q is heard before the restore is done and goes through the same flow", async () => {
+  let quit: (() => void) | null = null;
+  vi.mocked(ipc.onQuitRequested).mockImplementation(async (cb) => {
+    quit = cb;
+    return () => {};
+  });
+  let done!: () => void;
+  const stop = tabs.guardWindow(new Promise<void>((r) => (done = r)));
+  await flush();
+  expect(quit).not.toBeNull();
+  quit!();
+  await flush();
+  expect(destroy).not.toHaveBeenCalled();
+  done();
+  await flush();
+  expect(destroy).toHaveBeenCalledTimes(1);
+  stop();
+});
+
+test("autosave started after the guard does not listen a second time", async () => {
+  const stop = tabs.guardWindow(Promise.resolve());
+  const stopAutosave = tabs.startAutosave(async () => {});
+  await flush();
+  expect(ipc.onQuitRequested).toHaveBeenCalledTimes(1);
+  stopAutosave();
+  stop();
 });

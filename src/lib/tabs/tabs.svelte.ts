@@ -1284,7 +1284,6 @@ export class TabsStore {
     // Started by the first unsaved change, so continuous typing still saves.
     let maxTimer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
-    let unlisten: (() => void) | null = null;
     const write = async (json: string): Promise<void> => {
       let saving: Promise<unknown>;
       try {
@@ -1341,9 +1340,50 @@ export class TabsStore {
         maxTimer ??= setTimeout(() => void flush(), AUTOSAVE_MAX_WAIT_MS);
       });
     });
+    this.flushOnClose = async () => {
+      if (!stopped && !held) await flush();
+    };
+    // Listening already (see `guardWindow`) or not: the close flow below is the same.
+    const stopListening = this.guardStop ? null : this.listenForClose(Promise.resolve());
+    return () => {
+      stopped = true;
+      this.flushOnClose = null;
+      clearTimeout(timer);
+      clearTimeout(maxTimer);
+      stopEffect();
+      stopListening?.();
+    };
+  }
+
+  private guardStop: (() => void) | null = null;
+  /** Saves the session right away when the window is asked to close (set by `startAutosave`). */
+  private flushOnClose: (() => Promise<void>) | null = null;
+
+  /**
+   * Listens for the window close request and for Cmd+Q from now on, so neither is swallowed while
+   * the app is still starting. They wait for `ready` (the session restore) before deciding, then
+   * go through the same flow as when autosave runs. Returns a function that stops listening.
+   */
+  guardWindow(ready: Promise<unknown>): () => void {
+    this.guardStop?.();
+    const stop = this.listenForClose(ready);
+    this.guardStop = stop;
+    return () => {
+      stop();
+      if (this.guardStop === stop) this.guardStop = null;
+    };
+  }
+
+  private listenForClose(ready: Promise<unknown>): () => void {
+    let stopped = false;
+    const beforeClose = async () => {
+      await ready.catch(() => {});
+      await this.flushOnClose?.();
+    };
+    let unlisten: (() => void) | null = null;
     getCurrentWindow()
       .onCloseRequested(async (event) => {
-        if (!stopped && !held) await flush();
+        await beforeClose();
         await this.confirmWindowClose(event);
       })
       .then((fn) => {
@@ -1358,7 +1398,7 @@ export class TabsStore {
       void Promise.resolve(
         ipc.onQuitRequested(() => {
           void (async () => {
-            if (!stopped && !held) await flush();
+            await beforeClose();
             let kept = false;
             await this.confirmWindowClose({ preventDefault: () => (kept = true) });
             if (!kept) await getCurrentWindow().destroy();
@@ -1376,9 +1416,6 @@ export class TabsStore {
     return () => {
       stopped = true;
       unlistenQuit?.();
-      clearTimeout(timer);
-      clearTimeout(maxTimer);
-      stopEffect();
       unlisten?.();
     };
   }

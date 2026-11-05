@@ -64,10 +64,15 @@
   let restored = $state(false);
   let destroyed = false;
   let stopAutosave: (() => void) | null = null;
+  // Closing the window or Cmd+Q is heard from the start; it waits for the restore to finish.
+  let restoreDone!: () => void;
+  const restoreReady = new Promise<void>((resolve) => (restoreDone = resolve));
+  const stopGuard = tabs.guardWindow(restoreReady);
   let stopDrop: (() => void) | null = null;
   onDestroy(() => {
     destroyed = true;
     stopAutosave?.();
+    stopGuard();
     stopDrop?.();
   });
 
@@ -81,6 +86,13 @@
     })
     .catch(() => {});
   async function restoreSession() {
+    try {
+      await restoreSessionNow();
+    } finally {
+      restoreDone();
+    }
+  }
+  async function restoreSessionNow() {
     // `undefined` when the saved session could not be loaded at all.
     const [json, loaded] = await Promise.all([
       loadSession().catch(() => undefined),
