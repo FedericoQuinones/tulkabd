@@ -69,7 +69,8 @@ test("names that need brackets are inserted quoted", async () => {
   const r = await complete("SELECT * FROM Ord|");
   expect(option(r, "Order Details")?.apply).toBe("[Order Details]");
   expect(option(r, "Order")?.apply).toBe("[Order]");
-  expect(option(r, "Pedidos")?.apply ?? "Pedidos").toBe("Pedidos");
+  expect(option(r, "Pedidos")).toMatchObject({ label: "Pedidos", type: "class", detail: "dbo" });
+  expect(option(r, "Pedidos")?.apply).toBeUndefined();
   const año = option(await complete("SELECT * FROM Ped|"), "Pedidos_Año");
   expect(año?.apply).toBe("ventas.Pedidos_Año");
   expect(option(await complete("SELECT * FROM a|"), "a]b")?.apply).toBe("[we]]ird].[a]]b]");
@@ -80,7 +81,11 @@ test("a typed [ keeps the bracketed form", async () => {
   const r = await complete("SELECT * FROM [Order D|");
   expect(r?.from).toBe("SELECT * FROM ".length);
   const o = option(r, "[Order Details]");
-  expect(o?.apply ?? o?.label).toBe("[Order Details]");
+  expect(o).toBeDefined();
+  expect(o?.apply).toBeUndefined();
+  // Bracketed form: every option is bracketed and no bare keyword is offered.
+  expect(labels(r).every((l) => l.startsWith("["))).toBe(true);
+  expect(labels(r)).toContain("[Order]");
 });
 
 test("plain words offer keywords, schemas, tables and views", async () => {
