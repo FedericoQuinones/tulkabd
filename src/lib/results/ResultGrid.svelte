@@ -228,7 +228,14 @@
       x = r.left;
       y = r.bottom;
     }
-    cellMenu = { x, y, items: [{ id: "filterValue", label: t("results.filter.byValue"), run: () => filterByValue(at, value) }] };
+    cellMenu = {
+      x,
+      y,
+      items: [
+        { id: "copy", label: t("results.copy"), run: () => oncopy() },
+        { id: "filterValue", label: t("results.filter.byValue"), run: () => filterByValue(at, value) },
+      ],
+    };
   }
 
   function closeCellMenu(refocus: boolean) {
@@ -238,7 +245,7 @@
 
   function onkeydown(e: KeyboardEvent) {
     // Header buttons keep their keys.
-    if (e.target !== gridEl && (e.target as HTMLElement).closest("button")) return;
+    if (e.target !== gridEl && (e.target as HTMLElement).closest("button, [role=separator]")) return;
     const out = gridKey(e, { active, rows: total, cols: columns.length, selection, page });
     if (out === null) return;
     e.preventDefault();
@@ -279,6 +286,15 @@
     gridEl?.focus({ preventScroll: true });
   }
 
+  const MIN_WIDTH = 48;
+  function resizeKey(e: KeyboardEvent, col: number) {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    e.stopPropagation();
+    const step = e.shiftKey ? 50 : 10;
+    widths[col] = Math.max(MIN_WIDTH, colWidth(col) + (e.key === "ArrowRight" ? step : -step));
+  }
+
   let stopResize: (() => void) | undefined;
   function startResize(e: PointerEvent, col: number) {
     e.preventDefault();
@@ -286,7 +302,7 @@
     const startX = e.clientX;
     const startW = colWidth(col);
     const move = (ev: PointerEvent) => {
-      widths[col] = Math.max(48, startW + ev.clientX - startX);
+      widths[col] = Math.max(MIN_WIDTH, startW + ev.clientX - startX);
     };
     const stop = () => {
       window.removeEventListener("pointermove", move);
@@ -366,8 +382,18 @@
             aria-expanded={columnMenu?.column === i}
             onclick={(e) => openColumnMenu(e, i)}>▾</button
           >
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <span class="grip" aria-label={t("results.resize", { name: c.name })} onpointerdown={(e) => startResize(e, i)}></span>
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+          <span
+            class="grip"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t("results.resize", { name: c.name })}
+            aria-valuenow={colWidth(i)}
+            aria-valuemin={MIN_WIDTH}
+            tabindex="0"
+            onpointerdown={(e) => startResize(e, i)}
+            onkeydown={(e) => resizeKey(e, i)}
+          ></span>
         </div>
       {/each}
     </div>
@@ -569,6 +595,10 @@
     bottom: 0;
     width: 6px;
     cursor: col-resize;
+  }
+  .grip:focus-visible {
+    outline: none;
+    background: var(--accent);
   }
   .grip:hover {
     background: var(--control);
