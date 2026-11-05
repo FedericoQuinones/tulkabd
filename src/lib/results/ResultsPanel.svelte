@@ -196,7 +196,15 @@
       />
     {/if}
     {#if result?.truncated}
-      <span class="warn">{t("results.truncated", { max: count(pane.runMaxRows) })}</span>
+      <span class="warn">
+        {#if !result.memoryCut}
+          {t("results.truncated", { max: count(pane.runMaxRows) })}
+        {:else if result.total === 0}
+          {t("results.notKept")}
+        {:else}
+          {t("results.memoryCut", { max: count(result.total) })}
+        {/if}
+      </span>
     {/if}
     {#if pane.summary}
       <span class="meta num">{t("results.elapsed", { ms: count(pane.summary.elapsedMs) })}{finishedAt ? ` · ${finishedAt}` : ""}</span>

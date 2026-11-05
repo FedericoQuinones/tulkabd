@@ -110,3 +110,11 @@ test("an empty grid does not move", () => {
   expect(gridKey(key("ArrowDown"), state({ active: null, selection: null, rows: 0 }))).toBeNull();
   expect(gridKey(key("ArrowDown"), state({ active: null, selection: null, cols: 0 }))).toBeNull();
 });
+
+test("Escape clears the selection and leaves the active cell", () => {
+  const active = { row: 2, col: 1 };
+  const selection = { kind: "cells" as const, anchor: active, focus: active };
+  const e = new KeyboardEvent("keydown", { key: "Escape" });
+  expect(gridKey(e, { active, rows: 5, cols: 3, selection })).toEqual({ active, selection: null });
+  expect(gridKey(e, { active, rows: 5, cols: 3, selection: null })).toBeNull();
+});

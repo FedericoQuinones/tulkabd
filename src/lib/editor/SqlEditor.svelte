@@ -6,6 +6,8 @@
   import { HighlightStyle, bracketMatching, indentOnInput, syntaxHighlighting } from "@codemirror/language";
   import { MSSQL, sql } from "@codemirror/lang-sql";
   import { autocompletion, type CompletionContext, type CompletionSource } from "@codemirror/autocomplete";
+  import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
+  import { searchPhrases } from "./searchPhrases";
   import { tags } from "@lezer/highlight";
   import { t } from "../i18n/t";
   import type { PaneState } from "../pane/pane.svelte";
@@ -46,6 +48,26 @@
       ".cm-tooltip-autocomplete ul li[aria-selected]": { backgroundColor: "#2f4a6e", color: "var(--text)" },
       ".cm-completionDetail": { color: "var(--muted)", fontStyle: "normal", marginLeft: "1em" },
       ".cm-completionMatchedText": { textDecoration: "none", color: "var(--accent)" },
+      ".cm-panels": { backgroundColor: "var(--raised)", color: "var(--soft)", fontFamily: "var(--font)" },
+      ".cm-panels.cm-panels-top": { borderBottom: "1px solid var(--border)" },
+      ".cm-panels.cm-panels-bottom": { borderTop: "1px solid var(--border)" },
+      ".cm-search": { fontSize: "12px" },
+      ".cm-search label": { color: "var(--muted)" },
+      ".cm-search input, .cm-search button": { fontFamily: "inherit", fontSize: "12px" },
+      ".cm-textfield": { backgroundColor: "var(--surface)", color: "var(--text)", border: "1px solid var(--control)", borderRadius: "4px" },
+      ".cm-textfield:focus": { outline: "none", borderColor: "var(--accent)" },
+      ".cm-button": {
+        backgroundImage: "none",
+        backgroundColor: "var(--ground)",
+        color: "var(--soft)",
+        border: "1px solid var(--control)",
+        borderRadius: "4px",
+      },
+      ".cm-button:active": { backgroundImage: "none", backgroundColor: "var(--control)" },
+      ".cm-panel.cm-search [name=close]": { color: "var(--muted)" },
+      ".cm-searchMatch": { backgroundColor: "rgba(217, 164, 65, 0.25)", outline: "1px solid rgba(217, 164, 65, 0.5)" },
+      ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "rgba(74, 138, 214, 0.4)" },
+      ".cm-selectionMatch": { backgroundColor: "rgba(74, 138, 214, 0.2)" },
     },
     { dark: true },
   );
@@ -144,6 +166,9 @@
           autocompletion({ override: [complete] }),
           syntaxHighlighting(highlight),
           theme,
+          search({ top: true }),
+          highlightSelectionMatches(),
+          EditorState.phrases.of(searchPhrases()),
           EditorView.contentAttributes.of({ "aria-label": t("pane.editorLabel") }),
           keymap.of([
             {
@@ -157,6 +182,7 @@
             // Ctrl+Shift+\ is the app's "split down", not "go to matching bracket".
             ...defaultKeymap.filter((b) => b.key !== "Shift-Mod-\\"),
             ...historyKeymap,
+            ...searchKeymap,
           ]),
           EditorView.updateListener.of((u) => {
             if (u.selectionSet || u.docChanged) report(u.view);

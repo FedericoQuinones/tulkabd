@@ -3,18 +3,19 @@ name: ci
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -22,6 +23,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: System libraries
         run: |
           sudo apt-get update
@@ -31,16 +34,20 @@ jobs:
       - run: pnpm vitest run
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The vendored Tiberius fork sits outside the workspace, so its unit tests run separately.
+      - run: cargo test --manifest-path vendor/tiberius/Cargo.toml --no-default-features --features "tds73 rustls chrono" --lib
 
   test-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # The Windows-only code (Windows authentication) is linted and tested only here.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The Windows-only code (keyring and MCP console handling) is linted and tested only here.
       - run: cargo clippy -p tulka-core -p tulka-mssql -p tulka-store -p tulka-mcp -p tulka-app --all-targets -- -D warnings
       - run: cargo test -p tulka-core -p tulka-mssql -p tulka-store -p tulka-mcp -p tulka-app
 
@@ -55,16 +62,16 @@ jobs:
           - os: ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: System libraries
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -79,7 +86,7 @@ jobs:
           exe=target/release/tulkabd
           if [ "$RUNNER_OS" = "Windows" ]; then exe=target/release/tulkabd.exe; fi
           node scripts/mcp-ci-probe.mjs "$exe"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: tulkabd-${{ matrix.os }}
           path: |
@@ -88,5 +95,4 @@ jobs:
             target/release/bundle/dmg/*.dmg
             target/release/bundle/deb/*.deb
             target/release/bundle/rpm/*.rpm
-            target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
