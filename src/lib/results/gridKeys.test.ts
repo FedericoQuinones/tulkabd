@@ -21,6 +21,12 @@ test("arrows move the active cell and select it", () => {
   expect(gridKey(key("ArrowLeft"), state({ active: at(3, 2) }))).toEqual({ active: at(3, 1), selection: cell(3, 1) });
 });
 
+test("Ctrl+A and Ctrl+C work on a non-Latin layout through the physical key", () => {
+  // Russian: A types ф and C types с.
+  expect(gridKey(key("ф", { ctrlKey: true, code: "KeyA" }), state())).toEqual({ active: at(0, 0), selection: { kind: "all" } });
+  expect(gridKey(key("с", { ctrlKey: true, code: "KeyC" }), state())).toBe("copy");
+});
+
 test("arrow down on the last row stays in range", () => {
   expect(gridKey(key("ArrowDown"), state({ active: at(99, 4), selection: cell(99, 4) }))).toEqual({
     active: at(99, 4),

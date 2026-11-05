@@ -1,3 +1,4 @@
+import { shortcutLetter } from "../tabs/shortcuts";
 import type { GridSelection } from "./selection";
 
 export interface Cell {
@@ -28,7 +29,8 @@ const clamp = (n: number, max: number) => Math.max(0, Math.min(n, max));
 export function gridKey(e: KeyboardEvent, state: GridKeyState): GridKeyResult {
   if (e.defaultPrevented || e.altKey) return null;
   const mod = e.ctrlKey || e.metaKey;
-  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  // A letter typed on a non-Latin layout falls back to the physical key, so Ctrl+A and Ctrl+C still work.
+  const key = e.key.length === 1 ? shortcutLetter(e) : e.key;
   if (mod && !e.shiftKey && key === "a") return { active: state.active, selection: { kind: "all" } };
   if (mod && !e.shiftKey && key === "c") return "copy";
 

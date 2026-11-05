@@ -1,4 +1,5 @@
 import * as ipc from "../ipc";
+import { forgetStructures } from "../structure/cache";
 import type { ConnectionConfig, GuardLevel, SaveConnectionResult } from "../ipc";
 
 class ConnectionStore {
@@ -42,6 +43,7 @@ class ConnectionStore {
   /** Saves a connection; the password goes to the backend only and is not retained here. */
   async save(conn: ConnectionConfig, password?: string): Promise<SaveConnectionResult> {
     const result = await ipc.saveConnection(conn, password);
+    forgetStructures(conn.id);
     // Saving with another guard level ends the until-restart override, so both lists are re-read.
     await Promise.all([this.refresh(), this.loadGuardOff()]);
     return result;
@@ -66,6 +68,7 @@ class ConnectionStore {
 
   async remove(id: string): Promise<void> {
     await ipc.deleteConnection(id);
+    forgetStructures(id);
     await this.refresh();
   }
 }

@@ -336,3 +336,24 @@ test("the truncation notice names the limit the run used, not the current prefer
   expect(document.querySelector(".warn")?.textContent).toBe("Showing first 1,000 rows");
   prefs.value.maxRows = 100_000;
 });
+
+test("coming back to the tab keeps the result set shown and the grid scroll", async () => {
+  pane.results = [...pane.results, { ...pane.results[0], total: 500 }];
+  open();
+  document.querySelectorAll<HTMLButtonElement>("button.rt")[1].click();
+  await settle();
+  grid().scrollTop = 120;
+  grid().dispatchEvent(new Event("scroll"));
+  await settle();
+  close();
+  document.body.innerHTML = "";
+  open();
+  await settle();
+  expect(grid().getAttribute("aria-rowcount")).toBe("501");
+  expect(grid().scrollTop).toBe(120);
+  // A new run starts over at the first result.
+  pane.runCount++;
+  await settle();
+  expect(pane.resultTab).toBe(0);
+  expect(pane.gridScroll).toEqual([]);
+});

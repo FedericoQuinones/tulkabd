@@ -1,7 +1,32 @@
+<script lang="ts" module>
+  import { explorer } from "../explorer/tree.svelte";
+  import { forgetStructures } from "./cache";
+
+  // Any connection coming back may have a changed schema: its cached structures go, shown or not.
+  let watching = false;
+  function watchConnections() {
+    if (watching) return;
+    watching = true;
+    $effect.root(() => {
+      const was = new Map<string, boolean>();
+      $effect(() => {
+        for (const [id, c] of Object.entries(explorer.conns)) {
+          const now = c.status === "connected";
+          if (now && was.get(id) === false) forgetStructures(id);
+          was.set(id, now);
+        }
+      });
+    });
+  }
+</script>
+
+
 <script lang="ts">
+  import { untrack } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
   import type { TableStructure } from "../ipc";
+  import { cacheStructure, cachedStructure } from "./cache";
   import { isNotConnected } from "../tabs/tabs.svelte";
 
   interface Props {
@@ -12,6 +37,8 @@
   }
   let { connectionId, database, schema, name }: Props = $props();
 
+  watchConnections();
+  const key = $derived([connectionId, database, schema, name] as const);
   let data = $state<TableStructure | null>(null);
   let notice = $state<string | null>(null);
   let loading = $state(true);
@@ -19,10 +46,12 @@
 
   async function load() {
     const id = ++seq;
+    const k = key;
     loading = true;
     notice = null;
     try {
       const result = await ipc.tableStructure(connectionId, database, schema, name);
+      cacheStructure(...k, result);
       if (id === seq) data = result;
     } catch (e) {
       if (id === seq) notice = isNotConnected(e) ? t("tabs.notConnected") : t("tabs.loadFailed", { error: String(e) });
@@ -31,9 +60,24 @@
     }
   }
   $effect(() => {
-    void [connectionId, database, schema, name];
-    void load();
+    const k = key;
+    const hit = untrack(() => cachedStructure(...k));
+    if (hit) {
+      data = hit;
+      loading = false;
+      notice = null;
+    } else void load();
     return () => seq++;
+  });
+
+  // The connection coming back may mean a changed schema: load again then, not on every activation.
+  let wasConnected = untrack(() => explorer.conns[connectionId]?.status === "connected");
+  $effect(() => {
+    const now = explorer.conns[connectionId]?.status === "connected";
+    untrack(() => {
+      if (now && !wasConnected) void load();
+      wasConnected = now;
+    });
   });
 </script>
 
@@ -46,6 +90,7 @@
   {:else if loading || !data}
     <p class="hint">{t("structure.loading")}</p>
   {:else}
+    <div class="bar"><button type="button" onclick={load}>{t("structure.refresh")}</button></div>
     <h3>{t("structure.columns")}</h3>
     <table>
       <thead>
@@ -116,6 +161,11 @@
     height: 100%;
     overflow: auto;
     padding: 4px 16px 24px;
+  }
+  .bar {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
   }
   h3 {
     margin: 20px 0 6px;

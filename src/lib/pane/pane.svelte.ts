@@ -49,6 +49,10 @@ export class PaneState {
   bottomTab = $state<"results" | "messages" | "runlog">("results");
   /** Increments on every run start; the results view uses it to drop its row cache. */
   runCount = $state(0);
+  /** The result set shown in the results panel; kept here so it survives a tab switch. */
+  resultTab = $state(0);
+  /** Grid scroll position per result set of the current run (not reactive: only read on mount). */
+  gridScroll: number[] = [];
   /** The confirmed row limit in force when the last run started; later preference changes do not apply to it. */
   runMaxRows = $state(prefs.confirmed.maxRows);
   session = $state<SessionInfo | null>(null);
@@ -136,7 +140,19 @@ export class PaneState {
     // A newer open began while logging: it replaces this session, and a close sent now would
     // hit the new one.
     if (!owned || token !== this.runId) return;
-    await ipc.closeSession(this.tabId).catch(() => {});
+    await this.closeBackend();
+  }
+
+  /** Closes the backend session; a failure is logged and shown in the Messages, not swallowed. */
+  private async closeBackend(): Promise<void> {
+    try {
+      await ipc.closeSession(this.tabId);
+    } catch (e) {
+      console.warn("close_session failed", e);
+      const msg: PaneMessage = { kind: "error", text: t("pane.closeFailed", { error: String(e) }), line: null };
+      this.closeNotice = msg;
+      this.messages.push(msg);
+    }
   }
 
   /** Drops the session and the connection binding but keeps the editor text. */
@@ -155,6 +171,8 @@ export class PaneState {
     this.guardToast = null;
   }
 
+  /** A failed close_session; it survives the reset of the messages by the next open and runs. */
+  private closeNotice: PaneMessage | null = null;
   private hasSession = false;
   // Run token: every run() takes a new id and open() bumps it, so a run that is still pending
   // (e.g. after a mid-run "disconnected") is stale once a reconnect starts and must not touch state.
@@ -168,13 +186,14 @@ export class PaneState {
     if (this.status === "connecting" || this.status === "running") return { kind: "busy" };
     const before = this.status;
     const token = ++this.runId;
+    this.closeNotice = null;
     this.status = "connecting";
     try {
       // The confirmation belongs to the session being replaced: record it before that goes.
       await this.discardGuard();
       if (this.hasSession) {
         this.hasSession = false;
-        await ipc.closeSession(this.tabId).catch(() => {});
+        await this.closeBackend();
       }
       const info = await ipc.openSession(this.tabId, conn.id, database, password);
       if (token !== this.runId) {
@@ -186,7 +205,7 @@ export class PaneState {
       this.connectionId = conn.id;
       this.database = info.currentDatabase;
       this.results = [];
-      this.messages = [];
+      this.messages = this.closeNotice ? [this.closeNotice] : [];
       this.summary = null;
       this.guardPrompt = null;
       this.blocked = null;
@@ -285,7 +304,9 @@ export class PaneState {
     this.runCount++;
     this.runMaxRows = prefs.confirmed.maxRows;
     this.results = [];
-    this.messages = [];
+    // The close failure is shown once, on the first run after it.
+    this.messages = this.closeNotice ? [this.closeNotice] : [];
+    this.closeNotice = null;
     this.summary = null;
     // `body` is a view over this pane so the pure reducer can fill it.
     const self = this;

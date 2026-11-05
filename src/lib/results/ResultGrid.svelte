@@ -31,8 +31,12 @@
     ready: boolean;
     /** Ctrl+C in the grid. */
     oncopy: () => void;
+    /** Where the grid was scrolled to when it was last shown. */
+    scroll?: number;
+    /** Reports the scroll position, so a remount can come back to it. */
+    onscrolled?: (top: number) => void;
   }
-  let { tabId, resultIndex, result, final, view, ready, oncopy }: Props = $props();
+  let { tabId, resultIndex, result, final, view, ready, oncopy, scroll = 0, onscrolled }: Props = $props();
 
   const ID_WIDTH = 56;
   const NUMERIC = new Set(["int", "bigint", "smallint", "tinyint", "decimal", "numeric", "float", "real", "money", "smallmoney"]);
@@ -70,7 +74,7 @@
 
   let selection = $state<GridSelection | null>(null);
   let active = $state<Cell | null>(null);
-  let scrollTop = $state(0);
+  let scrollTop = $state(untrack(() => scroll));
   let viewportHeight = $state(0);
   let gridEl = $state<HTMLDivElement>();
   let widths = $state<number[]>([]);
@@ -89,6 +93,18 @@
   const bodyHeight = $derived(Math.max(viewportHeight - headH, 0));
   const range = $derived(visibleRange(scrollTop, bodyHeight, rowH, total));
   const page = $derived(Math.max(1, Math.floor(bodyHeight / rowH)));
+
+  // Coming back to a tab: the grid starts where it was left.
+  $effect(() => {
+    if (!gridEl) return;
+    untrack(() => {
+      if (scroll > 0) {
+        gridEl!.scrollTop = scroll;
+        // The browser may clamp it (fewer rows now): the window of rows follows what it kept.
+        scrollTop = gridEl!.scrollTop;
+      }
+    });
+  });
 
   // A zoom change keeps the first visible row at the top. `scrollTop` still holds the position
   // for the old row height here: the browser's own scroll event (if any) comes later.
@@ -277,7 +293,10 @@
   aria-busy={viewPending}
   bind:this={gridEl}
   bind:clientHeight={viewportHeight}
-  onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}
+  onscroll={(e) => {
+    scrollTop = e.currentTarget.scrollTop;
+    onscrolled?.(scrollTop);
+  }}
   {onkeydown}
   {oncontextmenu}
 >
