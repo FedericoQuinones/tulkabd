@@ -8,6 +8,19 @@
 //!
 //! - A user function or CLR routine called from a query can have external
 //!   effects; a name is not enough to tell.
+//! - Server files, secrets and other sessions' SQL are reachable through a
+//!   few functions and views (see `DENIED_NAMES`); they are refused by name,
+//!   with or without the `sys.` prefix, wherever the name appears as a word
+//!   or a bracketed name, so a column or alias with that name is refused too.
+//!   Other functions and views that read files or secrets may exist; a
+//!   login without those permissions is the real limit.
+//! - The query hints `MAXDOP`, `MIN_GRANT_PERCENT`, `MAX_GRANT_PERCENT` and
+//!   `QUERYTRACEON` are refused inside an `OPTION (...)` clause (a column
+//!   named like them is fine elsewhere). `USE HINT` is refused because `USE`
+//!   is a forbidden word.
+//! - A three-part name (`db.schema.object`) names a database; see
+//!   [`referenced_databases`]. A column written with its schema and table
+//!   (`dbo.t.col`) looks the same and is taken as database `dbo`.
 //! - A synonym or view may point at a linked server; only four-part names
 //!   written in the text are caught.
 //! - Unbracketed columns named like non-reserved forbidden words (`Send`,
@@ -135,6 +148,48 @@ const FORBIDDEN: &[&str] = &[
     "WRITETEXT",
     "XLOCK",
 ];
+
+/// Functions and views refused by name, in lower case and sorted: they read
+/// files of the server (a UNC path makes a Windows service account
+/// authenticate over SMB, and that survives a rollback), password hashes, the
+/// log, or the SQL text of other sessions.
+const DENIED_NAMES: &[&str] = &[
+    "dm_exec_input_buffer",
+    "dm_exec_sql_text",
+    "dm_os_enumerate_filesystem",
+    "dm_os_file_exists",
+    "fn_dblog",
+    "fn_dblog_xtp",
+    "fn_dump_dblog",
+    "fn_get_audit_file",
+    "fn_get_sql",
+    "fn_trace_gettable",
+    "fn_xe_file_target_read_file",
+    "sql_logins",
+];
+
+/// Query hints that can starve the server, refused inside `OPTION (...)`.
+/// In lower case and sorted.
+const DENIED_HINTS: &[&str] = &[
+    "max_grant_percent",
+    "maxdop",
+    "min_grant_percent",
+    "querytraceon",
+];
+
+/// The text of a word or quoted name, lower case, without its brackets or
+/// quotes.
+fn name_of(text: &str, t: &Token) -> String {
+    let raw = lexer::src(text, t);
+    let inner = match (t.kind, raw.chars().next()) {
+        (Kind::Quoted, Some('[')) => raw[1..raw.len() - 1].replace("]]", "]"),
+        (Kind::Quoted, Some(q)) => {
+            raw[1..raw.len() - 1].replace(&format!("{q}{q}"), &q.to_string())
+        }
+        _ => raw.to_string(),
+    };
+    inner.to_lowercase()
+}
 
 /// Longest entry of `FORBIDDEN`; longer words cannot match.
 const MAX_FORBIDDEN_LEN: usize = 14;
@@ -344,6 +399,8 @@ fn check_batch(
     // Dots in the dotted name being read, and whether the last token was one.
     let mut dots = 0u32;
     let mut after_dot = false;
+    // Depth inside the parentheses of an `OPTION (...)` clause.
+    let mut option_depth: Option<u32> = None;
 
     for (i, t) in tokens.iter().enumerate() {
         if limit.is_some_and(|l| t.start >= l) {
@@ -383,11 +440,28 @@ fn check_batch(
             continue;
         }
 
+        if matches!(t.kind, Kind::Word | Kind::Quoted) {
+            let name = name_of(text, t);
+            if DENIED_NAMES.binary_search(&name.as_str()).is_ok()
+                || (option_depth.is_some() && DENIED_HINTS.binary_search(&name.as_str()).is_ok())
+            {
+                return Some(found(ReadOnlyReason::Forbidden, word_of(text, t), line));
+            }
+        }
+
         match t.kind {
-            Kind::Punct if is_punct(text, t, "(") => depth += 1,
+            Kind::Punct if is_punct(text, t, "(") => {
+                depth += 1;
+                if option_depth.is_none() && i > 0 && is_keyword(text, &tokens[i - 1], "OPTION") {
+                    option_depth = Some(depth);
+                }
+            }
             Kind::Punct if is_punct(text, t, ")") => {
                 if depth == 0 {
                     return Some(found(ReadOnlyReason::Unparsed, word_of(text, t), line));
+                }
+                if option_depth == Some(depth) {
+                    option_depth = None;
                 }
                 depth -= 1;
             }
@@ -508,12 +582,71 @@ mod tests {
             "SELECT 1\nGO\nSELECT 2",
             "SELECT OBJECT_DEFINITION(OBJECT_ID('dbo.v'))",
             "WITH XMLNAMESPACES ('urn:x' AS x) SELECT 1",
-            "SELECT * FROM sys.dm_exec_sessions OPTION (MAXDOP 1)",
+            "SELECT * FROM sys.dm_exec_sessions OPTION (RECOMPILE, HASH JOIN)",
+            "SELECT maxdop, [min_grant_percent] FROM t OPTION (RECOMPILE)",
+            "SELECT 'sys.sql_logins', 'fn_dblog' AS s",
+            "SELECT name FROM sys.sql_modules",
             ";WITH c AS (SELECT 1 x) SELECT * FROM c",
             "SELECT 1;;\n;SELECT 2",
         ] {
             check(sql, None);
         }
+    }
+
+    #[test]
+    fn denied_lists_are_sorted_and_lower_case() {
+        for list in [DENIED_NAMES, DENIED_HINTS] {
+            assert!(list.windows(2).all(|w| w[0] < w[1]));
+            assert!(list.iter().all(|w| *w == w.to_lowercase()));
+        }
+    }
+
+    #[test]
+    fn refuses_file_secret_and_sql_text_sources() {
+        for sql in [
+            r"SELECT * FROM sys.fn_xe_file_target_read_file('\\h\s\x.xel', NULL, NULL, NULL)",
+            "SELECT * FROM fn_xe_file_target_read_file('a', NULL, NULL, NULL)",
+            "SELECT * FROM [sys].[fn_get_audit_file]('a', DEFAULT, DEFAULT)",
+            "SELECT * FROM sys.\"FN_TRACE_GETTABLE\"('a', 1)",
+            "SELECT * FROM fn_dump_dblog(NULL)",
+            "SELECT * FROM sys.fn_dblog(NULL, NULL)",
+            "SELECT * FROM sys.dm_os_enumerate_filesystem('/', '*')",
+            "SELECT * FROM sys.dm_os_file_exists('/etc/passwd')",
+            "SELECT * FROM sys.fn_get_sql(NULL)",
+            "SELECT name, password_hash FROM sys.sql_logins",
+            "SELECT name, password_hash FROM master.sys.[SQL_Logins]",
+            "SELECT t.text FROM sys.dm_exec_requests r CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t",
+            "SELECT * FROM sys.dm_exec_input_buffer(52, NULL)",
+            "SELECT * FROM sys . dm_exec_sql_text(NULL)",
+        ] {
+            let v = violation(sql).unwrap_or_else(|| panic!("accepted: {sql}"));
+            assert_eq!(v.reason, Forbidden, "{sql}");
+        }
+    }
+
+    #[test]
+    fn refuses_starving_hints_only_inside_option() {
+        for sql in [
+            "SELECT * FROM t OPTION (MAXDOP 1)",
+            "SELECT * FROM t option(maxdop 0)",
+            "SELECT * FROM t OPTION (RECOMPILE, MIN_GRANT_PERCENT = 100)",
+            "SELECT * FROM t OPTION (MAX_GRANT_PERCENT = 100)",
+            "SELECT * FROM t OPTION (QUERYTRACEON 9481)",
+            "SELECT * FROM t OPTION (HASH JOIN, [MAXDOP] 1)",
+            "SELECT * FROM (SELECT 1 a) x OPTION ((MAXDOP 1))",
+        ] {
+            let v = violation(sql).unwrap_or_else(|| panic!("accepted: {sql}"));
+            assert_eq!(v.reason, Forbidden, "{sql}");
+        }
+        check(
+            "SELECT * FROM t OPTION (USE HINT ('X'))",
+            Some((Forbidden, Some("USE"))),
+        );
+        check("SELECT maxdop FROM t OPTION (RECOMPILE) ", None);
+        check(
+            "SELECT * FROM t OPTION (RECOMPILE); SELECT maxdop FROM t",
+            None,
+        );
     }
 
     #[test]
