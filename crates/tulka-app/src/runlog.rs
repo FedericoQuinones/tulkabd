@@ -140,11 +140,20 @@ pub async fn poll_ai_runs(state: &AppState) -> AiRunPoll {
     let store = state.runlog.clone();
     let seen = state.ai_runs_seen.load(Ordering::Acquire);
     let Ok((seen, poll)) = blocking(move || {
-        // Reading the tip is what notices a log that moved to its file.
-        let tip = store.max_id();
+        // Reading the log is what notices that it moved to its file. Entries
+        // read from the memory log before the move are never AI ones, so
+        // dropping them when it did move loses nothing.
+        let entries = if seen < 0 {
+            Vec::new()
+        } else {
+            store.list_after(seen, Some(RunSource::Ai), MAX_POLL)
+        };
+        if seen < 0 {
+            store.max_id();
+        }
         if store.take_reopened() {
             return (
-                tip,
+                store.max_id(),
                 AiRunPoll {
                     entries: Vec::new(),
                     reset: true,
@@ -152,9 +161,8 @@ pub async fn poll_ai_runs(state: &AppState) -> AiRunPoll {
             );
         }
         if seen < 0 {
-            return (tip, AiRunPoll::default());
+            return (store.max_id(), AiRunPoll::default());
         }
-        let entries = store.list_after(seen, Some(RunSource::Ai), MAX_POLL);
         (
             entries.last().map_or(seen, |e| e.id),
             AiRunPoll {
