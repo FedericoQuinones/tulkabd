@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, ErrorCode, Row};
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,8 @@ const RUNLOG_VERSION: i64 = 1;
 /// How long the app waits on a file locked by another process. The MCP
 /// server writes to the same file, and on Windows a commit can hold the lock
 /// for a few hundred milliseconds.
+/// How often a store that fell back to memory tries its file again.
+const REOPEN_EVERY: Duration = Duration::from_secs(2);
 const BUSY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How long another process (the MCP server) waits on a busy file before it
@@ -156,6 +158,15 @@ pub struct NewRun {
 /// statement text only, never passwords or result rows. Every call is blocking.
 pub struct RunLogStore {
     conn: Mutex<Connection>,
+    /// Set while the log lives in memory only because the file could not be
+    /// opened; the next calls try the file again.
+    retry: Mutex<Option<Retry>>,
+}
+
+/// The file a store fell back from, and when it last tried it.
+struct Retry {
+    path: PathBuf,
+    last: Instant,
 }
 
 /// Why the run log file could not be opened.
@@ -368,8 +379,9 @@ impl RunLogStore {
     /// Never fails. A file that is not a valid database or has another
     /// `user_version` is deleted (with its `-wal`/`-shm` sidecars) and starts
     /// empty. A file that cannot be opened right now (locked by another
-    /// process, unreadable, an I/O error) is kept untouched and the log
-    /// lives in memory. The file is private to its owner on Unix.
+    /// process, unreadable, an I/O error) is kept untouched; the log lives in
+    /// memory and tries the file again every few seconds, moving what it
+    /// holds into the file once it opens. The file is private to its owner on Unix.
     pub fn open(path: &Path) -> RunLogStore {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -386,9 +398,55 @@ impl RunLogStore {
         match conn {
             Ok(conn) => RunLogStore {
                 conn: Mutex::new(conn),
+                retry: Mutex::new(None),
             },
-            Err(_) => Self::in_memory(),
+            Err(_) => {
+                let store = Self::in_memory();
+                *store.retry.lock().unwrap_or_else(|e| e.into_inner()) = Some(Retry {
+                    path: path.to_path_buf(),
+                    last: Instant::now(),
+                });
+                store
+            }
         }
+    }
+
+    /// When the log fell back to memory, tries the file again (at most every
+    /// `REOPEN_EVERY`). On success the entries recorded meanwhile move into
+    /// the file. Never removes the file.
+    fn try_reopen(&self) {
+        let mut retry = self.retry.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(pending) = retry.as_mut() else {
+            return;
+        };
+        if pending.last.elapsed() < REOPEN_EVERY {
+            return;
+        }
+        pending.last = Instant::now();
+        let Ok(file) = try_open(&pending.path) else {
+            return;
+        };
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        for e in list_entries(&conn, None, u32::MAX).into_iter().rev() {
+            let _ = insert_run(
+                &file,
+                &NewRun {
+                    at_ms: e.at_ms,
+                    connection_id: e.connection_id,
+                    connection_name: e.connection_name,
+                    color: e.color,
+                    database: e.database,
+                    sql: e.sql,
+                    outcome: e.outcome,
+                    rows: e.rows,
+                    elapsed_ms: e.elapsed_ms,
+                    source: e.source,
+                    client: e.client,
+                },
+            );
+        }
+        *conn = file;
+        *retry = None;
     }
 
     /// `<data dir>/runlog.db`; in memory when there is no data dir.
@@ -412,10 +470,12 @@ impl RunLogStore {
         let _ = conn.pragma_update(None, "secure_delete", "ON");
         RunLogStore {
             conn: Mutex::new(conn),
+            retry: Mutex::new(None),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, Connection> {
+        self.try_reopen();
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -850,6 +910,32 @@ mod tests {
             other.execute_batch("ROLLBACK").unwrap();
         }
         assert_eq!(RunLogStore::open(&path).list(None, 10)[0].sql, "text");
+    }
+
+    #[test]
+    fn store_that_fell_back_to_memory_moves_to_the_file_once_it_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        RunLogStore::open(&path).insert(&run("old", 1)).unwrap();
+        let other = Connection::open(&path).unwrap();
+        other
+            .pragma_update(None, "locking_mode", "EXCLUSIVE")
+            .unwrap();
+        other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let store = RunLogStore::open(&path);
+        store.insert(&run("during", 2)).unwrap();
+        other.execute_batch("ROLLBACK").unwrap();
+        drop(other);
+        std::thread::sleep(REOPEN_EVERY + Duration::from_millis(200));
+        let sqls: Vec<_> = store.list(None, 10).into_iter().map(|e| e.sql).collect();
+        assert_eq!(sqls, ["during", "old"]);
+        // What was recorded in memory is now in the file.
+        let in_file: Vec<_> = RunLogStore::open(&path)
+            .list(None, 10)
+            .into_iter()
+            .map(|e| e.sql)
+            .collect();
+        assert_eq!(in_file, ["during", "old"]);
     }
 
     #[test]
