@@ -50,6 +50,7 @@
   // Every finished run, of any tab, joins the Run log.
   void onAppEvent((e) => {
     if (e.kind === "runLogged") runLog.prepend(e.entry);
+    else if (e.kind === "runLogReset") void runLog.reload();
   }).catch(() => {});
   void queries.reload();
   void connections.loadStartupError();

@@ -384,7 +384,7 @@
   "settings.envColor": "{env} color",
   "settings.envGuard": "{env} guard",
   "settings.envAi": "{env} AI access",
-  "settings.envNote": "Changes apply to new connections.",
+  "settings.envNote": "Changes apply to new connections. Production connections start at No access; you can allow Read only per connection.",
   "settings.execution": "Execution",
   "settings.timeout": "Query timeout (seconds, 0 = no limit)",
   "settings.maxRows": "Rows kept in memory",

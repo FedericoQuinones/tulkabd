@@ -23,10 +23,10 @@ pub use server::{InFlight, TulkaServer};
 /// queries and write their run log entries.
 const DRAIN_LIMIT: Duration = Duration::from_secs(10);
 
-/// Runs the server on standard input and output until the client closes
+/// Runs the server (reporting `version`, the app's) on standard input and output until the client closes
 /// them. Returns the process exit code: 0 when the client left, 1 when the
 /// transport failed, 2 when there is no standard input and output to serve.
-pub fn main_stdio() -> i32 {
+pub fn main_stdio(version: &str) -> i32 {
     if !has_stdio() {
         report_missing_stdio();
         return 2;
@@ -40,7 +40,7 @@ pub fn main_stdio() -> i32 {
         Err(e) => return fail(&format!("cannot start the async runtime: {e}")),
     };
     runtime.block_on(async {
-        let server = TulkaServer::new(Arc::new(AiState::open_default()));
+        let server = TulkaServer::new(Arc::new(AiState::open_default())).with_version(version);
         serve(server, stdio()).await
     })
 }

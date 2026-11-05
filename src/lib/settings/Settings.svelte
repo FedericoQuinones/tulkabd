@@ -295,10 +295,11 @@
             </select>
             <select
               aria-label={t("settings.envAi", { env: t(env.label) })}
-              value={style.aiAccess}
+              value={env.id === "production" ? "none" : style.aiAccess}
+              disabled={env.id === "production"}
               onchange={(e) => setEnvironment(env.id, { aiAccess: e.currentTarget.value as AiAccess })}
             >
-              {#each aiLevels as a (a)}<option value={a} selected={style.aiAccess === a}>{t(`ai.${a}`)}</option>{/each}
+              {#each aiLevels as a (a)}<option value={a} selected={(env.id === "production" ? "none" : style.aiAccess) === a}>{t(`ai.${a}`)}</option>{/each}
             </select>
           </div>
         </div>

@@ -122,23 +122,59 @@ pub async fn prune_run_log(state: &AppState) {
 /// Most AI entries one poll returns.
 const MAX_POLL: u32 = 200;
 
+/// What [`poll_ai_runs`] found.
+#[derive(Debug, Default)]
+pub struct AiRunPoll {
+    /// The entries the MCP process logged since the last call, oldest first.
+    pub entries: Vec<RunLogEntry>,
+    /// The run log moved from memory to its file, so the ids the window holds
+    /// are stale: it must read the log again. No entries come with it.
+    pub reset: bool,
+}
+
 /// The entries the MCP process logged since the last call, oldest first.
 /// The first call only notes where the log ends and returns nothing, so the
-/// history from before this launch is not announced again.
-pub async fn poll_ai_runs(state: &AppState) -> Vec<RunLogEntry> {
+/// history from before this launch is not announced again; the same goes for
+/// the call that finds the log moved to its file, which also sets `reset`.
+pub async fn poll_ai_runs(state: &AppState) -> AiRunPoll {
     let store = state.runlog.clone();
     let seen = state.ai_runs_seen.load(Ordering::Acquire);
-    let Ok((seen, entries)) = blocking(move || {
+    let Ok((seen, poll)) = blocking(move || {
+        // Reading the log is what notices that it moved to its file. Entries
+        // read from the memory log before the move are never AI ones, so
+        // dropping them when it did move loses nothing.
+        let entries = if seen < 0 {
+            Vec::new()
+        } else {
+            store.list_after(seen, Some(RunSource::Ai), MAX_POLL)
+        };
         if seen < 0 {
-            return (store.max_id(), Vec::new());
+            store.max_id();
         }
-        let entries = store.list_after(seen, Some(RunSource::Ai), MAX_POLL);
-        (entries.last().map_or(seen, |e| e.id), entries)
+        if store.take_reopened() {
+            return (
+                store.max_id(),
+                AiRunPoll {
+                    entries: Vec::new(),
+                    reset: true,
+                },
+            );
+        }
+        if seen < 0 {
+            return (store.max_id(), AiRunPoll::default());
+        }
+        (
+            entries.last().map_or(seen, |e| e.id),
+            AiRunPoll {
+                entries,
+                reset: false,
+            },
+        )
     })
     .await
     else {
-        return Vec::new();
+        return AiRunPoll::default();
     };
     state.ai_runs_seen.store(seen, Ordering::Release);
-    entries
+    poll
 }

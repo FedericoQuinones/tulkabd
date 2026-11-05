@@ -148,6 +148,11 @@ fn serves_the_tools_over_stdio() {
         "slow initialize"
     );
     assert!(init["result"]["serverInfo"].is_object(), "{init}");
+    assert_eq!(
+        init["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION"),
+        "{init}"
+    );
     assert!(init["result"]["instructions"].is_string(), "{init}");
 
     client.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));

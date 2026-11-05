@@ -240,7 +240,8 @@ export type AppEvent =
   | { kind: "explorerStatus"; connectionId: string; status: ExplorerStatus; message: string | null }
   | { kind: "indexProgress"; connectionId: string; database: string; done: boolean; noAccess: boolean }
   | { kind: "indexIdle"; connectionId: string }
-  | { kind: "runLogged"; entry: RunLogEntry };
+  | { kind: "runLogged"; entry: RunLogEntry }
+  | { kind: "runLogReset" };
 
 export type RunLogOutcome = "ok" | "error" | "cancelled" | "blocked" | "disconnected";
 /** One statement run, with where it ran when it ran. Text only: never passwords or rows. */

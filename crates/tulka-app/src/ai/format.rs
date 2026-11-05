@@ -94,9 +94,10 @@ pub(crate) fn not_run(violation: &ReadOnlyViolation) -> String {
         ReadOnlyReason::LinkedServer => {
             format!("Not run: four-part names (linked servers) are not allowed (line {line}).")
         }
-        ReadOnlyReason::Unparsed => "Not run: the query has an unclosed string, identifier or comment. \
-             Parentheses must balance too, and names with accents or other non-ASCII \
-             letters must be written in [brackets], for example [año]."
+        ReadOnlyReason::Unparsed => "Not run: tulkabd could not read the query safely. Check for an unclosed \
+             string, identifier or comment and unbalanced parentheses. Put a space between a \
+             number and the word after it (write 1 AS x, not 1AS x). Write names with spaces, \
+             accents or other unusual characters in [brackets], for example [año]."
             .into(),
         ReadOnlyReason::Empty => "Not run: the query is empty.".into(),
         ReadOnlyReason::Unsupported => {
@@ -112,6 +113,9 @@ pub(crate) fn timed_out(seconds: u32) -> String {
 pub(crate) const CANCELLED: &str = "The query was cancelled.";
 
 pub(crate) const OUTPUT_CUT: &str = "Output cut at 100,000 characters; narrow the query.";
+
+/// The same for the tools that look things up rather than run SQL.
+pub(crate) const OUTPUT_CUT_SEARCH: &str = "Output cut at 100,000 characters; narrow the search.";
 
 /// Marks a result set that has more rows than were returned.
 pub(crate) const LIMIT_REACHED: &str =

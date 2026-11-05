@@ -13,7 +13,7 @@ fn main() {
             eprintln!("usage: tulkabd mcp");
             std::process::exit(2);
         }
-        std::process::exit(tulka_mcp::main_stdio());
+        std::process::exit(tulka_mcp::main_stdio(env!("CARGO_PKG_VERSION")));
     }
     // On Wayland with NVIDIA, WebKitGTK's DMABUF renderer aborts with
     // "Gdk Error 71 (Protocol error)", so turn it off unless the user chose.

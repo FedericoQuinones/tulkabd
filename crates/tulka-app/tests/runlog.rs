@@ -317,28 +317,65 @@ fn shared_fixture() -> (AppState, SharedRunLog, tempfile::TempDir) {
 async fn poll_ai_runs_skips_history_then_returns_new_ai_entries() {
     let (state, shared, _dir) = shared_fixture();
     shared.insert(&new_run("old", RunSource::Ai)).unwrap();
-    assert!(poll_ai_runs(&state).await.is_empty());
-    assert!(poll_ai_runs(&state).await.is_empty());
+    assert!(poll_ai_runs(&state).await.entries.is_empty());
+    assert!(poll_ai_runs(&state).await.entries.is_empty());
     shared.insert(&new_run("a", RunSource::Ai)).unwrap();
     shared.insert(&new_run("b", RunSource::Ai)).unwrap();
-    let got = poll_ai_runs(&state).await;
+    let got = poll_ai_runs(&state).await.entries;
     assert_eq!(
         got.iter().map(|e| e.sql.as_str()).collect::<Vec<_>>(),
         ["a", "b"]
     );
     assert_eq!(got[0].client.as_deref(), Some("claude"));
-    assert!(poll_ai_runs(&state).await.is_empty());
+    assert!(poll_ai_runs(&state).await.entries.is_empty());
 }
 
 #[tokio::test]
 async fn poll_ai_runs_ignores_app_entries() {
     let (state, shared, _dir) = shared_fixture();
-    assert!(poll_ai_runs(&state).await.is_empty());
+    assert!(poll_ai_runs(&state).await.entries.is_empty());
     shared.insert(&new_run("mine", RunSource::App)).unwrap();
     shared.insert(&new_run("theirs", RunSource::Ai)).unwrap();
     shared.insert(&new_run("mine2", RunSource::App)).unwrap();
-    let got = poll_ai_runs(&state).await;
+    let got = poll_ai_runs(&state).await.entries;
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].sql, "theirs");
-    assert!(poll_ai_runs(&state).await.is_empty());
+    assert!(poll_ai_runs(&state).await.entries.is_empty());
+}
+
+#[tokio::test]
+async fn poll_ai_runs_resets_instead_of_flooding_when_the_log_moves_to_its_file() {
+    use rusqlite::Connection;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runlog.db");
+    let shared = SharedRunLog::open(&path);
+    shared.insert(&new_run("old", RunSource::Ai)).unwrap();
+    drop(shared);
+    // The file is locked while the app starts, so its log falls back to memory.
+    let other = Connection::open(&path).unwrap();
+    other
+        .pragma_update(None, "locking_mode", "EXCLUSIVE")
+        .unwrap();
+    other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let state = AppState::new(
+        ConfigStore::at(dir.path().join("config.json")),
+        Arc::new(MemoryStore::default()),
+        vec![Arc::new(FakeDriver)],
+    )
+    .unwrap()
+    .with_runlog(Arc::new(RunLogStore::open(&path)));
+    assert!(poll_ai_runs(&state).await.entries.is_empty());
+    other.execute_batch("ROLLBACK").unwrap();
+    drop(other);
+    tokio::time::sleep(std::time::Duration::from_millis(2300)).await;
+    let poll = poll_ai_runs(&state).await;
+    assert!(poll.reset);
+    assert!(poll.entries.is_empty());
+    // The old AI history is not announced; later entries are.
+    assert!(!poll_ai_runs(&state).await.reset);
+    let shared = SharedRunLog::open(&path);
+    shared.insert(&new_run("new", RunSource::Ai)).unwrap();
+    let poll = poll_ai_runs(&state).await;
+    assert_eq!(poll.entries.len(), 1);
+    assert_eq!(poll.entries[0].sql, "new");
 }

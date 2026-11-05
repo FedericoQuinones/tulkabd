@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, ErrorCode, Row};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,9 @@ const RUNLOG_VERSION: i64 = 1;
 /// server writes to the same file, and on Windows a commit can hold the lock
 /// for a few hundred milliseconds.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How often a store that fell back to memory tries its file again.
+const REOPEN_EVERY: Duration = Duration::from_secs(2);
 
 /// How long another process (the MCP server) waits on a busy file before it
 /// gives up on one write.
@@ -156,6 +160,17 @@ pub struct NewRun {
 /// statement text only, never passwords or result rows. Every call is blocking.
 pub struct RunLogStore {
     conn: Mutex<Connection>,
+    /// Set while the log lives in memory only because the file could not be
+    /// opened; the next calls try the file again.
+    retry: Mutex<Option<Retry>>,
+    /// Set when the file replaced the in-memory log, which changes the ids.
+    reopened: AtomicBool,
+}
+
+/// The file a store fell back from, and when it last tried it.
+struct Retry {
+    path: PathBuf,
+    last: Instant,
 }
 
 /// Why the run log file could not be opened.
@@ -285,6 +300,30 @@ fn cap_sql(sql: &str) -> (&str, bool) {
     (&sql[..end], true)
 }
 
+/// Writes `e` as it is (the id is assigned again), keeping its truncation flag.
+fn insert_entry(conn: &Connection, e: &RunLogEntry) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO run (at_ms, connection_id, connection_name, color, database, sql,
+                          sql_truncated, outcome, rows, elapsed_ms, source, client)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            e.at_ms,
+            e.connection_id,
+            e.connection_name,
+            e.color,
+            e.database,
+            e.sql,
+            e.sql_truncated,
+            e.outcome.as_str(),
+            e.rows.map(|n| n as i64),
+            e.elapsed_ms.map(|n| n as i64),
+            e.source.as_str(),
+            e.client,
+        ],
+    )
+    .map(|_| ())
+}
+
 /// Writes one run, cutting its text and client name to their caps.
 fn insert_run(conn: &Connection, run: &NewRun) -> Result<RunLogEntry, String> {
     let (sql, sql_truncated) = cap_sql(&run.sql);
@@ -368,8 +407,9 @@ impl RunLogStore {
     /// Never fails. A file that is not a valid database or has another
     /// `user_version` is deleted (with its `-wal`/`-shm` sidecars) and starts
     /// empty. A file that cannot be opened right now (locked by another
-    /// process, unreadable, an I/O error) is kept untouched and the log
-    /// lives in memory. The file is private to its owner on Unix.
+    /// process, unreadable, an I/O error) is kept untouched; the log lives in
+    /// memory and tries the file again every few seconds, moving what it
+    /// holds into the file once it opens. The file is private to its owner on Unix.
     pub fn open(path: &Path) -> RunLogStore {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -386,9 +426,52 @@ impl RunLogStore {
         match conn {
             Ok(conn) => RunLogStore {
                 conn: Mutex::new(conn),
+                retry: Mutex::new(None),
+                reopened: AtomicBool::new(false),
             },
-            Err(_) => Self::in_memory(),
+            Err(_) => {
+                let store = Self::in_memory();
+                *store.retry.lock().unwrap_or_else(|e| e.into_inner()) = Some(Retry {
+                    path: path.to_path_buf(),
+                    last: Instant::now(),
+                });
+                store
+            }
         }
+    }
+
+    /// When the log fell back to memory, tries the file again (at most every
+    /// `REOPEN_EVERY`). On success the entries recorded meanwhile move into
+    /// the file. Never removes the file.
+    fn try_reopen(&self) {
+        let mut retry = self.retry.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(pending) = retry.as_mut() else {
+            return;
+        };
+        if pending.last.elapsed() < REOPEN_EVERY {
+            return;
+        }
+        pending.last = Instant::now();
+        let Ok(file) = try_open(&pending.path) else {
+            return;
+        };
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // All or nothing: on a failure the memory log stays as it is and the
+        // move is tried again later, so nothing is lost or duplicated.
+        if file.execute_batch("BEGIN IMMEDIATE").is_err() {
+            return;
+        }
+        let moved = list_entries(&conn, None, u32::MAX)
+            .iter()
+            .rev()
+            .try_for_each(|e| insert_entry(&file, e));
+        if moved.is_err() || file.execute_batch("COMMIT").is_err() {
+            let _ = file.execute_batch("ROLLBACK");
+            return;
+        }
+        *conn = file;
+        *retry = None;
+        self.reopened.store(true, Ordering::Release);
     }
 
     /// `<data dir>/runlog.db`; in memory when there is no data dir.
@@ -412,10 +495,19 @@ impl RunLogStore {
         let _ = conn.pragma_update(None, "secure_delete", "ON");
         RunLogStore {
             conn: Mutex::new(conn),
+            retry: Mutex::new(None),
+            reopened: AtomicBool::new(false),
         }
     }
 
+    /// Whether the file replaced the in-memory log since the last call. The
+    /// ids of the entries are then not the ones handed out before.
+    pub fn take_reopened(&self) -> bool {
+        self.reopened.swap(false, Ordering::AcqRel)
+    }
+
     fn lock(&self) -> MutexGuard<'_, Connection> {
+        self.try_reopen();
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -850,6 +942,56 @@ mod tests {
             other.execute_batch("ROLLBACK").unwrap();
         }
         assert_eq!(RunLogStore::open(&path).list(None, 10)[0].sql, "text");
+    }
+
+    #[test]
+    fn store_that_fell_back_to_memory_moves_to_the_file_once_it_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        RunLogStore::open(&path).insert(&run("old", 1)).unwrap();
+        let other = Connection::open(&path).unwrap();
+        other
+            .pragma_update(None, "locking_mode", "EXCLUSIVE")
+            .unwrap();
+        other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let store = RunLogStore::open(&path);
+        store.insert(&run("during", 2)).unwrap();
+        other.execute_batch("ROLLBACK").unwrap();
+        drop(other);
+        std::thread::sleep(REOPEN_EVERY + Duration::from_millis(200));
+        let sqls: Vec<_> = store.list(None, 10).into_iter().map(|e| e.sql).collect();
+        assert_eq!(sqls, ["during", "old"]);
+        // What was recorded in memory is now in the file.
+        let in_file: Vec<_> = RunLogStore::open(&path)
+            .list(None, 10)
+            .into_iter()
+            .map(|e| e.sql)
+            .collect();
+        assert_eq!(in_file, ["during", "old"]);
+        assert!(store.take_reopened());
+        assert!(!store.take_reopened());
+    }
+
+    #[test]
+    fn moving_to_the_file_keeps_the_truncation_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.db");
+        RunLogStore::open(&path);
+        let other = Connection::open(&path).unwrap();
+        other
+            .pragma_update(None, "locking_mode", "EXCLUSIVE")
+            .unwrap();
+        other.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let store = RunLogStore::open(&path);
+        let big = "x".repeat(MAX_LOGGED_SQL_BYTES + 10);
+        assert!(store.insert(&run(&big, 1)).unwrap().sql_truncated);
+        other.execute_batch("ROLLBACK").unwrap();
+        drop(other);
+        std::thread::sleep(REOPEN_EVERY + Duration::from_millis(200));
+        let got = store.list(None, 10);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].sql_truncated);
+        assert_eq!(got[0].sql.len(), MAX_LOGGED_SQL_BYTES);
     }
 
     #[test]
