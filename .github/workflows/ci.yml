@@ -6,6 +6,10 @@ on:
     tags: ['v*']
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -22,6 +26,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: System libraries
         run: |
           sudo apt-get update
@@ -40,6 +46,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The Windows-only code (Windows authentication) is linted and tested only here.
       - run: cargo clippy -p tulka-core -p tulka-mssql -p tulka-store -p tulka-mcp -p tulka-app --all-targets -- -D warnings
       - run: cargo test -p tulka-core -p tulka-mssql -p tulka-store -p tulka-mcp -p tulka-app
@@ -65,6 +73,8 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: System libraries
         if: matrix.os == 'ubuntu-latest'
         run: |
