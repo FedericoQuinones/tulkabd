@@ -6,20 +6,31 @@ export interface PaletteGroup {
   /** Folder names from the root, then the connection and the database. */
   path: string[];
   connected: boolean;
+  /** The best hits of the group, at most `MAX_HITS_PER_GROUP`. */
   hits: PaletteHit[];
+  /** Further hits of the group that are not shown. */
+  hidden: number;
 }
 
-/** Groups hits by connection and database; groups and their hits keep the ranking order. */
+/** So one database full of matches does not push the other databases' best hits out of view. */
+export const MAX_HITS_PER_GROUP = 8;
+
+/**
+ * Groups hits by connection and database. Hits arrive best first, so a group
+ * is placed where its best hit ranks and keeps its hits in ranking order; only
+ * the first `MAX_HITS_PER_GROUP` of each are kept, the rest are counted.
+ */
 export function groupHits(hits: PaletteHit[]): PaletteGroup[] {
   const groups = new Map<string, PaletteGroup>();
   for (const h of hits) {
     const key = JSON.stringify([h.connectionId, h.database]);
     let g = groups.get(key);
     if (!g) {
-      g = { key, path: [...h.folderPath, h.connectionName, h.database], connected: h.connected, hits: [] };
+      g = { key, path: [...h.folderPath, h.connectionName, h.database], connected: h.connected, hits: [], hidden: 0 };
       groups.set(key, g);
     }
-    g.hits.push(h);
+    if (g.hits.length < MAX_HITS_PER_GROUP) g.hits.push(h);
+    else g.hidden++;
   }
   return [...groups.values()];
 }

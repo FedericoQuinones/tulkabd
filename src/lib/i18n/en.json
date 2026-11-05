@@ -335,6 +335,7 @@
   "palette.placeholder": "Search tables, views, procedures and saved queries (Folder/ to scope)",
   "palette.results": "Matching objects",
   "palette.notConnected": "not connected",
+  "palette.moreHits": "{n} more here: refine the search",
   "palette.none": "Nothing matches",
   "palette.kind.table": "table",
   "palette.kind.view": "view",
