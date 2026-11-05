@@ -37,6 +37,8 @@ jobs:
       - run: pnpm vitest run
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The vendored Tiberius fork sits outside the workspace, so its unit tests run separately.
+      - run: cargo test --manifest-path vendor/tiberius/Cargo.toml --no-default-features --features "tds73 rustls chrono" --lib
 
   test-windows:
     runs-on: windows-latest
