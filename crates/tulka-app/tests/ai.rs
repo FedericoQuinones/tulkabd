@@ -1043,6 +1043,18 @@ async fn list_connections_warns_about_an_administrator_login_once() {
     assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
 }
 
+#[tokio::test]
+async fn an_unreachable_server_does_not_slow_list_connections_every_time() {
+    let f = Fixture::standard();
+    *f.driver.script.databases.lock().unwrap() = None;
+    list_connections(&f.state).await;
+    let asked = f.driver.script.connects.lock().unwrap().len();
+    assert_eq!(asked, 1);
+    let text = list_connections(&f.state).await.text;
+    assert!(!text.contains("Warning"));
+    assert_eq!(f.driver.script.connects.lock().unwrap().len(), asked);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_recreated_cache_file_is_read_again() {
@@ -1181,11 +1193,13 @@ async fn a_timeout_keeps_the_rows_received_before_it() {
 async fn cancelling_while_waiting_for_a_slot_is_logged_cancelled() {
     let f = Fixture::standard();
     let one = || {
-        run_query(
-            &f.state,
-            query("Local", "SELECT slow"),
-            tokio::time::sleep(Duration::from_millis(300)),
-        )
+        run_query(&f.state, query("Local", "SELECT slow"), async {
+            // Give up once four calls hold the slots, not after a delay.
+            while f.driver.script.connects.lock().unwrap().len() < 4 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        })
     };
     let outs = tokio::join!(one(), one(), one(), one(), one());
     assert!([&outs.0, &outs.1, &outs.2, &outs.3, &outs.4]
