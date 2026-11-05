@@ -155,16 +155,24 @@ const FORBIDDEN: &[&str] = &[
 /// log, or the SQL text of other sessions.
 const DENIED_NAMES: &[&str] = &[
     "dm_exec_input_buffer",
+    "dm_exec_query_plan",
+    "dm_exec_query_plan_stats",
     "dm_exec_sql_text",
+    "dm_exec_text_query_plan",
     "dm_os_enumerate_filesystem",
     "dm_os_file_exists",
     "fn_dblog",
     "fn_dblog_xtp",
     "fn_dump_dblog",
+    "fn_full_dblog",
     "fn_get_audit_file",
     "fn_get_sql",
+    "fn_msxe_read_event_stream",
     "fn_trace_gettable",
     "fn_xe_file_target_read_file",
+    "loginproperty",
+    "query_store_plan",
+    "query_store_query_text",
     "sql_logins",
 ];
 
@@ -188,7 +196,8 @@ fn name_of(text: &str, t: &Token) -> String {
         }
         _ => raw.to_string(),
     };
-    inner.to_lowercase()
+    // SQL Server ignores trailing spaces in an identifier: `[x ]` is `x`.
+    inner.trim_end().to_lowercase()
 }
 
 /// Longest entry of `FORBIDDEN`; longer words cannot match.
@@ -647,6 +656,8 @@ mod tests {
         assert_eq!(dbs("SELECT * FROM [Other DB].[dbo].[t]"), ["other db"]);
         assert_eq!(dbs("SELECT * FROM \"Other\".dbo.t"), ["other"]);
         assert_eq!(dbs("SELECT * FROM [a]]b].dbo.t"), ["a]b"]);
+        assert_eq!(dbs("SELECT * FROM [Other ].dbo.t"), ["other"]);
+        assert_eq!(dbs("SELECT * FROM \"Other  \"..t"), ["other"]);
         assert_eq!(dbs("SELECT * FROM Other..t"), ["other"]);
         assert_eq!(
             dbs("SELECT * FROM a . dbo . t, A.dbo.u, b.dbo.v"),
@@ -687,6 +698,17 @@ mod tests {
             "SELECT t.text FROM sys.dm_exec_requests r CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t",
             "SELECT * FROM sys.dm_exec_input_buffer(52, NULL)",
             "SELECT * FROM sys . dm_exec_sql_text(NULL)",
+            "SELECT * FROM sys.[sql_logins ]",
+            "SELECT * FROM [sys].[fn_get_audit_file  ]('a', DEFAULT, DEFAULT)",
+            "SELECT * FROM sys.\"sql_logins \"",
+            "SELECT LOGINPROPERTY('sa', 'PasswordHash')",
+            "SELECT * FROM sys.dm_exec_query_plan(0x)",
+            "SELECT * FROM sys.dm_exec_text_query_plan(0x, 0, -1)",
+            "SELECT * FROM sys.dm_exec_query_plan_stats(0x)",
+            "SELECT * FROM sys.query_store_query_text",
+            "SELECT * FROM sys.query_store_plan",
+            "SELECT * FROM fn_full_dblog(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+            "SELECT * FROM sys.fn_MSxe_read_event_stream('s', 0, 0)",
         ] {
             let v = violation(sql).unwrap_or_else(|| panic!("accepted: {sql}"));
             assert_eq!(v.reason, Forbidden, "{sql}");
