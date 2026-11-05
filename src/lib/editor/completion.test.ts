@@ -137,9 +137,12 @@ test("only the batch around the cursor is looked at", async () => {
   const sql = "SELECT 'a\nGO\n' FROM a x\nGO\nSELECT 1 FROM b y";
   expect(batchRange(sql, 0)).toEqual([0, sql.indexOf("\nGO\nSELECT 1")]);
   expect(batchRange(sql, sql.length)).toEqual([sql.indexOf("SELECT 1"), sql.length]);
-  // A cursor on the GO line is in the batch before it.
+  // A cursor on a GO line gets only that line, never the next batch.
   const go = "SELECT 1\nGO\nSELECT 2";
-  expect(batchRange(go, go.indexOf("GO") + 1)).toEqual([0, 8]);
+  expect(batchRange(go, go.indexOf("GO") + 1)).toEqual([9, 11]);
+  expect(batchRange("GO\nGO\nSELECT 1", 4)).toEqual([3, 5]);
+  expect(batchRange("GO\nSELECT 1", 1)).toEqual([0, 2]);
+  expect(await complete("SELECT 1\nGO -- hello wor|")).toBeNull();
   // A GO inside a string left open is part of the string, so there is no second batch.
   expect(await complete("SELECT 'x\nGO\nSEL|")).toBeNull();
 });
