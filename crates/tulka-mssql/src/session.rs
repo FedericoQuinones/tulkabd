@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use tiberius::error::Error as TdsError;
 use tiberius::{
-    AuthMethod, ColumnType, Config, EncryptionLevel, QueryItem, Row, SqlBrowser, ToSql,
+    AuthMethod, Config, EncryptionLevel, QueryItem, Row, SqlBrowser, ToSql,
 };
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
@@ -432,6 +432,7 @@ impl MssqlSession {
             receiver_gone: false,
             cancel: self.cancel.clone(),
             cancel_requested: self.cancel_requested.clone(),
+            error_sent: false,
         };
 
         let result = match self.client.as_mut() {
@@ -441,6 +442,7 @@ impl MssqlSession {
         let Err(e) = result else { return Ok(()) };
 
         match &e {
+            DriverError::Query { .. } if out.error_sent => {}
             DriverError::Query { message, line } => {
                 out.send(ExecEvent::Message {
                     kind: MessageKind::Error,
@@ -676,6 +678,9 @@ struct Emitter {
     receiver_gone: bool,
     cancel: tiberius::CancelHandle,
     cancel_requested: Arc<AtomicBool>,
+    /// Set once a server error was sent as a message, so that the error the
+    /// request ends with is not sent a second time.
+    error_sent: bool,
 }
 
 impl Emitter {
@@ -711,7 +716,6 @@ async fn run_script(client: &mut Client, sql: &str, out: &mut Emitter) -> Result
 /// The result set being streamed.
 struct ResultSet {
     index: u32,
-    types: Vec<ColumnType>,
 }
 
 /// Rows waiting to be sent.
@@ -778,21 +782,11 @@ async fn run_batch(
                         type_name: type_name(c.column_type()).to_string(),
                     })
                     .collect();
-                current = Some(ResultSet {
-                    index,
-                    types: meta.columns().iter().map(|c| c.column_type()).collect(),
-                });
+                current = Some(ResultSet { index });
                 out.send(ExecEvent::ResultStart { index, columns }).await;
             }
             Ok(Some(QueryItem::Row(row))) => {
-                let types = current.as_ref().map(|r| r.types.as_slice()).unwrap_or(&[]);
-                let values = row
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, data)| {
-                        to_value(data, types.get(i).copied().unwrap_or(ColumnType::Null))
-                    })
-                    .collect();
+                let values = row.into_iter().map(to_value).collect();
                 if buffer.rows.is_empty() {
                     buffer.deadline = Instant::now() + FLUSH_INTERVAL;
                 }
@@ -807,6 +801,21 @@ async fn run_batch(
                     kind: MessageKind::Info,
                     text: info.message,
                     line: line_of(info.line),
+                })
+                .await;
+            }
+            Ok(Some(QueryItem::Error(error))) => {
+                buffer.flush(index_of(&current), out).await;
+                // A fatal error ends the connection: report it as the error
+                // of the request, not as a message.
+                if error.class() >= FATAL_SEVERITY {
+                    return Err(request_error(TdsError::Server(error), line_of));
+                }
+                out.error_sent = true;
+                out.send(ExecEvent::Message {
+                    kind: MessageKind::Error,
+                    text: error.message().to_string(),
+                    line: line_of(error.line()),
                 })
                 .await;
             }

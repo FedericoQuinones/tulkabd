@@ -42,6 +42,34 @@ impl Collation {
         self.info
     }
 
+    /// tulka patch: decodes the bytes of a `char`/`varchar`/`text` value.
+    ///
+    /// Like `encoding()?.decode_without_bom_handling_and_without_replacement`,
+    /// plus the OEM code pages 437 and 850 of the `SQL_*_CP437_*` and
+    /// `SQL_*_CP850_*` collations, which `encoding_rs` does not have.
+    /// Returns `None` for an invalid byte sequence.
+    pub(crate) fn decode(&self, buf: &[u8]) -> crate::Result<Option<String>> {
+        if self.sort_id != 0 {
+            if let Some(table) = oem_table(self.sort_id) {
+                return Ok(Some(
+                    buf.iter()
+                        .map(|&b| {
+                            if b < 0x80 {
+                                char::from(b)
+                            } else {
+                                table[usize::from(b - 0x80)]
+                            }
+                        })
+                        .collect(),
+                ));
+            }
+        }
+        Ok(self
+            .encoding()?
+            .decode_without_bom_handling_and_without_replacement(buf)
+            .map(|s| s.into_owned()))
+    }
+
     /// return an encoding for a given collation
     pub fn encoding(&self) -> crate::Result<&'static Encoding> {
         let res = if self.sort_id == 0 {
@@ -294,6 +322,56 @@ pub fn lcid_to_encoding(locale: u16) -> Option<&'static Encoding> {
     }
 }
 
+/// tulka patch: the upper half (0x80..=0xFF) of the OEM code page used by a
+/// sort id: 437 for 30..=35, 850 for 40..=45, 49 and 55..=61.
+fn oem_table(sort_id: u8) -> Option<&'static [char; 128]> {
+    match sort_id {
+        30..=35 => Some(&CP437),
+        40..=45 | 49 | 55..=61 => Some(&CP850),
+        _ => None,
+    }
+}
+
+#[rustfmt::skip]
+static CP437: [char; 128] = [
+    '\u{00C7}', '\u{00FC}', '\u{00E9}', '\u{00E2}', '\u{00E4}', '\u{00E0}', '\u{00E5}', '\u{00E7}',
+    '\u{00EA}', '\u{00EB}', '\u{00E8}', '\u{00EF}', '\u{00EE}', '\u{00EC}', '\u{00C4}', '\u{00C5}',
+    '\u{00C9}', '\u{00E6}', '\u{00C6}', '\u{00F4}', '\u{00F6}', '\u{00F2}', '\u{00FB}', '\u{00F9}',
+    '\u{00FF}', '\u{00D6}', '\u{00DC}', '\u{00A2}', '\u{00A3}', '\u{00A5}', '\u{20A7}', '\u{0192}',
+    '\u{00E1}', '\u{00ED}', '\u{00F3}', '\u{00FA}', '\u{00F1}', '\u{00D1}', '\u{00AA}', '\u{00BA}',
+    '\u{00BF}', '\u{2310}', '\u{00AC}', '\u{00BD}', '\u{00BC}', '\u{00A1}', '\u{00AB}', '\u{00BB}',
+    '\u{2591}', '\u{2592}', '\u{2593}', '\u{2502}', '\u{2524}', '\u{2561}', '\u{2562}', '\u{2556}',
+    '\u{2555}', '\u{2563}', '\u{2551}', '\u{2557}', '\u{255D}', '\u{255C}', '\u{255B}', '\u{2510}',
+    '\u{2514}', '\u{2534}', '\u{252C}', '\u{251C}', '\u{2500}', '\u{253C}', '\u{255E}', '\u{255F}',
+    '\u{255A}', '\u{2554}', '\u{2569}', '\u{2566}', '\u{2560}', '\u{2550}', '\u{256C}', '\u{2567}',
+    '\u{2568}', '\u{2564}', '\u{2565}', '\u{2559}', '\u{2558}', '\u{2552}', '\u{2553}', '\u{256B}',
+    '\u{256A}', '\u{2518}', '\u{250C}', '\u{2588}', '\u{2584}', '\u{258C}', '\u{2590}', '\u{2580}',
+    '\u{03B1}', '\u{00DF}', '\u{0393}', '\u{03C0}', '\u{03A3}', '\u{03C3}', '\u{00B5}', '\u{03C4}',
+    '\u{03A6}', '\u{0398}', '\u{03A9}', '\u{03B4}', '\u{221E}', '\u{03C6}', '\u{03B5}', '\u{2229}',
+    '\u{2261}', '\u{00B1}', '\u{2265}', '\u{2264}', '\u{2320}', '\u{2321}', '\u{00F7}', '\u{2248}',
+    '\u{00B0}', '\u{2219}', '\u{00B7}', '\u{221A}', '\u{207F}', '\u{00B2}', '\u{25A0}', '\u{00A0}',
+];
+
+#[rustfmt::skip]
+static CP850: [char; 128] = [
+    '\u{00C7}', '\u{00FC}', '\u{00E9}', '\u{00E2}', '\u{00E4}', '\u{00E0}', '\u{00E5}', '\u{00E7}',
+    '\u{00EA}', '\u{00EB}', '\u{00E8}', '\u{00EF}', '\u{00EE}', '\u{00EC}', '\u{00C4}', '\u{00C5}',
+    '\u{00C9}', '\u{00E6}', '\u{00C6}', '\u{00F4}', '\u{00F6}', '\u{00F2}', '\u{00FB}', '\u{00F9}',
+    '\u{00FF}', '\u{00D6}', '\u{00DC}', '\u{00F8}', '\u{00A3}', '\u{00D8}', '\u{00D7}', '\u{0192}',
+    '\u{00E1}', '\u{00ED}', '\u{00F3}', '\u{00FA}', '\u{00F1}', '\u{00D1}', '\u{00AA}', '\u{00BA}',
+    '\u{00BF}', '\u{00AE}', '\u{00AC}', '\u{00BD}', '\u{00BC}', '\u{00A1}', '\u{00AB}', '\u{00BB}',
+    '\u{2591}', '\u{2592}', '\u{2593}', '\u{2502}', '\u{2524}', '\u{00C1}', '\u{00C2}', '\u{00C0}',
+    '\u{00A9}', '\u{2563}', '\u{2551}', '\u{2557}', '\u{255D}', '\u{00A2}', '\u{00A5}', '\u{2510}',
+    '\u{2514}', '\u{2534}', '\u{252C}', '\u{251C}', '\u{2500}', '\u{253C}', '\u{00E3}', '\u{00C3}',
+    '\u{255A}', '\u{2554}', '\u{2569}', '\u{2566}', '\u{2560}', '\u{2550}', '\u{256C}', '\u{00A4}',
+    '\u{00F0}', '\u{00D0}', '\u{00CA}', '\u{00CB}', '\u{00C8}', '\u{0131}', '\u{00CD}', '\u{00CE}',
+    '\u{00CF}', '\u{2518}', '\u{250C}', '\u{2588}', '\u{2584}', '\u{00A6}', '\u{00CC}', '\u{2580}',
+    '\u{00D3}', '\u{00DF}', '\u{00D4}', '\u{00D2}', '\u{00F5}', '\u{00D5}', '\u{00B5}', '\u{00FE}',
+    '\u{00DE}', '\u{00DA}', '\u{00DB}', '\u{00D9}', '\u{00FD}', '\u{00DD}', '\u{00AF}', '\u{00B4}',
+    '\u{00AD}', '\u{00B1}', '\u{2017}', '\u{00BE}', '\u{00B6}', '\u{00A7}', '\u{00F7}', '\u{00B8}',
+    '\u{00B0}', '\u{00A8}', '\u{00B7}', '\u{00B9}', '\u{00B3}', '\u{00B2}', '\u{25A0}', '\u{00A0}',
+];
+
 /// [1] https://github.com/Microsoft/mssql-jdbc/blob/eb14f63077c47ef1fc1c690deb8cfab602baeb85/src/main/java/com/microsoft/sqlserver/jdbc/SQLCollation.java#L362-L482
 /// [2] https://msdn.microsoft.com/de-de/library/ms144250(v=sql.105).aspx
 ///
@@ -304,14 +382,14 @@ pub fn lcid_to_encoding(locale: u16) -> Option<&'static Encoding> {
 /// 2. see above/as above
 pub fn sortid_to_encoding(sort_id: u8) -> Option<&'static Encoding> {
     match sort_id {
-        // 30 | 31 | 32 | 33 | 34 | 35 => Some(encoding_rs::WINDOWS_437),
-        // 40 | 41 | 42 | 43 | 44 | 45 | 49 => Some(encoding_rs::WINDOWS_850),
+        // 30..=35 (CP437) and 40..=45, 49 (CP850): not in encoding_rs, see
+        // `Collation::decode` (tulka patch).
         50 => Some(encoding_rs::WINDOWS_1252),
         51 => Some(encoding_rs::WINDOWS_1252),
         52 => Some(encoding_rs::WINDOWS_1252),
         53 => Some(encoding_rs::WINDOWS_1252),
         54 => Some(encoding_rs::WINDOWS_1252),
-        // 55 | 56 | 57 | 58 | 59 | 60 | 61 => Some(encoding_rs::WINDOWS_850),
+        // 55..=61 (CP850): same.
         71 => Some(encoding_rs::WINDOWS_1252),
         72 => Some(encoding_rs::WINDOWS_1252),
         73 => Some(encoding_rs::WINDOWS_1252),
@@ -804,5 +882,35 @@ mod tests {
         let b = a;
         assert_eq!(a, b);
         assert_ne!(a, Collation::new(0x0409, 1));
+    }
+
+    #[test]
+    fn decodes_oem_code_pages() {
+        // 0x87 = c cedilla and 0xB0 = light shade in both; 0x9B differs.
+        let cp437 = Collation::new(0x0409, 32);
+        let cp850 = Collation::new(0x0409, 42);
+        assert_eq!(
+            cp437.decode(b"a\x87\xB0z").unwrap().unwrap(),
+            "a\u{e7}\u{2591}z"
+        );
+        assert_eq!(
+            cp850.decode(b"a\x87\xB0z").unwrap().unwrap(),
+            "a\u{e7}\u{2591}z"
+        );
+        assert_eq!(cp437.decode(&[0x9B]).unwrap().unwrap(), "\u{a2}");
+        assert_eq!(cp850.decode(&[0x9B]).unwrap().unwrap(), "\u{f8}");
+        assert_eq!(cp437.decode(&[0xFF]).unwrap().unwrap(), "\u{a0}");
+        // Every sort id of the two families resolves.
+        for id in (30..=35).chain(40..=45).chain([49]).chain(55..=61) {
+            assert!(Collation::new(0x0409, id).decode(&[0x80]).is_ok(), "{id}");
+        }
+    }
+
+    #[test]
+    fn decode_falls_back_to_encoding_rs() {
+        let latin = Collation::new(0x0409, 52);
+        assert_eq!(latin.decode(&[0xE9]).unwrap().unwrap(), "\u{e9}");
+        assert!(Collation::new(0x0409, 0).decode(b"abc").is_ok());
+        assert!(Collation::new(0xffff, 0).decode(b"abc").is_err());
     }
 }

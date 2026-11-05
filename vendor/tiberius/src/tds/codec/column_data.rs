@@ -2066,19 +2066,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn f64_with_fixedlen_money() {
+    async fn numeric_with_fixedlen_money() {
         test_round_trip(
             TypeInfo::FixedLen(FixedLenType::Money),
-            ColumnData::F64(Some(3.5)),
+            ColumnData::Numeric(Some(crate::numeric::Numeric::new_with_scale(35_000, 4))),
         )
         .await;
     }
 
     #[tokio::test]
-    async fn f64_with_fixedlen_smallmoney() {
+    async fn numeric_with_fixedlen_smallmoney() {
         test_round_trip(
             TypeInfo::FixedLen(FixedLenType::Money4),
-            ColumnData::F64(Some(3.5)),
+            ColumnData::Numeric(Some(crate::numeric::Numeric::new_with_scale(35_000, 4))),
         )
         .await;
     }
@@ -2216,24 +2216,6 @@ mod tests {
     }
 
     // ----- F64 with Money (lines 376-383) -----
-
-    #[tokio::test]
-    async fn f64_with_varlen_money() {
-        test_round_trip(
-            TypeInfo::VarLenSized(VarLenContext::new(VarLenType::Money, 8, None)),
-            ColumnData::F64(Some(3.5)),
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn none_f64_with_varlen_money() {
-        test_round_trip(
-            TypeInfo::VarLenSized(VarLenContext::new(VarLenType::Money, 8, None)),
-            ColumnData::F64(None),
-        )
-        .await;
-    }
 
     // ----- BigChar error paths (lines 426, 430-437) -----
 
@@ -2410,7 +2392,10 @@ mod tests {
 
         let reader = &mut buf.into_sql_read_bytes();
         let nd = ColumnData::decode(reader, &ti).await.unwrap();
-        assert_eq!(nd, ColumnData::F64(Some(3.5)));
+        assert_eq!(
+            nd,
+            ColumnData::Numeric(Some(Numeric::new_with_scale(35000, 4)))
+        );
     }
 
     #[tokio::test]
@@ -2420,7 +2405,7 @@ mod tests {
 
         let reader = &mut buf.into_sql_read_bytes();
         let nd = ColumnData::decode(reader, &ti).await.unwrap();
-        assert_eq!(nd, ColumnData::F64(None));
+        assert_eq!(nd, ColumnData::Numeric(None));
     }
 
     // ----- Numeric rescale on encode (lines 859-879) -----

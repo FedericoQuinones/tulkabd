@@ -1,4 +1,4 @@
-use crate::{error::Error, sql_read_bytes::SqlReadBytes, ColumnData};
+use crate::{error::Error, numeric::Numeric, sql_read_bytes::SqlReadBytes, ColumnData};
 use bytes::BufMut;
 use std::fmt::Display;
 
@@ -217,14 +217,19 @@ pub(crate) async fn decode<R>(src: &mut R, len: u8) -> crate::Result<ColumnData<
 where
     R: SqlReadBytes + Unpin,
 {
+    // tulka patch: decoded as an exact `Numeric` with scale 4 (the wire
+    // integer), not an `f64`, which loses the last digit above ~225 billion.
     let res = match len {
-        0 => ColumnData::F64(None),
-        4 => ColumnData::F64(Some(src.read_i32_le().await? as f64 / 1e4)),
-        8 => ColumnData::F64(Some({
-            let high = src.read_i32_le().await? as i64;
-            let low = src.read_u32_le().await? as f64;
+        0 => ColumnData::Numeric(None),
+        4 => ColumnData::Numeric(Some(Numeric::new_with_scale(
+            i128::from(src.read_i32_le().await?),
+            MONEY_SCALE as u8,
+        ))),
+        8 => ColumnData::Numeric(Some({
+            let high = i64::from(src.read_i32_le().await?);
+            let low = i64::from(src.read_u32_le().await?);
 
-            ((high << 32) as f64 + low) / 1e4
+            Numeric::new_with_scale(i128::from((high << 32) | low), MONEY_SCALE as u8)
         })),
         _ => {
             return Err(Error::Protocol(
@@ -250,8 +255,8 @@ mod tests {
 
         let data = decode(&mut buf.into_sql_read_bytes(), 4).await.unwrap();
         match data {
-            ColumnData::F64(Some(v)) => assert!((v - 1.2345).abs() < 1e-9, "v={}", v),
-            other => panic!("expected F64, got {:?}", other),
+            ColumnData::Numeric(Some(v)) => assert_eq!((v.value(), v.scale()), (12345, 4)),
+            other => panic!("expected Numeric, got {:?}", other),
         }
     }
 
@@ -265,8 +270,46 @@ mod tests {
 
         let data = decode(&mut buf.into_sql_read_bytes(), 8).await.unwrap();
         match data {
-            ColumnData::F64(Some(v)) => assert!((v - 429499.7296).abs() < 1e-6, "v={}", v),
-            other => panic!("expected F64, got {:?}", other),
+            ColumnData::Numeric(Some(v)) => {
+                assert_eq!((v.value(), v.scale()), (4_294_997_296, 4))
+            }
+            other => panic!("expected Numeric, got {:?}", other),
+        }
+    }
+
+    async fn decode_scaled(bytes: &[u8]) -> Option<i128> {
+        let mut buf = BytesMut::new();
+        buf.put_slice(bytes);
+        match decode(&mut buf.into_sql_read_bytes(), bytes.len() as u8)
+            .await
+            .unwrap()
+        {
+            ColumnData::Numeric(Some(v)) => {
+                assert_eq!(v.scale(), 4);
+                Some(v.value())
+            }
+            other => panic!("expected Numeric, got {:?}", other),
+        }
+    }
+
+    // The extremes survive exactly (an f64 would round the last digit).
+    #[tokio::test]
+    async fn decode_money_extremes_are_exact() {
+        let wire = |v: i64| {
+            let mut b = Vec::new();
+            b.extend_from_slice(&((v >> 32) as i32).to_le_bytes());
+            b.extend_from_slice(&(v as u32).to_le_bytes());
+            b
+        };
+        for v in [i64::MAX, i64::MIN, -1, -4_294_967_296, 0, 1, -5_807] {
+            assert_eq!(decode_scaled(&wire(v)).await, Some(i128::from(v)), "{v}");
+        }
+        for v in [i32::MAX, i32::MIN, -1] {
+            assert_eq!(
+                decode_scaled(&v.to_le_bytes()).await,
+                Some(i128::from(v)),
+                "{v}"
+            );
         }
     }
 
