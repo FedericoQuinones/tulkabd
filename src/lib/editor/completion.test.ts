@@ -139,6 +139,14 @@ test("only the batch around the cursor is looked at", async () => {
   expect(await complete("SELECT 'x\nGO\nSEL|")).toBeNull();
 });
 
+test("nothing opens while an IME is composing", () => {
+  const state = EditorState.create({ doc: "SEL" });
+  const run = (view: object) => completionSource(meta)(new CompletionContext(state, 3, false, view as never));
+  expect(labels(run({ composing: false, compositionStarted: false }))).toContain("SELECT");
+  expect(run({ composing: true, compositionStarted: true })).toBeNull();
+  expect(run({ composing: false, compositionStarted: true })).toBeNull();
+});
+
 test("a failed fetch is not cached", async () => {
   const fetch = vi.fn().mockRejectedValueOnce("not_connected").mockResolvedValueOnce(meta);
   const cache = new MetadataCache(fetch);

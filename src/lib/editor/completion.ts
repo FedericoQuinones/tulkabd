@@ -294,6 +294,8 @@ export function completionSource(meta: CompletionMetadata): CompletionSource {
   const relations = meta.objects.filter((o) => o.kind !== "procedure");
 
   return (ctx: CompletionContext): CompletionResult | null => {
+    // An IME is composing: the text under the cursor is not final, so nothing opens.
+    if (ctx.view?.composing || ctx.view?.compositionStarted) return null;
     const text = ctx.state.doc.toString();
     const pos = ctx.pos;
     const toks = tokensAround(text, pos);
