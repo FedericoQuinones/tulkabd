@@ -20,7 +20,7 @@ pub fn to_excel_tsv<R: AsRef<[Value]>>(columns: &[Column], rows: &[R], decimal: 
     let mut out = String::new();
     write_line(
         &mut out,
-        columns.iter().map(|c| quote_excel(&c.name)),
+        columns.iter().map(|c| quote_excel(header_name(c))),
         '\t',
         "\r\n",
     );
@@ -41,7 +41,7 @@ pub fn to_ai<R: AsRef<[Value]>>(columns: &[Column], rows: &[R]) -> String {
     let mut out = String::new();
     write_line(
         &mut out,
-        columns.iter().map(|c| quote_ai(&c.name)),
+        columns.iter().map(|c| quote_ai(header_name(c))),
         AI_SEPARATOR,
         "\n",
     );
@@ -54,6 +54,16 @@ pub fn to_ai<R: AsRef<[Value]>>(columns: &[Column], rows: &[R]) -> String {
         );
     }
     out
+}
+
+/// Header text for a column; a column without a name (`SELECT 1`) would
+/// otherwise leave an empty header cell.
+fn header_name(c: &Column) -> &str {
+    if c.name.is_empty() {
+        "(no name)"
+    } else {
+        &c.name
+    }
 }
 
 /// Rough token estimate: `ceil(chars / 3.6)`.
@@ -77,8 +87,9 @@ fn excel_cell(v: &Value, decimal: char) -> String {
         Value::Null => String::new(),
         Value::Bool(b) => bool_digit(*b),
         Value::Int(i) => i.to_string(),
+        Value::Float(f) if *f == 0.0 => "0".to_string(),
         Value::Float(f) => with_decimal(&f.to_string(), decimal),
-        Value::Decimal(d) => with_decimal(d, decimal),
+        Value::Decimal(d) => with_decimal(&unsigned_if_zero(d), decimal),
         Value::Text(t) => quote_excel(t),
         Value::Bytes(b) => hex(b),
         Value::Date(s)
@@ -147,6 +158,14 @@ fn trim_decimal(d: &str) -> String {
     }
     let t = d.trim_end_matches('0').trim_end_matches('.');
     normalize_zero(t)
+}
+
+/// Drops the sign of a negative zero (`-0.00`), keeping every digit.
+fn unsigned_if_zero(d: &str) -> String {
+    match d.strip_prefix('-') {
+        Some(rest) if rest.chars().all(|c| c == '0' || c == '.') => rest.to_string(),
+        _ => d.to_string(),
+    }
 }
 
 fn normalize_zero(s: &str) -> String {
@@ -272,6 +291,22 @@ mod tests {
         assert_eq!(ai(f64::INFINITY), "f\ninf\n");
         let xl = to_excel_tsv(&cols(&["f"]), &[vec![Value::Float(12.5)]], ',');
         assert_eq!(xl, "f\r\n12,5\r\n");
+    }
+
+    #[test]
+    fn excel_negative_zero_is_written_as_zero() {
+        let xl = |v: Value| to_excel_tsv(&cols(&["n"]), &[vec![v]], '.');
+        assert_eq!(xl(Value::Float(-0.0)), "n\r\n0\r\n");
+        assert_eq!(xl(Value::Decimal("-0.00".into())), "n\r\n0.00\r\n");
+        assert_eq!(xl(Value::Decimal("-0.50".into())), "n\r\n-0.50\r\n");
+    }
+
+    #[test]
+    fn empty_column_name_gets_a_placeholder_header() {
+        let c = cols(&["", "b"]);
+        let row = vec![vec![Value::Int(1), Value::Int(2)]];
+        assert_eq!(to_ai(&c, &row), "(no name)|b\n1|2\n");
+        assert_eq!(to_excel_tsv(&c, &row, '.'), "(no name)\tb\r\n1\t2\r\n");
     }
 
     #[test]
