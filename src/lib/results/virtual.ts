@@ -114,3 +114,36 @@ export function idColumnWidth(total: number, zoom: number): number {
   const font = (12 * zoom) / 100;
   return Math.max(ID_MIN_WIDTH, Math.ceil(ID_PADDING + digits * DIGIT_EM * font));
 }
+
+/**
+ * Columns `[start, end)` to render for a horizontal scroll position, and the width of the columns
+ * before `start` (the spacer that stands in for them). The row-number column of width `idWidth`
+ * comes first; `overscan` px are kept on both sides. An unmeasured viewport renders everything.
+ */
+export function visibleColumns(
+  count: number,
+  width: (i: number) => number,
+  idWidth: number,
+  scrollLeft: number,
+  viewportWidth: number,
+  overscan = 300,
+): { start: number; end: number; offset: number } {
+  if (viewportWidth <= 0) return { start: 0, end: count, offset: 0 };
+  const from = scrollLeft - overscan;
+  const to = scrollLeft + viewportWidth + overscan;
+  let left = idWidth;
+  let start = 0;
+  let offset = 0;
+  let i = 0;
+  while (i < count && left + width(i) <= from) {
+    left += width(i);
+    i++;
+  }
+  start = i;
+  offset = left - idWidth;
+  while (i < count && left < to) {
+    left += width(i);
+    i++;
+  }
+  return { start, end: i, offset };
+}

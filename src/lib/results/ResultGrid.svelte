@@ -27,6 +27,7 @@
     spacerHeight,
     toRealTop,
     toVirtualTop,
+    visibleColumns,
     visibleRange,
     type ScrollGeometry,
   } from "./virtual";
@@ -96,6 +97,8 @@
   /** The scrollTop last set from code: the scroll event it causes must not re-derive `scrollTop`. */
   let programmatic: number | null = null;
   let viewportHeight = $state(0);
+  let viewportWidth = $state(0);
+  let scrollLeft = $state(0);
   let gridEl = $state<HTMLDivElement>();
   // Widths the user set earlier in this tab, by column name, survive a re-run.
   let widths = $state<number[]>(untrack(() => recallWidths(tabId, result.columns.map((c) => c.name))));
@@ -153,6 +156,9 @@
     scrollTop = isScaled(g) ? v : realTop;
   }
 
+  // Only the columns near the viewport are rendered; a spacer stands in for those before them.
+  const cols = $derived(visibleColumns(columns.length, colWidth, idWidth, scrollLeft, viewportWidth));
+  const colIndexes = $derived(Array.from({ length: cols.end - cols.start }, (_, k) => cols.start + k));
   const indexes = $derived(Array.from({ length: range.end - range.start }, (_, i) => range.start + i));
 
   export function getSelection(): GridSelection | null {
@@ -171,7 +177,7 @@
   }
   const fetchError = $derived((void version, cache.error));
   const cellId = (row: number, col: number) => `${gridId}-${row}-${col}`;
-  const activeId = $derived(active && active.row >= range.start && active.row < range.end ? cellId(active.row, active.col) : undefined);
+  const activeId = $derived(active && active.row >= range.start && active.row < range.end && active.col >= cols.start && active.col < cols.end ? cellId(active.row, active.col) : undefined);
 
   function sortDirection(col: number): "ascending" | "descending" | undefined {
     if (spec.sort?.column !== col) return undefined;
@@ -359,9 +365,11 @@
   aria-busy={viewPending}
   bind:this={gridEl}
   bind:clientHeight={viewportHeight}
+  bind:clientWidth={viewportWidth}
   onscroll={(e) => {
     const top = e.currentTarget.scrollTop;
     realTop = top;
+    scrollLeft = e.currentTarget.scrollLeft;
     if (programmatic !== null && Math.abs(top - programmatic) <= 1) {
       // Our own scroll: the exact row-space position is already in `scrollTop`.
       if (!isScaled(geo)) scrollTop = top;
@@ -377,7 +385,9 @@
   <div class="inner" style:width="{totalWidth}px" style:height="{headH + spacerHeight(geo)}px">
     <div class="head" style:height="{headH}px" role="row" aria-rowindex={1}>
       <div class="id" style:width="{idWidth}px" role="columnheader" aria-colindex={1}>{t("results.rowNumber")}</div>
-      {#each columns as c, i (i)}
+      {#if cols.offset > 0}<div class="skip" style:width="{cols.offset}px"></div>{/if}
+      {#each colIndexes as i (i)}
+        {@const c = columns[i]}
         {@const dir = sortDirection(i)}
         {@const filtered = spec.columns.some((f) => f.column === i)}
         <div class="h" class:r={numeric[i]} style:width="{colWidth(i)}px" role="columnheader" aria-colindex={i + 2} aria-sort={dir}>
@@ -433,7 +443,8 @@
         >
           {i + 1}
         </div>
-        {#each columns as _, j (j)}
+        {#if cols.offset > 0}<div class="skip" style:width="{cols.offset}px"></div>{/if}
+        {#each colIndexes as j (j)}
           {@const cell = row ? cellText(row[j]) : null}
           {@const selected = isSelected(selection, i, j)}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -532,6 +543,9 @@
     display: flex;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
+  }
+  .skip {
+    flex: none;
   }
   .h,
   .id,

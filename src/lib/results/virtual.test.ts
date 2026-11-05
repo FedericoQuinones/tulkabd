@@ -12,6 +12,7 @@ import {
   spacerHeight,
   toRealTop,
   toVirtualTop,
+  visibleColumns,
   visibleRange,
   windowOffsets,
 } from "./virtual";
@@ -88,4 +89,14 @@ test("the row-number column grows with the digits and the zoom", () => {
   expect(idColumnWidth(1_000_000, 200)).toBeGreaterThan(idColumnWidth(1_000_000, 100));
   expect(idColumnWidth(100_000, 100)).toBeGreaterThan(idColumnWidth(1000, 100));
   expect(idColumnWidth(0, 100)).toBe(56);
+});
+
+test("only the columns near the viewport are rendered", () => {
+  const w = () => 100;
+  expect(visibleColumns(1000, w, 56, 0, 500, 0)).toEqual({ start: 0, end: 5, offset: 0 });
+  // 5000 px in: columns whose right edge is past 5000 start at index 49 (left 4956).
+  expect(visibleColumns(1000, w, 56, 5000, 500, 0)).toEqual({ start: 49, end: 55, offset: 4900 });
+  expect(visibleColumns(1000, w, 56, 5000, 500, 300)).toEqual({ start: 46, end: 58, offset: 4600 });
+  expect(visibleColumns(3, w, 56, 0, 0)).toEqual({ start: 0, end: 3, offset: 0 });
+  expect(visibleColumns(3, w, 56, 10_000, 500, 0)).toEqual({ start: 3, end: 3, offset: 300 });
 });
