@@ -9,6 +9,7 @@
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
   import TransactionDialog from "./lib/tabs/TransactionDialog.svelte";
   import UnsavedDialog from "./lib/tabs/UnsavedDialog.svelte";
+  import FileChangedDialog from "./lib/tabs/FileChangedDialog.svelte";
   import { connections } from "./lib/connections/store.svelte";
   import ExplorerTree from "./lib/explorer/ExplorerTree.svelte";
   import { explorer } from "./lib/explorer/tree.svelte";
@@ -196,7 +197,7 @@
   }
 </script>
 
-<svelte:window {onkeydown} />
+<svelte:window {onkeydown} onfocus={() => void tabs.checkFilesOnDisk()} />
 
 <div class="win">
   <div class="cols" class:no-explorer={explorerHidden}>
@@ -282,6 +283,13 @@
 {/if}
 {#if tabs.unsavedPrompt}
   <UnsavedDialog prompt={tabs.unsavedPrompt} onanswer={(save) => void tabs.answerUnsaved(save)} oncancel={() => tabs.cancelUnsaved()} />
+{/if}
+{#if tabs.fileConflict}
+  <FileChangedDialog
+    conflict={tabs.fileConflict}
+    onanswer={(choice) => void tabs.answerFileConflict(choice)}
+    oncancel={() => void tabs.answerFileConflict("cancel")}
+  />
 {/if}
 {#if tabs.nameRequest}
   {#key tabs.nameRequest}

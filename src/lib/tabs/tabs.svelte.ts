@@ -132,6 +132,12 @@ export interface UnsavedPrompt {
   error: string | null;
 }
 
+/** The dialog asking what to do when a file tab is saved over a file another program changed. */
+export interface FileConflict {
+  tabId: string;
+  title: string;
+}
+
 /** Resolves when `p` settles or after `ms`, whichever comes first; never rejects. */
 function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -186,6 +192,9 @@ export class TabsStore {
   closePrompt = $state.raw<ClosePrompt | null>(null);
   /** Unsaved changes the user must answer for before a tab closes. */
   unsavedPrompt = $state.raw<UnsavedPrompt | null>(null);
+  /** A file tab saved over a file that changed on disk: overwrite, reload or cancel. */
+  fileConflict = $state.raw<FileConflict | null>(null);
+  private checkingDisk = false;
 
   /** Grows whenever a tab is added or brought forward, so the shell can leave a screen covering the tabs. */
   shown = $state(0);
@@ -865,11 +874,58 @@ export class TabsStore {
    */
   async saveActive(): Promise<void> {
     const tab = this.active;
-    if (tab?.pane) await this.saveTab(tab);
+    if (tab?.pane) await this.saveTab(tab, "ask");
   }
 
-  /** Saves a query tab as `saveActive` does; true when its text reached its saved query or file. */
-  private async saveTab(tab: Tab): Promise<boolean> {
+  /**
+   * Carries out the user's answer to `fileConflict`. Overwrite writes the tab's text over the
+   * file, Reload takes the file's text in place of the tab's, Cancel leaves both as they are.
+   */
+  async answerFileConflict(choice: "overwrite" | "reload" | "cancel"): Promise<void> {
+    const conflict = this.fileConflict;
+    if (!conflict) return;
+    this.fileConflict = null;
+    const tab = this.list.find((x) => x.id === conflict.tabId);
+    if (!tab || choice === "cancel") return;
+    if (choice === "overwrite") await this.saveTab(tab, "force");
+    else await this.reloadFile(tab.id);
+  }
+
+  /**
+   * When the window gets the focus: a clean file tab whose file changed on disk is reloaded
+   * quietly; an unsaved one keeps its text and says so (saving then asks what to do).
+   */
+  async checkFilesOnDisk(): Promise<void> {
+    if (this.checkingDisk) return;
+    this.checkingDisk = true;
+    try {
+      for (const { id } of [...this.list]) {
+        const tab = this.list.find((x) => x.id === id);
+        const known = tab?.file?.modifiedMs;
+        if (!tab?.pane || !tab.file || !known) continue;
+        const path = tab.file.path;
+        let current: number;
+        try {
+          current = await ipc.sqlFileModified(path);
+        } catch {
+          continue;
+        }
+        const now = this.list.find((x) => x.id === id);
+        if (!now?.pane || now.file?.path !== path || !current || current === now.file.modifiedMs) continue;
+        if (!now.dirty) await this.reloadFile(id, true);
+        else this.saveNotice(now.pane, t("files.changedOnDisk"));
+      }
+    } finally {
+      this.checkingDisk = false;
+    }
+  }
+
+  /**
+   * Saves a query tab as `saveActive` does; true when its text reached its saved query or file. A
+   * file that changed on disk since the tab read or wrote it is not overwritten: with "ask" the
+   * user is asked (`fileConflict`), with "fail" the tab says so; "force" writes anyway.
+   */
+  private async saveTab(tab: Tab, mode: "ask" | "fail" | "force" = "fail"): Promise<boolean> {
     const pane = tab.pane;
     if (!pane) return false;
     if (tab.savedQuery) {
@@ -888,14 +944,29 @@ export class TabsStore {
     }
     if (tab.file) {
       // Written back in place, in its own encoding and line endings; never asks for a name.
-      const { path, encoding, lineEnding } = tab.file;
+      const { path, encoding, lineEnding, modifiedMs } = tab.file;
+      if (mode !== "force" && modifiedMs) {
+        let current = 0;
+        try {
+          current = await ipc.sqlFileModified(path);
+        } catch {
+          // Gone or unreadable: writing it again is what the user asked for.
+        }
+        if (current && current !== modifiedMs) {
+          if (mode === "ask") this.fileConflict = { tabId: tab.id, title: tab.title };
+          else this.saveNotice(pane, t("files.changedOnDisk"));
+          return false;
+        }
+      }
       const edits = pane.edits;
+      let written: unknown;
       try {
-        await ipc.writeSqlFile(path, pane.text(), encoding, lineEnding);
+        written = await ipc.writeSqlFile(path, pane.text(), encoding, lineEnding);
       } catch (e) {
         this.saveNotice(pane, t("files.saveFailed", { error: fileErrorText(e) }));
         return false;
       }
+      if (tab.file?.path === path) tab.file.modifiedMs = typeof written === "number" && written > 0 ? written : undefined;
       if (pane.edits === edits) tab.dirty = false;
       this.clearSaveNotice(pane);
       return true;
@@ -1305,6 +1376,7 @@ export class TabsStore {
     this.passwordRequests = [];
     this.nameRequest = null;
     this.unsavedPrompt = null;
+    this.fileConflict = null;
     this.endPrompt();
     this.pending.clear();
     this.wanted.clear();
