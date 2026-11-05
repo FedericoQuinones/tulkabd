@@ -49,7 +49,9 @@ struct SearchObjectsParams {
     query: String,
     /// Search only this connection. Default: all of them.
     connection: Option<String>,
-    /// Search only this database. Default: all the cached ones.
+    /// Search only this database. Default: every database of the connections
+    /// shared with you that tulkabd has indexed (a connection that selects
+    /// databases is searched in those alone).
     database: Option<String>,
     /// Only objects of this kind. Default: tables, views and procedures.
     kind: Option<KindParam>,
