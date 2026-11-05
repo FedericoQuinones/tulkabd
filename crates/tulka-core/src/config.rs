@@ -271,7 +271,7 @@ impl EnvironmentStyle {
         {
             style.ai_access = ai_access;
         }
-        // Production is never shared with AI assistants, whatever was saved.
+        // Production defaults to no AI access, whatever was saved; a connection can still opt in.
         if environment == Environment::Production {
             style.ai_access = AiAccess::None;
         }
