@@ -28,6 +28,12 @@
   },
   "bundle": {
     "active": true,
+    "category": "DeveloperTool",
+    "publisher": "Federico Quiñones",
+    "copyright": "Copyright (c) 2026 Federico Quiñones",
+    "homepage": "https://github.com/FedericoQuinones/tulkabd",
+    "shortDescription": "A lightweight SQL Server client",
+    "longDescription": "A lightweight, cross-platform desktop client for Microsoft SQL Server, built with Tauri, Rust and Svelte.",
     "targets": ["deb", "rpm", "msi", "nsis", "app", "dmg"],
     "icon": [
       "icons/32x32.png",
