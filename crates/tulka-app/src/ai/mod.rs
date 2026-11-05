@@ -118,7 +118,7 @@ pub struct AiState {
     client: Mutex<Option<String>>,
     /// Whether each connection's login is an administrator, by connection
     /// id, with the moment it was read.
-    admins: Mutex<HashMap<String, (bool, Instant)>>,
+    admins: Mutex<HashMap<String, (Option<bool>, Instant)>>,
 }
 
 impl AiState {
@@ -280,30 +280,47 @@ impl AiState {
     /// answer is kept for [`ADMIN_CACHE`], so listing connections again does
     /// not log in again.
     async fn admin_flags(&self, visible: &[Visible]) -> Vec<Option<bool>> {
-        let known = |v: &Visible| {
+        // `Some(answer)` while a probe's outcome is fresh; a failed probe
+        // (`answer` is `None`) is remembered shorter, so an unreachable server
+        // does not make every call wait.
+        let cached = |v: &Visible| {
             let admins = self.admins.lock().unwrap_or_else(PoisonError::into_inner);
             admins
                 .get(&v.conn.id)
-                .filter(|(_, at)| at.elapsed() < ADMIN_CACHE)
+                .filter(|(admin, at)| {
+                    at.elapsed()
+                        < if admin.is_some() {
+                            ADMIN_CACHE
+                        } else {
+                            ADMIN_FAILED_CACHE
+                        }
+                })
                 .map(|(admin, _)| *admin)
         };
+        let known = |v: &Visible| cached(v).flatten();
         let mut probes: Vec<Pin<Box<dyn Future<Output = ()> + Send + '_>>> = Vec::new();
-        for v in visible.iter().filter(|v| known(v).is_none()) {
+        for v in visible.iter().filter(|v| cached(v).is_none()) {
             probes.push(Box::pin(async move {
+                let remember = |admin: Option<bool>| {
+                    self.admins
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(v.conn.id.clone(), (admin, Instant::now()));
+                };
                 let Ok((driver, params)) = self.prepare(v, None).await else {
-                    return;
+                    return remember(None);
                 };
                 let probe = async {
                     let _slot = self.slot().await;
                     let mut session = driver.connect(&params).await.ok()?;
                     session.is_admin().await.ok()
                 };
-                if let Ok(Some(admin)) = tokio::time::timeout(ADMIN_PROBE_TIMEOUT, probe).await {
-                    self.admins
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .insert(v.conn.id.clone(), (admin, Instant::now()));
-                }
+                remember(
+                    tokio::time::timeout(ADMIN_PROBE_TIMEOUT, probe)
+                        .await
+                        .ok()
+                        .flatten(),
+                );
             }));
         }
         // Run all the probes together.
@@ -401,6 +418,8 @@ fn file_id(path: &std::path::Path) -> Option<FileId> {
 
 /// How long a login's administrator status is remembered.
 const ADMIN_CACHE: Duration = Duration::from_secs(600);
+/// How long a failed probe is remembered.
+const ADMIN_FAILED_CACHE: Duration = Duration::from_secs(60);
 /// How long `list_connections` waits to learn a login's role.
 const ADMIN_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
