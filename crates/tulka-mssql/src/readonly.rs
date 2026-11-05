@@ -34,6 +34,13 @@
 //! - Anything the check cannot read with certainty is refused as unparsed:
 //!   control characters, a bare `\r`, symbols outside T-SQL's operator set,
 //!   Unicode spaces and non-ASCII letters outside bracketed names.
+//! - A bracketed or quoted name may only hold printable ASCII, Latin-1
+//!   letters and Latin Extended-A letters (without `×`, `÷`, `ſ`), because a
+//!   collation can treat ligatures, superscripts, zero-width characters,
+//!   circled letters and the like as equal to ASCII ones. Names with other
+//!   characters (Cyrillic, Greek, CJK, ...) cannot be used through the AI
+//!   tools. Accents and letter case are folded when comparing names with the
+//!   denied lists.
 //! - A word or literal written right after a number with no space is
 //!   refused, because SQL Server splits `1eDELETE` into `1e` and `DELETE`.
 //!   This also refuses valid queries such as `1.e5`, `1AND`, `1DESC`,
@@ -204,7 +211,7 @@ fn name_of(text: &str, t: &Token) -> String {
 /// Folds a name the way an accent- and width-insensitive collation compares
 /// it: full-width forms to ASCII, accents removed from Latin letters, lower
 /// case. Names with characters from other lookalike ranges are refused
-/// before this matters (see [`has_lookalikes`]).
+/// before this matters (see [`has_unlisted_chars`]).
 fn fold_name(name: &str) -> String {
     name.chars()
         .map(|c| match c {
@@ -246,15 +253,19 @@ fn base_letter(c: char) -> char {
     }
 }
 
-/// Whether a quoted name has characters a collation may fold to something
-/// else and that [`fold_name`] does not know: the rest of the half- and
-/// full-width block, mathematical alphanumerics, letterlike symbols,
-/// combining marks and variation selectors. Such names are refused.
-fn has_lookalikes(name: &str) -> bool {
-    name.chars().any(|c| {
-        matches!(c as u32,
-            0x0300..=0x036F | 0x2100..=0x214F | 0xFE00..=0xFE0F | 0xFF00
-            | 0xFF5F..=0xFFEF | 0x1D400..=0x1D7FF)
+/// Whether a quoted name has a character outside the allowed set: printable
+/// ASCII, Latin-1 letters and Latin Extended-A letters (without `×`, `÷` and
+/// `ſ`). A collation may treat other characters (ligatures, superscripts,
+/// zero-width and joiner characters, circled letters, other scripts) as equal
+/// to ASCII ones, so a name with any of them cannot be told from a denied
+/// one and is refused.
+fn has_unlisted_chars(quoted: &str) -> bool {
+    let inner = quoted
+        .get(1..quoted.len().saturating_sub(1))
+        .unwrap_or_default();
+    inner.chars().any(|c| {
+        !matches!(c as u32,
+            0x20..=0x7E | 0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0xFF | 0x100..=0x17E)
     })
 }
 
@@ -549,7 +560,7 @@ fn check_batch(
             continue;
         }
 
-        if t.kind == Kind::Quoted && has_lookalikes(lexer::src(text, t)) {
+        if t.kind == Kind::Quoted && has_unlisted_chars(lexer::src(text, t)) {
             return Some(found(ReadOnlyReason::Unparsed, None, line));
         }
         if matches!(t.kind, Kind::Word | Kind::Quoted) {
@@ -760,10 +771,8 @@ mod tests {
             "SELECT * FROM sys.dm_exec_input_buffer(52, NULL)",
             "SELECT * FROM sys . dm_exec_sql_text(NULL)",
             "SELECT * FROM sys.[sql_logins ]",
-            "SELECT * FROM sys.[ＳＱＬ_logins]",
             "SELECT * FROM sys.[sql_lógins]",
-            "SELECT * FROM sys.[ŠQL_loġins\u{3000}]",
-            "SELECT * FROM [ｓｙｓ].[sql_logins]",
+            "SELECT * FROM sys.[ŠQL_loġins]",
             "SELECT * FROM [sys].[fn_get_audit_file  ]('a', DEFAULT, DEFAULT)",
             "SELECT * FROM sys.\"sql_logins \"",
             "SELECT LOGINPROPERTY('sa', 'PasswordHash')",
@@ -781,29 +790,42 @@ mod tests {
     }
 
     #[test]
-    fn lookalike_names_are_refused_and_accented_names_still_work() {
+    fn only_listed_characters_are_allowed_in_quoted_names() {
         for sql in [
+            "SELECT * FROM sys.[fn_get_audit_\u{FB01}le]('a', DEFAULT, DEFAULT)",
+            "SELECT * FROM sys.[fn_xe_\u{FB01}le_target_read_file]('a', NULL, NULL, NULL)",
+            "SELECT * FROM sys.[f\u{207F}_get_audit_file]('a', DEFAULT, DEFAULT)",
+            "SELECT * FROM sys.[sql_lo\u{200D}gins]",
+            "SELECT * FROM sys.[sql_lo\u{FEFF}gins]",
+            "SELECT * FROM sys.[sql_lo\u{2060}gins]",
+            "SELECT * FROM sys.[sql_l\u{BA}gins]",
+            "SELECT * FROM sys.[sql_l\u{AA}gins]",
+            "SELECT * FROM sys.[\u{24E2}ql_logins]",
+            "SELECT * FROM sys.[\u{FF33}QL_logins]",
             "SELECT * FROM [t\u{0301}]",
             "SELECT * FROM [\u{1D41A}b]",
             "SELECT * FROM [a\u{2102}]",
             "SELECT * FROM [a\u{FE0F}]",
-            "SELECT * FROM [a\u{FF61}]",
-            "SELECT \"x\u{FFEF}\" FROM t",
+            "SELECT * FROM [a\u{17F}]",
+            "SELECT * FROM [a\u{D7}]",
+            "SELECT * FROM [a\u{F7}]",
+            "SELECT * FROM [\u{416}]",
+            "SELECT \"x\u{4E2D}\" FROM t",
         ] {
             let v = violation(sql).unwrap_or_else(|| panic!("accepted: {sql}"));
             assert_eq!(v.reason, Unparsed, "{sql}");
         }
         for sql in [
-            "SELECT * FROM [Clientes_Año]",
-            "SELECT [Ñandú], [Çatalán], [ＡＢＣ] FROM [Pedidos_Ünicos]",
+            "SELECT * FROM [Clientes_A\u{F1}o]",
+            "SELECT [\u{D1}and\u{FA}], [M\u{FC}ller], [\u{10A}] FROM [Pedidos_\u{DC}nicos]",
+            "SELECT * FROM [Mi tabla]",
         ] {
             assert!(violation(sql).is_none(), "{sql}");
         }
         assert_eq!(
-            referenced_databases("SELECT * FROM [ＯＴＨＥＲ].dbo.t"),
-            ["other"]
+            referenced_databases("SELECT * FROM [\u{D3}tro].dbo.t"),
+            ["otro"]
         );
-        assert_eq!(referenced_databases("SELECT * FROM [Ótro].dbo.t"), ["otro"]);
     }
 
     #[test]
