@@ -312,6 +312,30 @@ test("indexProgress marks indexing and refreshes the counters", async () => {
   expect(counts).toEqual([12, 3, 4]);
 });
 
+test("a reindex during an object read triggers a second read", async () => {
+  explorer.expanded.add("c2");
+  explorer.expanded.add(keyOf.db("c2", "Ventas"));
+  const group = keyOf.group("c2", "Ventas", "table");
+  explorer.expanded.add(group);
+  const st = explorer.state("c2");
+  st.status = "connected";
+  st.databases = [db("Ventas")];
+  const o = (name: string) => ({ schema: "dbo", name, kind: "table" as const });
+  let finish!: () => void;
+  vi.mocked(ipc.explorerObjects)
+    .mockImplementationOnce(() => new Promise((r) => (finish = () => r([o("old")]))))
+    .mockResolvedValue([o("old"), o("new")]);
+  const first = explorer.loadObjects("c2", "Ventas", "table");
+  await flush();
+  // The reindex wrote the cache after the first read began.
+  explorer.handleEvent({ kind: "indexProgress", connectionId: "c2", database: "Ventas", done: true, noAccess: false });
+  finish();
+  await first;
+  await flush();
+  expect(ipc.explorerObjects).toHaveBeenCalledTimes(2);
+  expect(explorer.objects[group]).toEqual([o("old"), o("new")]);
+});
+
 test("a database whose snapshot failed shows an error, not indexing", async () => {
   explorer.expanded.add("c2");
   const st = explorer.state("c2");

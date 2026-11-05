@@ -40,6 +40,12 @@ export interface ConnRuntime {
   failed: string[];
 }
 
+/** A load in flight; `again` asks for one more read after it. */
+interface Load {
+  again: boolean;
+  done: Promise<void>;
+}
+
 type Loaded<T> = T[] | { error: string };
 
 /** Hears the end of a connect: `null` when connected, else the error. */
@@ -83,8 +89,8 @@ class ExplorerStore {
   /** Connections the user disconnected, until they connect again: a late error there is stale. */
   private userOffline = new Set<string>();
   private dbLoads = new Map<string, { again: boolean; done: Promise<void> }>();
-  private objLoads = new Map<string, Promise<void>>();
-  private colLoads = new Map<string, Promise<void>>();
+  private objLoads = new Map<string, Load>();
+  private colLoads = new Map<string, Load>();
   private persistTimer: ReturnType<typeof setTimeout> | undefined;
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
   private subscribed = false;
@@ -370,12 +376,30 @@ class ExplorerStore {
     });
   }
 
-  private once(map: Map<string, Promise<void>>, key: string, run: (gen: number) => Promise<void>): Promise<void> {
+  /**
+   * Runs `run` unless a load of `key` is in flight, whose promise is shared.
+   * Setting `again` on the entry (`invalidate`: the data changed since the
+   * load began) makes it read once more; the promise settles after that.
+   */
+  private once(map: Map<string, Load>, key: string, run: (gen: number) => Promise<void>): Promise<void> {
     const running = map.get(key);
-    if (running) return running;
-    const p = run(this.gen).finally(() => map.delete(key));
-    map.set(key, p);
-    return p;
+    if (running) {
+      return running.done;
+    }
+    const entry: Load = { again: false, done: Promise.resolve() };
+    map.set(key, entry);
+    const gen = this.gen;
+    entry.done = (async () => {
+      try {
+        do {
+          entry.again = false;
+          await run(gen);
+        } while (entry.again && gen === this.gen);
+      } finally {
+        if (map.get(key) === entry) map.delete(key);
+      }
+    })();
+    return entry.done;
   }
 
   /** A database was re-indexed: reload what is open below it and drop the rest. */
@@ -385,6 +409,10 @@ class ExplorerStore {
       if (k?.[0] === "g" || k?.[0] === "o") return k[1] === c && k[2] === d;
       return false;
     };
+    // A read already under way may have started before the cache write.
+    for (const loads of [this.objLoads, this.colLoads]) {
+      for (const [key, load] of loads) if (sameDb(key)) load.again = true;
+    }
     const objects = { ...this.objects };
     for (const key of Object.keys(objects)) {
       if (!sameDb(key)) continue;
