@@ -143,6 +143,11 @@ pub trait Session: Send {
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError>;
     async fn use_database(&mut self, name: &str) -> Result<(), DriverError>;
     async fn current_database(&mut self) -> Result<String, DriverError>;
+    /// Whether the login is a server administrator. A driver without roles
+    /// says no.
+    async fn is_admin(&mut self) -> Result<bool, DriverError> {
+        Ok(false)
+    }
     /// Limits how long a statement of this session waits for a lock, in
     /// milliseconds. A driver without locks does nothing.
     async fn set_lock_timeout(&mut self, _ms: u32) -> Result<(), DriverError> {

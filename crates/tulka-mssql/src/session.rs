@@ -604,6 +604,13 @@ impl Session for MssqlSession {
         self.query_string("SELECT DB_NAME()").await
     }
 
+    async fn is_admin(&mut self) -> Result<bool, DriverError> {
+        let value = self
+            .query_string("SELECT CAST(ISNULL(IS_SRVROLEMEMBER('sysadmin'), 0) AS varchar(1))")
+            .await?;
+        Ok(value == "1")
+    }
+
     async fn set_lock_timeout(&mut self, ms: u32) -> Result<(), DriverError> {
         self.query_rows(&format!("SET LOCK_TIMEOUT {ms}")).await?;
         Ok(())

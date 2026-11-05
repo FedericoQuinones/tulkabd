@@ -302,6 +302,31 @@ async fn live_describe_does_not_wait_forever_on_a_schema_lock() {
     drop(holder);
 }
 
+/// The test login is `sa`: a sysadmin is flagged, and the file and secret
+/// sources are refused before reaching the server.
+#[tokio::test]
+async fn live_admin_login_is_flagged_and_secret_sources_refused() {
+    let Some(l) = live().await else { return };
+    let listed = tulka_app::ai::list_connections(&l.state).await;
+    assert!(
+        listed.text.contains("Warning: Live logs in as a sysadmin."),
+        "{}",
+        listed.text
+    );
+    for sql in [
+        "SELECT name, password_hash FROM sys.sql_logins",
+        "SELECT * FROM sys.dm_os_enumerate_filesystem('/', '*')",
+        "SELECT * FROM sys.dm_exec_requests OPTION (MAXDOP 1)",
+    ] {
+        let out = l.run(sql, None).await;
+        assert!(
+            out.is_error && out.text.starts_with("Not run:"),
+            "{sql}: {}",
+            out.text
+        );
+    }
+}
+
 #[tokio::test]
 async fn live_rowcount_limit() {
     let Some(l) = live().await else { return };

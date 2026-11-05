@@ -58,10 +58,14 @@ async fn list_connections_text(s: &AiState) -> ToolText {
             vec![v.label.clone(), environment_name(v), databases]
         })
         .collect();
-    ToolText::ok(format::table(
-        &["connection", "environment", "databases"],
-        rows,
-    ))
+    let admins = s.admin_flags(&visible).await;
+    let mut text = format::table(&["connection", "environment", "databases"], rows);
+    for (v, admin) in visible.iter().zip(admins) {
+        if admin == Some(true) {
+            text.push_str(&format::admin_login(&v.label));
+        }
+    }
+    ToolText::ok(text)
 }
 
 /// The answer of `list_databases`, within the output budget.

@@ -46,6 +46,9 @@ pub struct Script {
     pub cancels: AtomicUsize,
     /// Every lock timeout a session was given, in milliseconds.
     pub lock_timeouts: Mutex<Vec<u32>>,
+    /// Whether the login is an administrator, and how many times it was asked.
+    pub admin: AtomicBool,
+    pub admin_asked: AtomicUsize,
     /// Makes `list_databases` wait forever, as a call blocked on a lock does.
     pub hang_list: AtomicBool,
 }
@@ -148,6 +151,11 @@ impl Session for FakeSession {
             user: "ai".into(),
             single_database: false,
         })
+    }
+
+    async fn is_admin(&mut self) -> Result<bool, DriverError> {
+        self.script.admin_asked.fetch_add(1, Ordering::SeqCst);
+        Ok(self.script.admin.load(Ordering::SeqCst))
     }
 
     async fn set_lock_timeout(&mut self, ms: u32) -> Result<(), DriverError> {

@@ -120,6 +120,15 @@ pub(crate) fn database_name_not_selected(
     )
 }
 
+/// Warns that a connection's login can reach more than the read-only check
+/// can fence off.
+pub(crate) fn admin_login(label: &str) -> String {
+    format!(
+        "Warning: {label} logs in as a sysadmin. The read-only check cannot stop everything a \
+         SELECT reaches with that login; the user should switch to a least-privilege login.\n"
+    )
+}
+
 pub(crate) fn timed_out(seconds: u32) -> String {
     format!("Timeout ({seconds} s) reached; the query was cancelled.")
 }

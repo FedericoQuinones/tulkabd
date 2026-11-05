@@ -18,8 +18,10 @@ mod tools;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tulka_core::{
@@ -112,6 +114,9 @@ pub struct AiState {
     slots: Semaphore,
     /// The MCP client's name, recorded with each run.
     client: Mutex<Option<String>>,
+    /// Whether each connection's login is an administrator, by connection
+    /// id, with the moment it was read.
+    admins: Mutex<HashMap<String, (bool, Instant)>>,
 }
 
 impl AiState {
@@ -132,6 +137,7 @@ impl AiState {
             runlog,
             slots: Semaphore::new(MAX_SERVER_CALLS),
             client: Mutex::new(None),
+            admins: Mutex::new(HashMap::new()),
         }
     }
 
@@ -262,6 +268,50 @@ impl AiState {
         Ok((driver, params))
     }
 
+    /// For each of `visible`, whether its login is an administrator, or
+    /// `None` when that is not known (the server did not answer in time). An
+    /// answer is kept for [`ADMIN_CACHE`], so listing connections again does
+    /// not log in again.
+    async fn admin_flags(&self, visible: &[Visible]) -> Vec<Option<bool>> {
+        let known = |v: &Visible| {
+            let admins = self.admins.lock().unwrap_or_else(PoisonError::into_inner);
+            admins
+                .get(&v.conn.id)
+                .filter(|(_, at)| at.elapsed() < ADMIN_CACHE)
+                .map(|(admin, _)| *admin)
+        };
+        let mut probes: Vec<Pin<Box<dyn Future<Output = ()> + Send + '_>>> = Vec::new();
+        for v in visible.iter().filter(|v| known(v).is_none()) {
+            probes.push(Box::pin(async move {
+                let Ok((driver, params)) = self.prepare(v, None).await else {
+                    return;
+                };
+                let probe = async {
+                    let _slot = self.slot().await;
+                    let mut session = driver.connect(&params).await.ok()?;
+                    session.is_admin().await.ok()
+                };
+                if let Ok(Some(admin)) = tokio::time::timeout(ADMIN_PROBE_TIMEOUT, probe).await {
+                    self.admins
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(v.conn.id.clone(), (admin, Instant::now()));
+                }
+            }));
+        }
+        // Run all the probes together.
+        std::future::poll_fn(|cx| {
+            probes.retain_mut(|p| p.as_mut().poll(cx).is_pending());
+            if probes.is_empty() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        visible.iter().map(known).collect()
+    }
+
     /// The MCP client's name, as set by [`Self::set_client`].
     fn client(&self) -> Option<String> {
         self.client
@@ -308,6 +358,11 @@ impl AiState {
         blocking(move || f(&cache)).await.ok()
     }
 }
+
+/// How long a login's administrator status is remembered.
+const ADMIN_CACHE: Duration = Duration::from_secs(600);
+/// How long `list_connections` waits to learn a login's role.
+const ADMIN_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a metadata session waits for a lock, in milliseconds.
 const METADATA_LOCK_TIMEOUT_MS: u32 = 5000;

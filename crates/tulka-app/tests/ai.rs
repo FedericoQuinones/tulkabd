@@ -1021,6 +1021,29 @@ async fn stuck_metadata_calls_do_not_hold_the_slots_of_run_query() {
 }
 
 #[tokio::test]
+async fn list_connections_warns_about_an_administrator_login_once() {
+    let f = Fixture::standard();
+    let plain = list_connections(&f.state).await.text;
+    assert!(!plain.contains("Warning"), "{plain}");
+    f.driver.script.admin.store(true, Ordering::SeqCst);
+    // The earlier answer is remembered for a while.
+    assert!(!list_connections(&f.state).await.text.contains("Warning"));
+    assert_eq!(f.driver.script.admin_asked.load(Ordering::SeqCst), 1);
+
+    let f = Fixture::standard();
+    f.driver.script.admin.store(true, Ordering::SeqCst);
+    let text = list_connections(&f.state).await.text;
+    assert!(
+        text.contains("Warning: Local logs in as a sysadmin."),
+        "{text}"
+    );
+    let again = list_connections(&f.state).await.text;
+    assert_eq!(again, text);
+    assert_eq!(f.driver.script.admin_asked.load(Ordering::SeqCst), 1);
+    assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn metadata_sessions_wait_at_most_five_seconds_for_a_lock() {
     let f = Fixture::standard();
     list_databases(&f.state, "Local".into()).await;
