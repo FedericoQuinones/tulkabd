@@ -271,6 +271,10 @@ impl EnvironmentStyle {
         {
             style.ai_access = ai_access;
         }
+        // Production is never shared with AI assistants, whatever was saved.
+        if environment == Environment::Production {
+            style.ai_access = AiAccess::None;
+        }
         style
     }
 }
@@ -869,6 +873,13 @@ mod tests {
         let e = cfg.preferences.environments;
         assert_eq!(e.production.ai_access, AiAccess::None);
         assert_eq!(e.local.ai_access, AiAccess::None);
+        let cfg = load_text(
+            r#"{"version": 1, "preferences": {"environments": {"production": {"aiAccess": "readOnly"}}}}"#,
+        );
+        assert_eq!(
+            cfg.preferences.environments.production.ai_access,
+            AiAccess::None
+        );
         assert_eq!(e.staging.ai_access, AiAccess::ReadOnly);
         let cfg = load_text(r#"{"version": 1, "preferences": {"environments": {"local": {}}}}"#);
         assert_eq!(
