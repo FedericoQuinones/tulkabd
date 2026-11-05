@@ -654,11 +654,50 @@ fn plain_text(v: &Value) -> Option<Cow<'_, str>> {
         Value::Null => return None,
         Value::Bool(b) => Cow::Borrowed(if *b { "1" } else { "0" }),
         Value::Int(i) => Cow::Owned(i.to_string()),
-        Value::Float(f) => Cow::Owned(f.to_string()),
+        Value::Float(f) => Cow::Owned(js_number_text(*f)),
         Value::Decimal(d) => Cow::Borrowed(d),
         Value::Bytes(b) => Cow::Owned(hex(b, true)),
         other => Cow::Borrowed(text_of(other)),
     })
+}
+
+/// `f` as JavaScript's `String(f)` writes it, which is what the grid shows
+/// for a float: the shortest text that round-trips, in an exponent form
+/// from 1e21 up and below 1e-6 (`1e-7`, `1e+21`), and `-0` as `0`.
+fn js_number_text(f: f64) -> String {
+    if f.is_nan() {
+        return "NaN".into();
+    }
+    if f.is_infinite() {
+        return if f < 0.0 { "-Infinity" } else { "Infinity" }.into();
+    }
+    if f == 0.0 {
+        return "0".into();
+    }
+    // `{:e}` gives the shortest round-trip digits: `d.ddde<exp>`.
+    let sci = format!("{:e}", f.abs());
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let k = digits.len() as i32;
+    // The value is 0.<digits> * 10^n.
+    let n = exp.parse::<i32>().unwrap_or(0) + 1;
+    let sign = if f < 0.0 { "-" } else { "" };
+    let body = if k <= n && n <= 21 {
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else {
+        let e = n - 1;
+        let tail = format!("e{}{}", if e < 0 { '-' } else { '+' }, e.abs());
+        if k == 1 {
+            format!("{digits}{tail}")
+        } else {
+            format!("{}.{}{tail}", &digits[..1], &digits[1..])
+        }
+    };
+    format!("{sign}{body}")
 }
 
 /// `0x` and the hex digits of `bytes`.
@@ -1001,6 +1040,35 @@ mod tests {
                 Value::Bytes(vec![0; MAX_CELL_BYTES]),
             ]
         );
+    }
+
+    #[test]
+    fn floats_read_as_javascript_writes_them() {
+        for (f, want) in [
+            (1e-7, "1e-7"),
+            (1.5e-7, "1.5e-7"),
+            (1e21, "1e+21"),
+            (1.2345e25, "1.2345e+25"),
+            (1e20, "100000000000000000000"),
+            (123.456, "123.456"),
+            (-0.0, "0"),
+            (0.0, "0"),
+            (0.000001, "0.000001"),
+            (-2.5, "-2.5"),
+            (3.0, "3"),
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "Infinity"),
+            (f64::NEG_INFINITY, "-Infinity"),
+        ] {
+            assert_eq!(js_number_text(f), want);
+        }
+    }
+
+    #[test]
+    fn equals_finds_floats_as_the_grid_shows_them() {
+        assert!(cell_equals(&Value::Float(1e-7), "1e-7"));
+        assert!(cell_equals(&Value::Float(1e21), "1e+21"));
+        assert!(cell_equals(&Value::Float(-0.0), "0"));
     }
 
     #[test]
