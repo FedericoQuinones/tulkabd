@@ -1041,6 +1041,43 @@ async fn copy_results_in_excel_and_ai_formats() {
 }
 
 #[tokio::test]
+async fn copying_one_cell_has_no_header_but_two_cells_do() {
+    let (f, _) = connected("t1").await;
+    let (result, _) = run(&f.state, "t1", "rows 2").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    let clipboard = Arc::new(FakeClipboard::default());
+    let copy = |sel| {
+        copy_results(
+            &f.state,
+            "t1".into(),
+            0,
+            CopyMode::Excel,
+            sel,
+            clipboard.clone(),
+        )
+    };
+    copy(Selection::Cells {
+        rows: (1, 1),
+        cols: (0, 0),
+    })
+    .await
+    .unwrap();
+    let row = fake_row(1);
+    let expected = tulka_core::to_excel_value(&row[0], system_decimal_separator());
+    assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+    assert!(!expected.contains('\n'));
+
+    copy(Selection::Cells {
+        rows: (1, 1),
+        cols: (0, 1),
+    })
+    .await
+    .unwrap();
+    let last = clipboard.texts.lock().unwrap().last().cloned().unwrap();
+    assert!(last.contains("\r\n"));
+}
+
+#[tokio::test]
 async fn large_cells_are_capped_with_one_warning_and_trimmed_for_display() {
     let (f, _) = connected("t1").await;
     let (result, events) = run(&f.state, "t1", "big 2; rows 1; big 1").await;
@@ -1088,15 +1125,8 @@ async fn large_cells_are_capped_with_one_warning_and_trimmed_for_display() {
     )
     .await
     .unwrap();
-    let doc_column = Column {
-        name: "doc".into(),
-        type_name: "fake".into(),
-    };
-    let expected = to_excel_tsv(
-        &[doc_column],
-        &[vec![Value::Text("x".repeat(MAX_CELL_BYTES))]],
-        system_decimal_separator(),
-    );
+    // A single cell copies as its bare value, without the header.
+    let expected = "x".repeat(MAX_CELL_BYTES);
     assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
 
     // A run without large values has no warning.
