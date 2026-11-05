@@ -4,7 +4,7 @@
 const COMMA_LANGUAGES: &[&str] = &[
     "es", "pt", "fr", "de", "it", "nl", "ru", "pl", "tr", "sv", "da", "nb", "no", "nn", "fi", "cs",
     "id", "ro", "hu", "el", "uk", "bg", "ca", "hr", "sk", "sl", "sr", "lt", "lv", "et", "vi", "az",
-    "kk", "be", "ka", "hy", "mk", "bs", "sq", "eu", "gl", "is", "af", "uz", "ky",
+    "kk", "rm", "be", "ka", "hy", "mk", "bs", "sq", "eu", "gl", "is", "af", "uz", "ky",
 ];
 
 /// `(language, region, separator)` where a region differs from its language.
@@ -21,6 +21,8 @@ const REGION_OVERRIDES: &[(&str, &str, char)] = &[
     ("es", "NI", '.'),
     ("es", "PA", '.'),
     ("es", "SV", '.'),
+    ("es", "CU", '.'),
+    ("es", "BZ", '.'),
     // Swiss and Liechtenstein German/Italian use the point (fr-CH a comma).
     ("de", "CH", '.'),
     ("de", "LI", '.'),
@@ -89,7 +91,7 @@ mod tests {
     fn more_comma_languages() {
         for l in [
             "ro-RO", "hu", "el-GR", "uk-UA", "bg", "ca-ES", "hr", "sk", "sl", "sr-RS", "lt", "lv",
-            "et", "vi-VN", "az", "kk",
+            "et", "vi-VN", "az", "kk", "rm-CH",
         ] {
             assert_eq!(decimal_separator_for(l), ',', "{l}");
         }
@@ -111,6 +113,8 @@ mod tests {
             "es-NI",
             "es-PA",
             "es-SV",
+            "es-CU",
+            "es-BZ",
             "es-419",
             "es_MX.UTF-8",
             "es-Latn-MX",
