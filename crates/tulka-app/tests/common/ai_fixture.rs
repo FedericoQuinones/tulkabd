@@ -44,6 +44,10 @@ pub struct Script {
     pub peak: AtomicUsize,
     /// Times a running script was cancelled.
     pub cancels: AtomicUsize,
+    /// Every lock timeout a session was given, in milliseconds.
+    pub lock_timeouts: Mutex<Vec<u32>>,
+    /// Makes `list_databases` wait forever, as a call blocked on a lock does.
+    pub hang_list: AtomicBool,
 }
 
 pub struct FakeDriver {
@@ -146,7 +150,15 @@ impl Session for FakeSession {
         })
     }
 
+    async fn set_lock_timeout(&mut self, ms: u32) -> Result<(), DriverError> {
+        self.script.lock_timeouts.lock().unwrap().push(ms);
+        Ok(())
+    }
+
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError> {
+        if self.script.hang_list.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         Ok(self
             .script
             .databases
@@ -169,6 +181,9 @@ impl Session for FakeSession {
     }
 
     async fn snapshot(&mut self, database: &str) -> Result<DatabaseSnapshot, DriverError> {
+        if database == "stuck" {
+            std::future::pending::<()>().await;
+        }
         self.script
             .snapshots_asked
             .lock()
@@ -189,6 +204,9 @@ impl Session for FakeSession {
         schema: &str,
         name: &str,
     ) -> Result<TableStructure, DriverError> {
+        if name == "stuck" {
+            std::future::pending::<()>().await;
+        }
         if name == "lost" {
             return Err(DriverError::Disconnected(
                 "socket closed by db.example.com".into(),

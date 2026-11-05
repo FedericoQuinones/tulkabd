@@ -8,8 +8,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tulka_app::ai::{
-    describe_table, list_connections, list_databases, run_query, search_objects, QueryRequest,
-    SearchRequest, ToolText,
+    describe_table, describe_table_until, list_connections, list_databases, list_databases_until,
+    run_query, search_objects, search_objects_until, QueryRequest, SearchRequest, ToolText,
 };
 use tulka_app::tulka_store::{RunLogOutcome, RunSource};
 use tulka_core::SecretStore as _;
@@ -949,6 +949,83 @@ async fn the_password_is_nowhere() {
             "{text}"
         );
     }
+}
+
+fn timed_out_1s() -> ToolText {
+    ToolText {
+        text: "Timeout (1 s) reached; the query was cancelled.".into(),
+        is_error: true,
+    }
+}
+
+#[tokio::test]
+async fn metadata_tools_stop_at_the_time_limit() {
+    let f = Fixture::standard();
+    f.set_preferences(|p| p.ai_query_timeout_s = 1);
+    f.driver.script.hang_list.store(true, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let (a, b, c) = tokio::join!(
+        list_databases(&f.state, "Local".into()),
+        describe_table(&f.state, "Local".into(), None, "stuck".into()),
+        async {
+            let mut req = search("t");
+            req.connection = Some("Local".into());
+            req.database = Some("stuck".into());
+            search_objects(&f.state, req).await
+        }
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!((a, b, c), (timed_out_1s(), timed_out_1s(), timed_out_1s()));
+    // Nothing keeps a session or a slot.
+    assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
+    f.driver.script.hang_list.store(false, Ordering::SeqCst);
+    assert!(!list_databases(&f.state, "Local".into()).await.is_error);
+}
+
+#[tokio::test]
+async fn metadata_tools_stop_when_the_client_gives_up() {
+    let f = Fixture::standard();
+    let gone = || tokio::time::sleep(Duration::from_millis(100));
+    let cancelled = ToolText {
+        text: "The query was cancelled.".into(),
+        is_error: true,
+    };
+    f.driver.script.hang_list.store(true, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        list_databases_until(&f.state, "Local".into(), gone()).await,
+        cancelled
+    );
+    assert_eq!(
+        describe_table_until(&f.state, "Local".into(), None, "stuck".into(), gone()).await,
+        cancelled
+    );
+    let mut req = search("t");
+    req.connection = Some("Local".into());
+    req.database = Some("stuck".into());
+    assert_eq!(search_objects_until(&f.state, req, gone()).await, cancelled);
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn stuck_metadata_calls_do_not_hold_the_slots_of_run_query() {
+    let f = Fixture::standard();
+    f.set_preferences(|p| p.ai_query_timeout_s = 1);
+    let stuck = || describe_table(&f.state, "Local".into(), None, "stuck".into());
+    let (_, _, _, _, ok) = tokio::join!(stuck(), stuck(), stuck(), stuck(), async {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        run(&f, "SELECT 1").await
+    });
+    assert!(!ok.is_error, "{}", ok.text);
+}
+
+#[tokio::test]
+async fn metadata_sessions_wait_at_most_five_seconds_for_a_lock() {
+    let f = Fixture::standard();
+    list_databases(&f.state, "Local".into()).await;
+    describe_table(&f.state, "Local".into(), Some("sales".into()), "t".into()).await;
+    assert_eq!(*f.driver.script.lock_timeouts.lock().unwrap(), [5000, 5000]);
 }
 
 #[tokio::test]

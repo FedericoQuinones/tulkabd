@@ -2,11 +2,15 @@
 //! describe a table.
 
 use std::collections::HashSet;
+use std::future::{pending, Future};
 
-use tulka_core::{DatabaseScope, DbObject, ObjectKind, TableStructure};
+use tulka_core::{ConnectParams, DatabaseScope, DbObject, Driver, ObjectKind, TableStructure};
 use tulka_store::{CachedDatabase, MetaCache, ObjectQuery};
 
-use super::{format, AiState, ToolText, Visible, AI_SEARCH_LIMIT_DEFAULT, AI_SEARCH_LIMIT_MAX};
+use super::{
+    connect_metadata, format, limited, AiState, ToolText, Visible, AI_SEARCH_LIMIT_DEFAULT,
+    AI_SEARCH_LIMIT_MAX,
+};
 
 /// A cached database that was indexed and is readable.
 fn is_indexed(d: &CachedDatabase) -> bool {
@@ -62,14 +66,30 @@ async fn list_connections_text(s: &AiState) -> ToolText {
 
 /// The answer of `list_databases`, within the output budget.
 pub async fn list_databases(s: &AiState, connection: String) -> ToolText {
-    list_databases_text(s, connection).await.within_budget()
+    list_databases_until(s, connection, pending()).await
+}
+
+/// [`list_databases`] that gives up when `cancelled` resolves (the client
+/// gave up) or after the configured time limit.
+pub async fn list_databases_until(
+    s: &AiState,
+    connection: String,
+    cancelled: impl Future<Output = ()> + Send,
+) -> ToolText {
+    list_databases_text(s, connection, cancelled)
+        .await
+        .within_budget()
 }
 
 /// The databases of a connection: the selected ones, or, with all of them,
 /// those the server lists now (the cache when it cannot be reached).
-async fn list_databases_text(s: &AiState, connection: String) -> ToolText {
-    let visible = match s.visible().await {
-        Ok(v) => v,
+async fn list_databases_text(
+    s: &AiState,
+    connection: String,
+    cancelled: impl Future<Output = ()> + Send,
+) -> ToolText {
+    let (visible, prefs) = match s.load().await {
+        Ok(loaded) => loaded,
         Err(e) => return e,
     };
     let v = match AiState::find(&visible, &connection) {
@@ -113,12 +133,16 @@ async fn list_databases_text(s: &AiState, connection: String) -> ToolText {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let _slot = s.slot().await;
-    let live = async {
-        let mut session = driver.connect(&params).await?;
+    let live = limited(prefs.ai_query_timeout_s, cancelled, async {
+        let _slot = s.slot().await;
+        let mut session = connect_metadata(driver.as_ref(), &params).await?;
         session.list_databases().await
-    }
+    })
     .await;
+    let live = match live {
+        Ok(live) => live,
+        Err(stopped) => return stopped,
+    };
     match live {
         Ok(names) => ToolText::ok(format!(
             "{} › databases (all)\n{}",
@@ -167,14 +191,28 @@ fn kind_name(kind: ObjectKind) -> &'static str {
 
 /// The answer of `search_objects`, within the output budget.
 pub async fn search_objects(s: &AiState, req: SearchRequest) -> ToolText {
-    search_objects_text(s, req).await.within_budget()
+    search_objects_until(s, req, pending()).await
+}
+
+/// [`search_objects`] that gives up, when it has to read the server, as soon
+/// as `cancelled` resolves or after the configured time limit.
+pub async fn search_objects_until(
+    s: &AiState,
+    req: SearchRequest,
+    cancelled: impl Future<Output = ()> + Send,
+) -> ToolText {
+    search_objects_text(s, req, cancelled).await.within_budget()
 }
 
 /// Finds tables, views and procedures (or columns) whose name contains every
 /// word of the query, among the connections shared with the AI. It reads the
 /// cache the app keeps, except for one named database that is not in it,
 /// which is read from the server.
-async fn search_objects_text(s: &AiState, req: SearchRequest) -> ToolText {
+async fn search_objects_text(
+    s: &AiState,
+    req: SearchRequest,
+    cancelled: impl Future<Output = ()> + Send,
+) -> ToolText {
     let terms: Vec<String> = req.query.split_whitespace().map(str::to_string).collect();
     if terms.is_empty() {
         return ToolText::error("Give at least one word to search for.");
@@ -183,8 +221,8 @@ async fn search_objects_text(s: &AiState, req: SearchRequest) -> ToolText {
         .limit
         .unwrap_or(AI_SEARCH_LIMIT_DEFAULT)
         .clamp(1, AI_SEARCH_LIMIT_MAX) as usize;
-    let visible = match s.visible().await {
-        Ok(v) => v,
+    let (visible, prefs) = match s.load().await {
+        Ok(loaded) => loaded,
         Err(e) => return e,
     };
     let scope: Vec<&Visible> = match &req.connection {
@@ -242,7 +280,13 @@ async fn search_objects_text(s: &AiState, req: SearchRequest) -> ToolText {
     };
 
     let (hits, total, capped) = if let Some(db) = live_database {
-        match live_search(s, scope[0], &db, &terms, &req).await {
+        let live = limited(
+            prefs.ai_query_timeout_s,
+            cancelled,
+            live_search(s, scope[0], &db, &terms, &req),
+        )
+        .await;
+        match live.and_then(|hits| hits) {
             Ok(mut hits) => {
                 let total = hits.len();
                 hits.truncate(limit);
@@ -334,7 +378,7 @@ async fn live_search(
     let (driver, params) = s.prepare(v, Some(database.to_string())).await?;
     let _slot = s.slot().await;
     let snapshot = async {
-        let mut session = driver.connect(&params).await?;
+        let mut session = connect_metadata(driver.as_ref(), &params).await?;
         session.snapshot(database).await
     }
     .await
@@ -394,7 +438,19 @@ pub async fn describe_table(
     database: Option<String>,
     table: String,
 ) -> ToolText {
-    describe_table_text(s, connection, database, table)
+    describe_table_until(s, connection, database, table, pending()).await
+}
+
+/// [`describe_table`] that gives up as soon as `cancelled` resolves (the
+/// client gave up) or after the configured time limit.
+pub async fn describe_table_until(
+    s: &AiState,
+    connection: String,
+    database: Option<String>,
+    table: String,
+    cancelled: impl Future<Output = ()> + Send,
+) -> ToolText {
+    describe_table_text(s, connection, database, table, cancelled)
         .await
         .within_budget()
 }
@@ -407,6 +463,7 @@ async fn describe_table_text(
     connection: String,
     database: Option<String>,
     table: String,
+    cancelled: impl Future<Output = ()> + Send,
 ) -> ToolText {
     let (schema, name) = match parse_table_name(&table) {
         Some(parsed) => parsed,
@@ -417,8 +474,8 @@ async fn describe_table_text(
             ))
         }
     };
-    let visible = match s.visible().await {
-        Ok(v) => v,
+    let (visible, prefs) = match s.load().await {
+        Ok(loaded) => loaded,
         Err(e) => return e,
     };
     let v = match AiState::find(&visible, &connection) {
@@ -433,8 +490,26 @@ async fn describe_table_text(
         Ok(p) => p,
         Err(e) => return e,
     };
-    let _slot = s.slot().await;
-    let mut session = match driver.connect(&params).await {
+    let server_part = async {
+        let _slot = s.slot().await;
+        describe_on_server(s, v, driver.as_ref(), &params, database, schema, name).await
+    };
+    limited(prefs.ai_query_timeout_s, cancelled, server_part)
+        .await
+        .unwrap_or_else(|stopped| stopped)
+}
+
+/// The part of `describe_table` that talks to the server.
+async fn describe_on_server(
+    s: &AiState,
+    v: &Visible,
+    driver: &dyn Driver,
+    params: &ConnectParams,
+    database: Option<String>,
+    schema: Option<String>,
+    name: String,
+) -> ToolText {
+    let mut session = match connect_metadata(driver, params).await {
         Ok(session) => session,
         Err(e) => return ToolText::error(format::connect_failed(&v.label, &e)),
     };

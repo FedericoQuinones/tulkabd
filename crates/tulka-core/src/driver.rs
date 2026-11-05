@@ -143,6 +143,11 @@ pub trait Session: Send {
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError>;
     async fn use_database(&mut self, name: &str) -> Result<(), DriverError>;
     async fn current_database(&mut self) -> Result<String, DriverError>;
+    /// Limits how long a statement of this session waits for a lock, in
+    /// milliseconds. A driver without locks does nothing.
+    async fn set_lock_timeout(&mut self, _ms: u32) -> Result<(), DriverError> {
+        Ok(())
+    }
     /// Every object of `database` with the columns of its tables and views.
     async fn snapshot(&mut self, database: &str) -> Result<DatabaseSnapshot, DriverError>;
     /// Columns, foreign keys and indexes of one table.

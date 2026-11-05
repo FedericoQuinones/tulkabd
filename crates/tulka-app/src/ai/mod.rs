@@ -16,8 +16,10 @@ mod query;
 mod tools;
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tulka_core::{
@@ -31,7 +33,10 @@ use crate::connections::{blocking, connect_params, saved_password};
 use crate::types::PASSWORD_REQUIRED;
 
 pub use query::{run_query, QueryRequest};
-pub use tools::{describe_table, list_connections, list_databases, search_objects, SearchRequest};
+pub use tools::{
+    describe_table, describe_table_until, list_connections, list_databases, list_databases_until,
+    search_objects, search_objects_until, SearchRequest,
+};
 
 /// Longest text of a table cell given to the assistant, in characters.
 pub const AI_CELL_CHARS: usize = 2000;
@@ -301,6 +306,38 @@ impl AiState {
     ) -> Option<T> {
         let cache = self.current_cache().await?;
         blocking(move || f(&cache)).await.ok()
+    }
+}
+
+/// How long a metadata session waits for a lock, in milliseconds.
+const METADATA_LOCK_TIMEOUT_MS: u32 = 5000;
+
+/// Opens a session for a metadata call: it waits at most
+/// [`METADATA_LOCK_TIMEOUT_MS`] for a lock, so another session's schema lock
+/// does not hold the call until the time limit.
+pub(crate) async fn connect_metadata(
+    driver: &dyn Driver,
+    params: &ConnectParams,
+) -> Result<Box<dyn tulka_core::Session>, tulka_core::DriverError> {
+    let mut session = driver.connect(params).await?;
+    // Best effort: the time limit still applies if the server refuses.
+    let _ = session.set_lock_timeout(METADATA_LOCK_TIMEOUT_MS).await;
+    Ok(session)
+}
+
+/// Runs `work` for at most `timeout_s` seconds, and not past the moment the
+/// client gives up. Its error is the text `run_query` answers in each case.
+pub(crate) async fn limited<T>(
+    timeout_s: u32,
+    cancelled: impl Future<Output = ()>,
+    work: impl Future<Output = T>,
+) -> Result<T, ToolText> {
+    tokio::select! {
+        out = work => Ok(out),
+        () = tokio::time::sleep(Duration::from_secs(u64::from(timeout_s))) => {
+            Err(ToolText::error(format::timed_out(timeout_s)))
+        }
+        () = cancelled => Err(ToolText::error(format::CANCELLED)),
     }
 }
 

@@ -604,6 +604,11 @@ impl Session for MssqlSession {
         self.query_string("SELECT DB_NAME()").await
     }
 
+    async fn set_lock_timeout(&mut self, ms: u32) -> Result<(), DriverError> {
+        self.query_rows(&format!("SET LOCK_TIMEOUT {ms}")).await?;
+        Ok(())
+    }
+
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError> {
         self.cancel_requested.store(false, Ordering::SeqCst);
         self.run_events(sql, tx).await
