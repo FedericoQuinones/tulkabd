@@ -544,6 +544,14 @@ async fn snapshot(slot: &AsyncMutex<Slot>, database: &str) -> Result<DatabaseSna
     slot.check(result)
 }
 
+/// Keeps the databases a connection's scope exposes. Names match without
+/// regard to case, as SQL Server database names do on the usual collations.
+fn retain_in_scope(databases: &mut Vec<String>, scope: &DatabaseScope) {
+    if let DatabaseScope::Selected { names } = scope {
+        databases.retain(|d| names.iter().any(|n| n.eq_ignore_ascii_case(d)));
+    }
+}
+
 /// The databases of `connection_id` selected in its query tabs.
 fn tab_databases(state: &AppState, connection_id: &str) -> HashSet<String> {
     state
@@ -620,9 +628,7 @@ pub async fn connect_explorer(
         let mut session = driver.connect(&params).await?;
         let server = session.server_info().await?;
         let mut databases = session.list_databases().await?;
-        if let DatabaseScope::Selected { names } = &conn.databases {
-            databases.retain(|d| names.contains(d));
-        }
+        retain_in_scope(&mut databases, &conn.databases);
         let bound = match server.single_database {
             true => Some(session.current_database().await?),
             false => None,
@@ -1119,5 +1125,25 @@ mod tests {
         let (text, ids) = folder_scope(" a /x", &tree, &config).unwrap();
         assert_eq!(text, "x");
         assert!(ids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn selected_scope_matches_names_without_regard_to_case() {
+        let mut dbs = vec!["Sales".to_string(), "hr".into(), "Other".into()];
+        retain_in_scope(
+            &mut dbs,
+            &DatabaseScope::Selected {
+                names: vec!["sales".into(), "HR".into()],
+            },
+        );
+        assert_eq!(dbs, ["Sales", "hr"]);
+        let mut all = vec!["A".to_string()];
+        retain_in_scope(&mut all, &DatabaseScope::All);
+        assert_eq!(all, ["A"]);
     }
 }
