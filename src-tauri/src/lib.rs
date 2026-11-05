@@ -165,10 +165,13 @@ pub fn run() {
             std::thread::spawn(move || {
                 let events = events::TauriEvents(handle.clone());
                 loop {
-                    let entries = tauri::async_runtime::block_on(tulka_app::poll_ai_runs(
+                    let poll = tauri::async_runtime::block_on(tulka_app::poll_ai_runs(
                         &handle.state::<AppState>(),
                     ));
-                    for entry in entries {
+                    if poll.reset {
+                        events.emit(tulka_app::AppEvent::RunLogReset);
+                    }
+                    for entry in poll.entries {
                         events.emit(tulka_app::AppEvent::RunLogged { entry });
                     }
                     std::thread::sleep(std::time::Duration::from_secs(2));

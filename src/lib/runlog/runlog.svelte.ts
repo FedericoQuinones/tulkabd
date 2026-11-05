@@ -76,6 +76,13 @@ export class RunLogStore {
     }
   }
 
+  /** The ids changed (the log moved files): read the first page again if it had been read. */
+  async reload(): Promise<void> {
+    const wasLoaded = this.loaded;
+    this.reset();
+    if (wasLoaded) await this.ensureLoaded();
+  }
+
   /** Back to the state before the first load. */
   reset(): void {
     this.entries = [];

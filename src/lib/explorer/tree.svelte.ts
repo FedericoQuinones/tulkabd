@@ -116,7 +116,7 @@ class ExplorerStore {
   }
 
   handleEvent(e: AppEvent): void {
-    if (e.kind === "runLogged") return;
+    if (e.kind === "runLogged" || e.kind === "runLogReset") return;
     const st = this.state(e.connectionId);
     if (e.kind === "explorerStatus") {
       if (e.status === "error" && st.status === "offline" && this.userOffline.has(e.connectionId)) {

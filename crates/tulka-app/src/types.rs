@@ -90,6 +90,8 @@ pub enum AppEvent {
     IndexIdle { connection_id: String },
     /// A run was added to the run log.
     RunLogged { entry: RunLogEntry },
+    /// The run log was reopened from its file: entry ids changed, read it again.
+    RunLogReset,
 }
 
 /// Where [`AppEvent`]s go. The Tauri layer emits them to the window; tests
@@ -518,6 +520,7 @@ mod tests {
                 },
                 json!({"kind": "runLogged", "entry": {"id": 1, "atMs": 5, "connectionId": "c1", "connectionName": "prod", "color": "#fff", "database": "db", "sql": "SELECT 1", "sqlTruncated": false, "outcome": "ok", "rows": 1, "elapsedMs": null, "source": "app", "client": null}}),
             ),
+            (AppEvent::RunLogReset, json!({"kind": "runLogReset"})),
         ];
         for (ev, expected) in cases {
             assert_eq!(to_json(&ev), expected);

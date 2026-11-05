@@ -109,6 +109,25 @@ test("runLogged prepends and bumps the today counter", () => {
   expect(document.body.textContent).toContain("Run log2");
 });
 
+test("reload drops held entries and reads the first page again when it had been read", async () => {
+  vi.mocked(ipc.listRunLog).mockResolvedValue([entry(9)]);
+  await runLog.ensureLoaded();
+  runLog.prepend(entry(3));
+  vi.mocked(ipc.listRunLog).mockResolvedValue([entry(20), entry(19)]);
+  await runLog.reload();
+  expect(runLog.entries.map((e) => e.id)).toEqual([20, 19]);
+  expect(runLog.loaded).toBe(true);
+});
+
+test("reload before the log was read only clears", async () => {
+  runLog.prepend(entry(3));
+  vi.mocked(ipc.listRunLog).mockClear();
+  await runLog.reload();
+  expect(runLog.entries).toEqual([]);
+  expect(runLog.loaded).toBe(false);
+  expect(ipc.listRunLog).not.toHaveBeenCalled();
+});
+
 test("runLogged from the poller prepends like any other", () => {
   runLog.prepend(entry(5));
   runLog.prepend(entry(7, { source: "ai", client: "claude" }));
