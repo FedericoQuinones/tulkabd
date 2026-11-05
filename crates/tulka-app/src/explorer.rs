@@ -49,7 +49,9 @@
 //! together with another one, nor with the tabs or connections locks.
 //!
 //! Stopping a connection's Explorer drops its entry (whose `stop` sender
-//! wakes the task), waits for the task to end, then closes the slot. The task
+//! wakes the task), waits for the task to end, then closes the slot (in the
+//! background if a live call still holds it, so a stop never waits for the
+//! server). The task
 //! can only be interrupted while talking to the server; a cache and index
 //! write in progress always finishes, so the two stay consistent.
 
@@ -345,7 +347,19 @@ impl Explorer {
         if let Some(task) = task {
             let _ = task.await;
         }
-        slot.lock().await.close();
+        // A live call (structure, definition) may still hold the slot while
+        // the server is slow; do not make a disconnect wait for it. The
+        // session closes as soon as that call lets go.
+        let closed = match slot.try_lock() {
+            Ok(mut guard) => {
+                guard.close();
+                true
+            }
+            Err(_) => false,
+        };
+        if !closed {
+            tokio::spawn(async move { slot.lock().await.close() });
+        }
     }
 
     /// The connection was lost (seen with `epoch`): forgets the Explorer and

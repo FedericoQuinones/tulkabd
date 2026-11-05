@@ -59,6 +59,11 @@ struct Inner {
     connect_release: Notify,
     /// When set as a `connect` starts, that connect fails (after the gate).
     fail_connect: AtomicBool,
+    /// When set, `structure` signals `structure_entered` and waits for
+    /// `structure_release`.
+    gate_structure: AtomicBool,
+    structure_entered: Notify,
+    structure_release: Notify,
 }
 
 impl Inner {
@@ -223,6 +228,10 @@ impl Session for MetaSession {
         _name: &str,
     ) -> Result<TableStructure, DriverError> {
         self.check_bound(database);
+        if self.inner.gate_structure.load(Ordering::SeqCst) {
+            self.inner.structure_entered.notify_one();
+            self.inner.structure_release.notified().await;
+        }
         Ok(TableStructure {
             columns: vec![column("id", true)],
             foreign_keys: vec![],
@@ -1291,4 +1300,43 @@ async fn clearing_the_metadata_cache_forgets_disconnected_connections_and_reinde
     .expect("the cache was not cleared");
     assert_eq!(after.hits.len(), 1);
     assert!(explorer_databases(&f.state, "c2".into()).await.is_empty());
+}
+
+#[tokio::test]
+async fn disconnect_does_not_wait_for_a_stuck_live_call() {
+    let f = fx(Inner::new(&["a"]));
+    save(&f, conn("c1", "Main", None)).await;
+    connect_explorer(&f.state, "c1".into(), None).await.unwrap();
+    f.events.wait_idle("c1").await;
+    f.driver.gate_structure.store(true, Ordering::SeqCst);
+    let state = f.state.clone();
+    let call = tokio::spawn(async move {
+        table_structure(
+            &state,
+            "c1".into(),
+            "a".into(),
+            "dbo".into(),
+            "Pedidos".into(),
+        )
+        .await
+    });
+    tokio::time::timeout(TIMEOUT, f.driver.structure_entered.notified())
+        .await
+        .unwrap();
+
+    tokio::time::timeout(TIMEOUT, disconnect_explorer(&f.state, "c1".into()))
+        .await
+        .expect("disconnect waited for the live call")
+        .unwrap();
+    // The session closes once the call lets go of it.
+    assert_eq!(f.driver.open.load(Ordering::SeqCst), 1);
+    f.driver.structure_release.notify_one();
+    let _ = call.await;
+    tokio::time::timeout(TIMEOUT, async {
+        while f.driver.open.load(Ordering::SeqCst) != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the session was never closed");
 }
