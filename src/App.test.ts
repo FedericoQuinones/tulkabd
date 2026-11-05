@@ -343,7 +343,8 @@ test("drop event opens the accepted files", async () => {
     drop.handler!({ payload: ["/a.sql"] });
     await new Promise((r) => setTimeout(r, 0));
     flushSync();
-    const calls = vi.mocked(invoke).mock.calls.map(([cmd, args]) => [cmd, args]);
+    // Only the file reads matter; the startup probe may land in this window too.
+    const calls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "read_sql_file").map(([cmd, args]) => [cmd, args]);
     expect(calls).toEqual([["read_sql_file", { path: "/a.sql" }]]);
     const titles = [...document.querySelectorAll('.group [role="tab"]')].map((x) => x.textContent!.trim());
     expect(titles).toEqual(["a.sql"]);
