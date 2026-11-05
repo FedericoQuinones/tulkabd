@@ -316,6 +316,21 @@ read it as `Numeric`.
 
 **Drop when** upstream decodes money without going through `f64`.
 
+## 9. `ColumnType` of nullable `smallmoney` / `smalldatetime`
+
+**What.** A nullable `smallmoney` column (`MONEYN`, length 4) reports
+`ColumnType::Money4` and a nullable `smalldatetime` (`DATETIMEN`, length 4)
+reports `ColumnType::Datetime4`, as the NOT NULL ones already did. The
+8-byte forms keep `Money` and `Datetimen`.
+
+**Why.** Both used to report `Money` / `Datetimen`, so a client could not tell
+the types apart.
+
+**Files.** `src/row.rs`: the `VarLenSized` arm of `From<&TypeInfo>` and its
+test.
+
+**Drop when** upstream looks at the length for these two types.
+
 ## 4. Build plumbing
 
 - `Cargo.toml`: a `[[test]]` entry for `tests/tulka_patches.rs` (the published

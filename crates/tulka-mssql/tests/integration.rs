@@ -202,6 +202,40 @@ async fn money_is_exact_at_the_extremes() {
 }
 
 #[tokio::test]
+async fn nullable_small_types_keep_their_names() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let (result, events) = collect(
+        s.as_mut(),
+        "CREATE TABLE #n(a smalldatetime NULL, b smallmoney NULL, c datetime NULL, d money NULL, \
+         e smalldatetime NOT NULL, f smallmoney NOT NULL); SELECT * FROM #n",
+    )
+    .await;
+    result.unwrap();
+    let names: Vec<String> = events
+        .iter()
+        .find_map(|ev| match ev {
+            ExecEvent::ResultStart { columns, .. } => {
+                Some(columns.iter().map(|c| c.type_name.clone()).collect())
+            }
+            _ => None,
+        })
+        .expect("a result set");
+    assert_eq!(
+        names,
+        [
+            "smalldatetime",
+            "smallmoney",
+            "datetime",
+            "money",
+            "smalldatetime",
+            "smallmoney"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn varchar_in_oem_collations_decodes() {
     let Some(p) = test_params() else { return };
     let mut s = connect(&p).await;
