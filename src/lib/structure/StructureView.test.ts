@@ -5,12 +5,15 @@ import { flushSync, mount, unmount } from "svelte";
 vi.mock("../ipc", async (original) => ({
   ...(await original<typeof import("../ipc")>()),
   tableStructure: vi.fn(),
+  saveConnection: vi.fn(),
 }));
 
 import * as ipc from "../ipc";
 import type { TableStructure } from "../ipc";
 import { explorer } from "../explorer/tree.svelte";
-import StructureView, { clearStructureCache } from "./StructureView.svelte";
+import StructureView from "./StructureView.svelte";
+import { clearStructureCache } from "./cache";
+import { connections } from "../connections/store.svelte";
 
 const structure: TableStructure = {
   columns: [{ name: "id", typeName: "int", nullable: false, primaryKey: true, default: null }],
@@ -78,4 +81,39 @@ test("a failed load shows the error with Retry, and is not cached", async () => 
   await settle();
   expect(document.querySelector('[role="alert"]')).toBeNull();
   expect(document.body.textContent).toContain("PK");
+});
+
+test("a view showing not connected loads when the connection comes up", async () => {
+  explorer.conns["c1"] = { status: "offline", message: null, databases: null, indexing: [] };
+  vi.mocked(ipc.tableStructure).mockRejectedValueOnce("not_connected");
+  await show();
+  expect(ipc.tableStructure).toHaveBeenCalledTimes(1);
+  explorer.conns["c1"].status = "connected";
+  await settle();
+  expect(ipc.tableStructure).toHaveBeenCalledTimes(2);
+  expect(document.body.textContent).toContain("PK");
+});
+
+test("a reconnect or an edit of the connection drops the cached structures of its other tables", async () => {
+  explorer.conns["c1"] = { status: "offline", message: null, databases: null, indexing: [] };
+  await show();
+  hide();
+  const other = { ...props, name: "Customers" };
+  cmp = mount(StructureView, { target: document.body, props: other });
+  await settle();
+  hide();
+  expect(ipc.tableStructure).toHaveBeenCalledTimes(2);
+  // Orders is not on screen while the connection goes down and up.
+  explorer.conns["c1"].status = "connected";
+  await settle();
+  await show();
+  expect(ipc.tableStructure).toHaveBeenCalledTimes(3);
+  hide();
+  // Saving the connection (same id, maybe a new server) forgets them too.
+  vi.mocked(ipc.saveConnection).mockResolvedValue({} as never);
+  vi.spyOn(connections, "refresh").mockResolvedValue();
+  vi.spyOn(connections, "loadGuardOff").mockResolvedValue();
+  await connections.save({ id: "c1" } as never);
+  await show();
+  expect(ipc.tableStructure).toHaveBeenCalledTimes(4);
 });

@@ -1,21 +1,32 @@
 <script lang="ts" module>
-  import type { TableStructure } from "../ipc";
+  import { explorer } from "../explorer/tree.svelte";
+  import { forgetStructures } from "./cache";
 
-  // A structure is loaded once per table: switching back to its tab shows it again without a query.
-  const MAX_CACHED = 50;
-  const cache = new Map<string, TableStructure>();
-  const cacheKey = (parts: string[]) => JSON.stringify(parts);
-  /** Forgets every loaded structure (tests, and a full refresh). */
-  export function clearStructureCache() {
-    cache.clear();
+  // Any connection coming back may have a changed schema: its cached structures go, shown or not.
+  let watching = false;
+  function watchConnections() {
+    if (watching) return;
+    watching = true;
+    $effect.root(() => {
+      const was = new Map<string, boolean>();
+      $effect(() => {
+        for (const [id, c] of Object.entries(explorer.conns)) {
+          const now = c.status === "connected";
+          if (now && was.get(id) === false) forgetStructures(id);
+          was.set(id, now);
+        }
+      });
+    });
   }
 </script>
+
 
 <script lang="ts">
   import { untrack } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
-  import { explorer } from "../explorer/tree.svelte";
+  import type { TableStructure } from "../ipc";
+  import { cacheStructure, cachedStructure } from "./cache";
   import { isNotConnected } from "../tabs/tabs.svelte";
 
   interface Props {
@@ -26,7 +37,8 @@
   }
   let { connectionId, database, schema, name }: Props = $props();
 
-  const key = $derived(cacheKey([connectionId, database, schema, name]));
+  watchConnections();
+  const key = $derived([connectionId, database, schema, name] as const);
   let data = $state<TableStructure | null>(null);
   let notice = $state<string | null>(null);
   let loading = $state(true);
@@ -39,9 +51,7 @@
     notice = null;
     try {
       const result = await ipc.tableStructure(connectionId, database, schema, name);
-      cache.delete(k);
-      cache.set(k, result);
-      if (cache.size > MAX_CACHED) cache.delete(cache.keys().next().value!);
+      cacheStructure(...k, result);
       if (id === seq) data = result;
     } catch (e) {
       if (id === seq) notice = isNotConnected(e) ? t("tabs.notConnected") : t("tabs.loadFailed", { error: String(e) });
@@ -51,7 +61,7 @@
   }
   $effect(() => {
     const k = key;
-    const hit = untrack(() => cache.get(k));
+    const hit = untrack(() => cachedStructure(...k));
     if (hit) {
       data = hit;
       loading = false;
@@ -65,7 +75,7 @@
   $effect(() => {
     const now = explorer.conns[connectionId]?.status === "connected";
     untrack(() => {
-      if (now && !wasConnected && data) void load();
+      if (now && !wasConnected) void load();
       wasConnected = now;
     });
   });
@@ -80,7 +90,7 @@
   {:else if loading || !data}
     <p class="hint">{t("structure.loading")}</p>
   {:else}
-    <div class="bar"><button type="button" onclick={load} disabled={loading}>{t("structure.refresh")}</button></div>
+    <div class="bar"><button type="button" onclick={load}>{t("structure.refresh")}</button></div>
     <h3>{t("structure.columns")}</h3>
     <table>
       <thead>
