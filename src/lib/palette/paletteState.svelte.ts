@@ -67,7 +67,9 @@ class PaletteStore {
     const session = ++this.session;
     ipc
       .onAppEvent((e) => {
-        if ((e.kind === "indexProgress" && e.done) || e.kind === "indexIdle") {
+        if (e.kind === "indexLoaded") {
+          void this.search(this.query, true);
+        } else if ((e.kind === "indexProgress" && e.done) || e.kind === "indexIdle") {
           if ((this.response?.indexing ?? 0) > 0) void this.search(this.query, true);
         }
       })

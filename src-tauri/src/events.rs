@@ -54,6 +54,7 @@ mod tests {
             }),
             r#"{"kind":"indexProgress","connectionId":"c1","database":"db","done":true,"noAccess":false}"#
         );
+        assert_eq!(json(&AppEvent::IndexLoaded), r#"{"kind":"indexLoaded"}"#);
         assert_eq!(
             json(&AppEvent::IndexIdle {
                 connection_id: "c1".into()

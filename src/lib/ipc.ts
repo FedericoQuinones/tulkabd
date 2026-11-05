@@ -240,6 +240,8 @@ export type AppEvent =
   | { kind: "explorerStatus"; connectionId: string; status: ExplorerStatus; message: string | null }
   | { kind: "indexProgress"; connectionId: string; database: string; done: boolean; noAccess: boolean }
   | { kind: "indexIdle"; connectionId: string }
+  /** The startup search index finished loading; an earlier search may have missed rows. */
+  | { kind: "indexLoaded" }
   | { kind: "runLogged"; entry: RunLogEntry }
   | { kind: "runLogReset" };
 

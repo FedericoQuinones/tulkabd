@@ -220,6 +220,7 @@ impl Explorer {
                     .collect();
                 let built = SearchIndex::build(entries);
                 *loader.index.write().unwrap_or_else(PoisonError::into_inner) = built;
+                loader.emit(AppEvent::IndexLoaded);
             });
         if spawned.is_err() {
             // Search starts empty and fills up as connections are indexed.

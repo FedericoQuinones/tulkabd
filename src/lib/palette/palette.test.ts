@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
-import type { ConnectionConfig, PaletteHit, SearchResponse } from "../ipc";
+import type { AppEvent, ConnectionConfig, PaletteHit, SearchResponse } from "../ipc";
 
 vi.mock("../ipc", () => ({
   connectExplorer: vi.fn(),
@@ -80,6 +80,23 @@ test("a response that arrives after a newer keystroke is dropped", async () => {
   await old;
   expect(palette.query).toBe("pe");
   expect(palette.flat.map((h) => h.object.name)).toEqual(["Pedidos"]);
+});
+
+test("the palette searches again when the startup index finishes loading", async () => {
+  let emit!: (e: AppEvent) => void;
+  vi.mocked(ipc.onAppEvent).mockImplementation(async (cb) => {
+    emit = cb;
+    return () => {};
+  });
+  vi.mocked(ipc.searchObjects).mockResolvedValue(response([], 1));
+  palette.show();
+  await flush();
+  await palette.search("ped");
+  expect(palette.response?.hits).toEqual([]);
+  vi.mocked(ipc.searchObjects).mockResolvedValue(response([hit({ name: "Pedidos" })]));
+  emit({ kind: "indexLoaded" });
+  await flush();
+  expect(palette.response?.hits.map((h) => h.object.name)).toEqual(["Pedidos"]);
 });
 
 test("groups hits by folder › connection › database, keeping the ranking order", () => {
