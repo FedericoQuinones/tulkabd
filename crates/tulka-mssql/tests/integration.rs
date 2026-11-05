@@ -170,6 +170,38 @@ async fn maps_types_and_unicode() {
 }
 
 #[tokio::test]
+async fn money_is_exact_at_the_extremes() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let (result, events) = collect(
+        s.as_mut(),
+        "SELECT CAST(922337203685477.5807 AS money), CAST(-922337203685477.5808 AS money), \
+         CAST(-0.0001 AS money), CAST(214748.3647 AS smallmoney), \
+         CAST(-214748.3648 AS smallmoney), CAST(-1.5 AS smallmoney), \
+         CAST(NULL AS money), \
+         ISNULL(CAST(922337203685477.5807 AS money), 0), ISNULL(CAST(-214748.3648 AS smallmoney), 0)",
+    )
+    .await;
+    result.unwrap();
+    let dec = |s: &str| Value::Decimal(s.into());
+    assert_eq!(
+        rows(&events),
+        vec![vec![
+            dec("922337203685477.5807"),
+            dec("-922337203685477.5808"),
+            dec("-0.0001"),
+            dec("214748.3647"),
+            dec("-214748.3648"),
+            dec("-1.5000"),
+            Value::Null,
+            dec("922337203685477.5807"),
+            dec("-214748.3648"),
+        ]]
+    );
+}
+
+#[tokio::test]
 async fn varchar_in_oem_collations_decodes() {
     let Some(p) = test_params() else { return };
     let mut s = connect(&p).await;

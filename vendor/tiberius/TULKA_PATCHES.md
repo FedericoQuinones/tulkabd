@@ -295,6 +295,27 @@ codecs.
 
 **Drop when** upstream releases CP437/CP850 support.
 
+## 8. Exact `money` / `smallmoney` decoding
+
+**What.** `money` and `smallmoney` values (fixed-length and nullable `MONEYN`)
+decode to `ColumnData::Numeric` with scale 4 holding the exact wire integer
+(an `i64`, or an `i32` for `smallmoney`), instead of `ColumnData::F64`. NULL is
+`ColumnData::Numeric(None)`. Encoding is unchanged (it already accepts `F64`
+and `Numeric`).
+
+**Why.** The `f64` lost the last digit above about 225 billion
+(`922337203685477.5807` came out as `...5808`).
+
+**Behaviour change.** `Row::get::<f64, _>` on a money column no longer works;
+read it as `Numeric`.
+
+**Files.**
+- `src/tds/codec/column_data/money.rs`: `decode` and its tests.
+- `src/tds/codec/column_data.rs`, `column_data/var_len.rs`: tests that
+  expected `F64` from a money column.
+
+**Drop when** upstream decodes money without going through `f64`.
+
 ## 4. Build plumbing
 
 - `Cargo.toml`: a `[[test]]` entry for `tests/tulka_patches.rs` (the published

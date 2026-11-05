@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use tiberius::error::Error as TdsError;
 use tiberius::{
-    AuthMethod, ColumnType, Config, EncryptionLevel, QueryItem, Row, SqlBrowser, ToSql,
+    AuthMethod, Config, EncryptionLevel, QueryItem, Row, SqlBrowser, ToSql,
 };
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
@@ -716,7 +716,6 @@ async fn run_script(client: &mut Client, sql: &str, out: &mut Emitter) -> Result
 /// The result set being streamed.
 struct ResultSet {
     index: u32,
-    types: Vec<ColumnType>,
 }
 
 /// Rows waiting to be sent.
@@ -783,21 +782,11 @@ async fn run_batch(
                         type_name: type_name(c.column_type()).to_string(),
                     })
                     .collect();
-                current = Some(ResultSet {
-                    index,
-                    types: meta.columns().iter().map(|c| c.column_type()).collect(),
-                });
+                current = Some(ResultSet { index });
                 out.send(ExecEvent::ResultStart { index, columns }).await;
             }
             Ok(Some(QueryItem::Row(row))) => {
-                let types = current.as_ref().map(|r| r.types.as_slice()).unwrap_or(&[]);
-                let values = row
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, data)| {
-                        to_value(data, types.get(i).copied().unwrap_or(ColumnType::Null))
-                    })
-                    .collect();
+                let values = row.into_iter().map(to_value).collect();
                 if buffer.rows.is_empty() {
                     buffer.deadline = Instant::now() + FLUSH_INTERVAL;
                 }
