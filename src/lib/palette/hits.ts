@@ -18,7 +18,8 @@ export const MAX_HITS_PER_GROUP = 8;
 /**
  * Groups hits by connection and database. Hits arrive best first, so a group
  * is placed where its best hit ranks and keeps its hits in ranking order; only
- * the first `MAX_HITS_PER_GROUP` of each are kept, the rest are counted.
+ * the first `MAX_HITS_PER_GROUP` of each are kept, the rest are counted. With a
+ * single group nothing hides the others, so all its hits are kept.
  */
 export function groupHits(hits: PaletteHit[]): PaletteGroup[] {
   const groups = new Map<string, PaletteGroup>();
@@ -29,10 +30,16 @@ export function groupHits(hits: PaletteHit[]): PaletteGroup[] {
       g = { key, path: [...h.folderPath, h.connectionName, h.database], connected: h.connected, hits: [], hidden: 0 };
       groups.set(key, g);
     }
-    if (g.hits.length < MAX_HITS_PER_GROUP) g.hits.push(h);
-    else g.hidden++;
+    g.hits.push(h);
   }
-  return [...groups.values()];
+  const all = [...groups.values()];
+  if (all.length > 1) {
+    for (const g of all) {
+      g.hidden = Math.max(0, g.hits.length - MAX_HITS_PER_GROUP);
+      g.hits.length = Math.min(g.hits.length, MAX_HITS_PER_GROUP);
+    }
+  }
+  return all;
 }
 
 export interface QueryGroup {

@@ -116,6 +116,11 @@ test("a group with many hits is capped so the next group's best hit stays near t
   expect(groups.map((g) => g.hits.length)).toEqual([MAX_HITS_PER_GROUP, 1]);
   expect(groups[0].hidden).toBe(30 - MAX_HITS_PER_GROUP);
   expect(groups[1].hidden).toBe(0);
+  // A single database keeps every hit.
+  const alone = groupHits(many);
+  expect(alone).toHaveLength(1);
+  expect(alone[0].hits).toHaveLength(30);
+  expect(alone[0].hidden).toBe(0);
   // Groups stay ordered by their best hit.
   const first = hit({ name: "Pedidos", connectionId: "c2", connectionName: "Local", database: "master" });
   expect(groupHits([first, ...many]).map((g) => g.path.at(-1))).toEqual(["master", "Ventas"]);
