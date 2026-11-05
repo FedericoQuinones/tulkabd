@@ -91,6 +91,7 @@
   "connection.databases.loading": "Loading...",
   "connection.databases.filter": "Filter databases",
   "connection.databases.count": "{count} selected",
+  "connection.databases.limitHint": "The selection shapes what tulkabd lists and checks in names. A login that only has access to these databases is the real limit.",
   "connection.databases.missing": "missing",
   "connection.databases.none": "No databases match.",
   "connection.databases.passwordNeeded": "Enter the password above to load the databases.",

@@ -87,6 +87,11 @@ The read-only check is conservative and has known limits:
 
 - Read only is enforced by tulkabd before anything is sent, and every AI query runs inside a transaction that is rolled back.
 - A function or a view on the server can still have effects tulkabd cannot see. For a hard guarantee, give the connection a login that only has `db_datareader`.
+- Use a least-privilege login for AI connections. With an administrator login, tulkabd cannot stop everything a plain `SELECT` can reach: it refuses the best-known file, password-hash and SQL-text sources (`sys.fn_xe_file_target_read_file`, `sys.fn_get_audit_file`, `fn_trace_gettable`, `fn_dump_dblog`, `fn_dblog`, `sys.dm_os_enumerate_filesystem`, `sys.dm_os_file_exists`, `sys.sql_logins`, `sys.dm_exec_sql_text`, `sys.dm_exec_input_buffer`, `fn_get_sql`), but others may exist. On Windows, a UNC path in such a function makes the service account authenticate over SMB. `list_connections` warns when a connection's login is a sysadmin.
+- "Selected databases" only shapes what tulkabd lists and checks in names: `run_query` refuses `db.schema.object` names outside the selection, but `sys.databases` still lists every database and functions such as `DB_NAME(5)` still answer. A login mapped only to those databases is the real limit.
+- Hints that can starve the server (`MAXDOP`, `MIN_GRANT_PERCENT`, `MAX_GRANT_PERCENT`, `QUERYTRACEON` inside `OPTION (…)`) are refused. The query timeout cannot be set above 300 seconds.
+- Error text from the driver hides the server and the login, but a query can still `SELECT @@SERVERNAME`, `SUSER_SNAME()` or `HOST_NAME()`.
+- A single huge cell is read whole from the server before being cut to 2000 characters, so it can use memory until the query ends or times out.
 - Query text and results go to the AI provider: share only what you would paste into a chat.
 - Every AI query is in the Run log, marked AI.
 
