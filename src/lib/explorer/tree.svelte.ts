@@ -223,7 +223,10 @@ class ExplorerStore {
    */
   async connect(id: string, password?: string, then?: ConnectThen): Promise<void> {
     const conn = connections.list.find((c) => c.id === id);
-    if (!conn) return;
+    if (!conn) {
+      then?.(t("tabs.connectionMissing"));
+      return;
+    }
     const st = this.state(id);
     this.userOffline.delete(id);
     const attempt = (this.attempts.get(id) ?? 0) + 1;
@@ -250,6 +253,7 @@ class ExplorerStore {
       } else if (s === "not_found") {
         st.status = "offline";
         void connections.refresh();
+        then?.(t("tabs.connectionMissing"));
       } else {
         st.status = "error";
         st.message = s;

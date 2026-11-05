@@ -286,6 +286,19 @@ test("a connect that fails after the password prompt reopens the palette with th
   expect(palette.error).toBe("Could not connect to Local: Login failed");
 });
 
+test("a connection deleted meanwhile shows an error in the palette", async () => {
+  const open = vi.spyOn(tabs, "open").mockReturnValue("t");
+  vi.mocked(ipc.connectExplorer).mockRejectedValueOnce("not_found");
+  vi.mocked(ipc.searchObjects).mockResolvedValue(response([hit({ name: "Pedidos", connectionId: "c2", connectionName: "Local", connected: false })]));
+  palette.show();
+  await palette.search("ped");
+  await palette.choose("open");
+  await flush();
+  expect(open).not.toHaveBeenCalled();
+  expect(palette.isOpen).toBe(true);
+  expect(palette.error).toBe("Could not connect to Local: That connection no longer exists.");
+});
+
 test("saved queries come after the objects, so Enter on the first row opens the best object", async () => {
   vi.mocked(ipc.searchObjects).mockResolvedValue({
     ...response([hit({ name: "Reportes" })]),
