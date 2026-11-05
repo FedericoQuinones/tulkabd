@@ -771,6 +771,7 @@ async fn names_outside_the_selected_databases_are_refused() {
         "SELECT * FROM otherdb.sys.tables",
         "SELECT * FROM [OtherDb].[sys].[tables]",
         "SELECT * FROM \"otherdb\"..t",
+        "SELECT * FROM [\u{E9}rp].dbo.t",
         "SELECT * FROM erp.dbo.t JOIN master.sys.databases d ON 1=1",
     ] {
         let out = run(&f, sql).await;

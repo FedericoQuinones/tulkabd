@@ -192,17 +192,30 @@ const DENIED_HINTS: &[&str] = &[
     "querytraceon",
 ];
 
-/// The text of a word or quoted name, lower case, without its brackets or
+/// The text of a word or quoted name as written, without its brackets or
 /// quotes.
-fn name_of(text: &str, t: &Token) -> String {
+fn unquoted(text: &str, t: &Token) -> String {
     let raw = lexer::src(text, t);
-    let inner = match (t.kind, raw.chars().next()) {
+    match (t.kind, raw.chars().next()) {
         (Kind::Quoted, Some('[')) => raw[1..raw.len() - 1].replace("]]", "]"),
         (Kind::Quoted, Some(q)) => {
             raw[1..raw.len() - 1].replace(&format!("{q}{q}"), &q.to_string())
         }
         _ => raw.to_string(),
-    };
+    }
+}
+
+/// A database name for comparing with the selection: lower case and without
+/// trailing spaces, but accents kept, because on an accent-sensitive server
+/// `Tulkä` and `Tulka` are different databases.
+fn database_name_of(text: &str, t: &Token) -> String {
+    unquoted(text, t).trim_end().to_lowercase()
+}
+
+/// The text of a word or quoted name, lower case, without its brackets or
+/// quotes.
+fn name_of(text: &str, t: &Token) -> String {
+    let inner = unquoted(text, t);
     // SQL Server ignores trailing spaces in an identifier: `[x ]` is `x`.
     // The ideographic space counts as one after folding.
     fold_name(&inner).trim_end().to_string()
@@ -298,13 +311,13 @@ pub fn referenced_databases(sql: &str) -> Vec<String> {
                 continue;
             }
             // A dotted name: parts separated by dots, a part may be empty.
-            let mut parts = vec![name_of(text, &tokens[i])];
+            let mut parts = vec![database_name_of(text, &tokens[i])];
             i += 1;
             while i < tokens.len() && is_punct(text, &tokens[i], ".") {
                 i += 1;
                 match tokens.get(i) {
                     Some(t) if is_name(t) => {
-                        parts.push(name_of(text, t));
+                        parts.push(database_name_of(text, t));
                         i += 1;
                     }
                     _ => parts.push(String::new()),
@@ -832,9 +845,14 @@ mod tests {
         ] {
             assert!(violation(sql).is_none(), "{sql}");
         }
+        // Accents are kept: another database may differ only by them.
         assert_eq!(
             referenced_databases("SELECT * FROM [\u{D3}tro].dbo.t"),
-            ["otro"]
+            ["\u{F3}tro"]
+        );
+        assert_eq!(
+            referenced_databases("SELECT * FROM [Tulk\u{E4}_mcp ].dbo.t"),
+            ["tulk\u{E4}_mcp"]
         );
     }
 
