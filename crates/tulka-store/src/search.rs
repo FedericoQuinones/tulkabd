@@ -46,6 +46,37 @@ struct Entry {
     haystack: Utf32String,
     /// Length of `haystack` in characters, for the tie-break.
     len: u32,
+    /// Position of the object name in `haystack`, in characters.
+    name_start: u32,
+}
+
+/// Added to a match inside the bare name, so a name beats a schema that
+/// matches as well as the name would.
+const NAME_BONUS: u32 = 16;
+/// Added when the name is exactly the query.
+const EXACT_BONUS: u32 = 1000;
+
+impl Entry {
+    /// The best score of `pattern` over `schema.name` and over the bare name,
+    /// and where the text it matched starts in `haystack`.
+    fn score(&self, pattern: &Pattern, matcher: &mut Matcher, exact: &str) -> Option<(u32, u32)> {
+        let full = pattern
+            .score(self.haystack.slice(..), matcher)
+            .map(|s| (s, 0));
+        let name = pattern
+            .score(self.haystack.slice(self.name_start as usize..), matcher)
+            .map(|s| {
+                let exact_name = self.object.name.to_lowercase() == exact;
+                (
+                    s + NAME_BONUS + if exact_name { EXACT_BONUS } else { 0 },
+                    self.name_start,
+                )
+            });
+        match (full, name) {
+            (Some(f), Some(n)) => Some(if n.0 >= f.0 { n } else { f }),
+            (f, n) => f.or(n),
+        }
+    }
 }
 
 struct DbRef {
@@ -128,20 +159,24 @@ impl SearchIndex {
     fn push(&mut self, db_id: u32, object: DbObject) {
         let haystack = Utf32String::from(format!("{}.{}", object.schema, object.name));
         let len = haystack.len() as u32;
+        let name_start = object.schema.chars().count() as u32 + 1;
         self.entries.push(Entry {
             db_id,
             object,
             haystack,
             len,
+            name_start,
         });
     }
 
-    /// Fuzzy search over `schema.name`. Ties on score order shorter names
+    /// Fuzzy search over `schema.name` and over the bare name (whichever scores
+    /// better; an exact name match comes first). Ties on score order shorter names
     /// first, then alphabetically (case-insensitive).
     pub fn search(&self, query: &str, scope: &SearchScope, limit: usize) -> SearchResults {
         let Some(pattern) = fuzzy_pattern(query) else {
             return SearchResults::default();
         };
+        let exact = query.trim().to_lowercase();
         let allowed: Vec<bool> = self
             .dbs
             .iter()
@@ -160,7 +195,7 @@ impl SearchIndex {
         };
         let chunk = self.entries.len().div_ceil(threads).max(1);
         let partials: Vec<Partial> = if threads == 1 {
-            vec![self.score_chunk(0, &self.entries, &pattern, &allowed, limit)]
+            vec![self.score_chunk(0, &self.entries, &pattern, &allowed, &exact, limit)]
         } else {
             std::thread::scope(|s| {
                 let handles: Vec<_> = self
@@ -168,8 +203,10 @@ impl SearchIndex {
                     .chunks(chunk)
                     .enumerate()
                     .map(|(i, c)| {
-                        let (pattern, allowed) = (&pattern, &allowed);
-                        s.spawn(move || self.score_chunk(i * chunk, c, pattern, allowed, limit))
+                        let (pattern, allowed, exact) = (&pattern, &allowed, &exact);
+                        s.spawn(move || {
+                            self.score_chunk(i * chunk, c, pattern, allowed, exact, limit)
+                        })
                     })
                     .collect();
                 handles
@@ -199,7 +236,16 @@ impl SearchIndex {
             .map(|(score, i)| {
                 let e = &self.entries[i as usize];
                 let mut indices = Vec::new();
-                pattern.indices(e.haystack.slice(..), &mut matcher, &mut indices);
+                // Where the winning score came from: the whole text or the name.
+                let start = e
+                    .score(&pattern, &mut matcher, &exact)
+                    .map_or(0, |(_, at)| at);
+                pattern.indices(
+                    e.haystack.slice(start as usize..),
+                    &mut matcher,
+                    &mut indices,
+                );
+                indices.iter_mut().for_each(|i| *i += start);
                 indices.sort_unstable();
                 indices.dedup();
                 let db = &self.dbs[e.db_id as usize];
@@ -225,6 +271,7 @@ impl SearchIndex {
         chunk: &[Entry],
         pattern: &Pattern,
         allowed: &[bool],
+        exact: &str,
         limit: usize,
     ) -> Partial {
         let mut matcher = Matcher::new(Config::DEFAULT);
@@ -238,7 +285,7 @@ impl SearchIndex {
             if !allowed[e.db_id as usize] {
                 continue;
             }
-            let Some(score) = pattern.score(e.haystack.slice(..), &mut matcher) else {
+            let Some((score, _)) = e.score(pattern, &mut matcher, exact) else {
                 continue;
             };
             p.total += 1;
@@ -409,6 +456,26 @@ mod tests {
             .iter()
             .map(|h| format!("{}.{}", h.object.schema, h.object.name))
             .collect()
+    }
+
+    #[test]
+    fn a_name_beats_a_schema_with_the_same_text() {
+        let idx = SearchIndex::build(vec![
+            e("c1", "db", "Sales", "Orders", ObjectKind::Table),
+            e("c1", "db", "Sales", "Customers", ObjectKind::Table),
+            e("c1", "db", "dbo", "Sales", ObjectKind::Table),
+            e("c1", "db", "dbo", "SalesHistory", ObjectKind::Table),
+        ]);
+        let r = idx.search("sales", &SearchScope::default(), 50);
+        let n = names(&r);
+        assert_eq!(n[0], "dbo.Sales");
+        assert_eq!(n[1], "dbo.SalesHistory");
+        assert_eq!(n.len(), 4);
+        // The highlight follows the part that matched.
+        assert_eq!(r.hits[0].indices, [4, 5, 6, 7, 8]);
+        // Querying schema and name still works.
+        let r = idx.search("sales.ord", &SearchScope::default(), 50);
+        assert_eq!(names(&r)[0], "Sales.Orders");
     }
 
     #[test]
