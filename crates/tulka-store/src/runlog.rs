@@ -327,9 +327,13 @@ fn insert_entry(conn: &Connection, e: &RunLogEntry) -> rusqlite::Result<()> {
 
 /// Writes one run, cutting its text and client name to their caps.
 fn insert_run(conn: &Connection, run: &NewRun) -> Result<RunLogEntry, String> {
-    // Masked before the cap so a cut can never leave the start of a secret.
-    let masked = crate::mask::mask_secrets(&run.sql);
-    let (sql, sql_truncated) = cap_sql(&masked);
+    // Cut first, so a huge script is not scanned whole, then masked, so a cut
+    // can never leave the start of a secret. Masking can make the text longer,
+    // hence the second cut.
+    let (head, cut) = cap_sql(&run.sql);
+    let masked = crate::mask::mask_secrets(head);
+    let (sql, cut_again) = cap_sql(&masked);
+    let sql_truncated = cut || cut_again;
     let client: Option<String> = run
         .client
         .as_ref()
@@ -700,6 +704,30 @@ mod tests {
             .unwrap();
         assert_eq!(entry.sql, "CREATE LOGIN x WITH PASSWORD = '***'");
         assert_eq!(store.list(None, 1)[0].sql, entry.sql);
+    }
+
+    #[test]
+    fn a_cut_inside_a_secret_literal_leaves_no_part_of_it() {
+        let store = RunLogStore::in_memory();
+        let lead = "-- pad\n".repeat((MAX_LOGGED_SQL_BYTES - 40) / 7);
+        let prefix = format!("{lead}CREATE LOGIN x WITH PASSWORD = '");
+        assert!(prefix.len() < MAX_LOGGED_SQL_BYTES);
+        let sql = format!("{prefix}{}'", "TopSecret".repeat(20));
+        assert!(sql.len() > MAX_LOGGED_SQL_BYTES);
+        let entry = store.insert(&run(&sql, 1)).unwrap();
+        assert!(entry.sql_truncated);
+        assert!(!entry.sql.contains("Top"), "{}", &entry.sql[prefix.len()..]);
+        assert!(entry.sql.ends_with("PASSWORD = '***"));
+    }
+
+    #[test]
+    fn masking_that_lengthens_the_text_is_capped_again() {
+        let store = RunLogStore::in_memory();
+        // `pwd=` values of one char grow to three once masked.
+        let sql = "'pwd=a;'+".repeat(MAX_LOGGED_SQL_BYTES / 9);
+        let entry = store.insert(&run(&sql, 1)).unwrap();
+        assert!(entry.sql.len() <= MAX_LOGGED_SQL_BYTES);
+        assert!(entry.sql_truncated);
     }
 
     #[test]
