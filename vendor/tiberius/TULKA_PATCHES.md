@@ -331,6 +331,24 @@ test.
 
 **Drop when** upstream looks at the length for these two types.
 
+## 10. Current database: `Client::database`
+
+**What.** `Client::database(&self) -> Option<&str>` returns the database named
+by the last ENVCHANGE (type 1, Database) token the client has read: the one
+chosen at login, then every `USE` (also inside a script or a procedure). It
+is updated as the tokens are read, so it is right after a cancelled or failed
+request as well.
+
+**Why.** Upstream decodes the token and drops it. A client that wants the
+current database after a `USE` would otherwise need a `SELECT DB_NAME()` round
+trip.
+
+**Files.** `src/tds/context.rs` (the `database` field and accessors),
+`src/tds/stream/token.rs` (`get_env_change` stores it), `src/client.rs`
+(`Client::database`), `tests/tulka_patches.rs` (a live test).
+
+**Drop when** upstream exposes the current database on `Client`.
+
 ## 4. Build plumbing
 
 - `Cargo.toml`: a `[[test]]` entry for `tests/tulka_patches.rs` (the published

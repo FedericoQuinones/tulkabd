@@ -474,6 +474,31 @@ async fn read_rows(stream: &mut tiberius::QueryStream<'_>, n: usize) {
     }
 }
 
+#[tokio::test]
+async fn database_follows_use_statements() {
+    let Some(mut client) = connect("database_follows_use_statements").await else {
+        return;
+    };
+
+    // The login ENVCHANGE names the default database.
+    assert_eq!(client.database(), Some("master"));
+
+    collect(&mut client, "USE tempdb").await.unwrap();
+    assert_eq!(client.database(), Some("tempdb"));
+
+    // Several `USE` in one batch: the last one wins.
+    collect(&mut client, "USE master; USE model; USE tempdb; USE master")
+        .await
+        .unwrap();
+    assert_eq!(client.database(), Some("master"));
+
+    // A failed `USE` leaves it alone.
+    assert!(collect(&mut client, "USE tulka_no_such_database")
+        .await
+        .is_err());
+    assert_eq!(client.database(), Some("master"));
+}
+
 async fn assert_usable_quickly(client: &mut TestClient) {
     let started = Instant::now();
     assert_eq!(select_one(client).await, 1);

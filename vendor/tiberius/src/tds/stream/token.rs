@@ -387,6 +387,10 @@ where
                 }
                 self.conn.context_mut().set_packet_size(new_size);
             }
+            // tulka patch: remember the current database (see `Client::database`).
+            TokenEnvChange::Database { ref new, .. } => {
+                self.conn.context_mut().set_database(new.clone());
+            }
             TokenEnvChange::BeginTransaction(desc) => {
                 self.conn.context_mut().set_transaction_descriptor(desc);
             }

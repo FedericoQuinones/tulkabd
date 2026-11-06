@@ -738,6 +738,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         self.connection.cancel_handle()
     }
 
+    /// tulka patch: the database the server last reported through an
+    /// ENVCHANGE token: the one chosen at login, then every `USE` the server
+    /// has answered so far. `None` when none was seen.
+    pub fn database(&self) -> Option<&str> {
+        self.connection.context().database()
+    }
+
     /// Closes this database connection explicitly.
     pub async fn close(self) -> crate::Result<()> {
         self.connection.close().await
