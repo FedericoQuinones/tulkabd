@@ -21,6 +21,7 @@ pub mod queries;
 pub mod query;
 pub mod results;
 pub mod runlog;
+pub mod save;
 pub mod session;
 pub mod settings;
 pub mod state;
@@ -61,6 +62,7 @@ pub use results::{
 pub use runlog::{
     clear_run_log, list_run_log, log_cancelled_run, poll_ai_runs, prune_run_log, AiRunPoll,
 };
+pub use save::{save_results, SaveOutcome};
 pub use session::{load_session, save_session};
 pub use settings::{
     data_locations, data_locations_in, reveal_target, reveal_target_in, DataLocations,

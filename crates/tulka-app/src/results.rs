@@ -289,6 +289,15 @@ impl ResultBuffer {
         }
     }
 
+    /// Every visible row, in display order, borrowed: for writing a whole
+    /// result out without collecting it first.
+    pub fn visible_rows(&self) -> impl Iterator<Item = &[Value]> + '_ {
+        (0..self.visible_len()).map(|i| {
+            let at = self.view.as_ref().map_or(i, |v| v[i] as usize);
+            self.rows[at].as_slice()
+        })
+    }
+
     /// The visible rows in the inclusive range `from..=to`, clamped.
     fn visible_between(&self, from: usize, to: usize) -> Vec<&[Value]> {
         let end = to.saturating_add(1).min(self.visible_len());
