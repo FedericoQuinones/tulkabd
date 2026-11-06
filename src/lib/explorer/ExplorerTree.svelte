@@ -71,6 +71,8 @@
   const geo = $derived<ScrollGeometry>({ total: rows.length, rowH, bodyH });
   // A list that shrank under the scroll position shows its end at once, without waiting for the
   // browser's clamp (and its scroll event).
+  /** Matches the bottom padding of `.tree` in the styles below. */
+  const BOTTOM_PADDING = 10;
   const range = $derived(visibleRange(Math.min(scrollTop, maxVirtualTop(geo)), bodyH, rowH, rows.length, OVERSCAN));
   const page = $derived(Math.max(1, Math.floor(viewportH / rowH) - 1));
   const positions = $derived(siblingPositions(rows));
@@ -157,7 +159,8 @@
         // scrolling right now and its scroll event will say where.
         const live = toVirtualTop(treeEl.scrollTop, geo);
         if (Math.abs(live - scrollTop) > 1 && programmatic === null) return;
-        if (scrollTop > maxVirtualTop(geo)) {
+        // The tree's bottom padding lets the user scroll that much past the last row.
+        if (scrollTop > maxVirtualTop(geo) + BOTTOM_PADDING) {
           setScroll(scrollTop);
           return;
         }
