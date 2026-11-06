@@ -53,7 +53,7 @@ const MAX_FOUND: usize = 5000;
 
 /// A database of a connection as cached. Serialized camelCase:
 /// `{"name", "noAccess", "indexedAt", "tables", "views", "procedures", "functions",
-/// "synonyms"}`.
+/// "tableFunctions", "synonyms"}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CachedDatabase {
@@ -65,7 +65,9 @@ pub struct CachedDatabase {
     pub tables: u32,
     pub views: u32,
     pub procedures: u32,
+    /// Scalar functions.
     pub functions: u32,
+    pub table_functions: u32,
     pub synonyms: u32,
 }
 
@@ -84,6 +86,7 @@ fn kind_str(k: ObjectKind) -> &'static str {
         ObjectKind::View => "view",
         ObjectKind::Procedure => "procedure",
         ObjectKind::Function => "function",
+        ObjectKind::TableFunction => "tableFunction",
         ObjectKind::Synonym => "synonym",
     }
 }
@@ -93,6 +96,7 @@ fn kind_from(s: &str) -> ObjectKind {
         "view" => ObjectKind::View,
         "procedure" => ObjectKind::Procedure,
         "function" => ObjectKind::Function,
+        "tableFunction" => ObjectKind::TableFunction,
         "synonym" => ObjectKind::Synonym,
         _ => ObjectKind::Table,
     }
@@ -179,7 +183,8 @@ pub struct ObjectQuery<'a> {
     /// Every term must match (substring, ignoring ASCII case). Already split
     /// on whitespace and non-empty.
     pub terms: &'a [String],
-    pub kind: Option<ObjectKind>,
+    /// Only these kinds; empty means every kind.
+    pub kinds: &'a [ObjectKind],
     /// Match column names instead of object names.
     pub in_columns: bool,
     /// At most this many hits are returned.
@@ -429,12 +434,15 @@ impl MetaCache {
         let q = || -> rusqlite::Result<Vec<CachedDatabase>> {
             let mut st = conn.prepare(
                 "SELECT d.name, d.no_access, d.indexed_at,
-                    (SELECT count(*) FROM objects o WHERE o.connection_id = d.connection_id AND o.database = d.name AND o.kind = 'table'),
-                    (SELECT count(*) FROM objects o WHERE o.connection_id = d.connection_id AND o.database = d.name AND o.kind = 'view'),
-                    (SELECT count(*) FROM objects o WHERE o.connection_id = d.connection_id AND o.database = d.name AND o.kind = 'procedure'),
-                    (SELECT count(*) FROM objects o WHERE o.connection_id = d.connection_id AND o.database = d.name AND o.kind = 'function'),
-                    (SELECT count(*) FROM objects o WHERE o.connection_id = d.connection_id AND o.database = d.name AND o.kind = 'synonym')
-                 FROM databases d WHERE d.connection_id = ?1 ORDER BY d.name",
+                    count(CASE WHEN o.kind = 'table' THEN 1 END),
+                    count(CASE WHEN o.kind = 'view' THEN 1 END),
+                    count(CASE WHEN o.kind = 'procedure' THEN 1 END),
+                    count(CASE WHEN o.kind = 'function' THEN 1 END),
+                    count(CASE WHEN o.kind = 'tableFunction' THEN 1 END),
+                    count(CASE WHEN o.kind = 'synonym' THEN 1 END)
+                 FROM databases d
+                 LEFT JOIN objects o ON o.connection_id = d.connection_id AND o.database = d.name
+                 WHERE d.connection_id = ?1 GROUP BY d.name ORDER BY d.name",
             )?;
             let rows = st.query_map([connection_id], |r| {
                 Ok(CachedDatabase {
@@ -445,7 +453,8 @@ impl MetaCache {
                     views: r.get(4)?,
                     procedures: r.get(5)?,
                     functions: r.get(6)?,
-                    synonyms: r.get(7)?,
+                    table_functions: r.get(7)?,
+                    synonyms: r.get(8)?,
                 })
             })?;
             rows.collect()
@@ -627,9 +636,12 @@ impl MetaCache {
             sql.push_str(" AND o.database = ? COLLATE NOCASE");
             args.push(db.to_string());
         }
-        if let Some(kind) = q.kind {
-            sql.push_str(" AND o.kind = ?");
-            args.push(kind_str(kind).to_string());
+        if !q.kinds.is_empty() {
+            sql.push_str(&format!(
+                " AND o.kind IN ({})",
+                vec!["?"; q.kinds.len()].join(",")
+            ));
+            args.extend(q.kinds.iter().map(|k| kind_str(*k).to_string()));
         }
         for term in q.terms {
             sql.push_str(&format!(" AND {name_expr} LIKE ? ESCAPE '\\'"));
@@ -906,6 +918,7 @@ mod tests {
         let snapshot = DatabaseSnapshot {
             objects: vec![
                 obj("dbo", "fn_Total", ObjectKind::Function),
+                obj("dbo", "fn_Rows", ObjectKind::TableFunction),
                 obj("dbo", "Alias", ObjectKind::Synonym),
             ],
             columns: vec![],
@@ -914,7 +927,7 @@ mod tests {
         assert_eq!(c.objects("c1", "db", ObjectKind::Function).len(), 1);
         assert_eq!(c.objects("c1", "db", ObjectKind::Synonym).len(), 1);
         let d = &c.databases("c1")[0];
-        assert_eq!((d.functions, d.synonyms), (1, 1));
+        assert_eq!((d.functions, d.table_functions, d.synonyms), (1, 1, 1));
     }
 
     #[test]
@@ -964,11 +977,12 @@ mod tests {
             views: 2,
             procedures: 3,
             functions: 4,
+            table_functions: 6,
             synonyms: 5,
         };
         assert_eq!(
             serde_json::to_value(&d).unwrap(),
-            serde_json::json!({"name": "db", "noAccess": true, "indexedAt": null, "tables": 1, "views": 2, "procedures": 3, "functions": 4, "synonyms": 5})
+            serde_json::json!({"name": "db", "noAccess": true, "indexedAt": null, "tables": 1, "views": 2, "procedures": 3, "functions": 4, "tableFunctions": 6, "synonyms": 5})
         );
     }
 
@@ -1119,7 +1133,7 @@ mod tests {
             connection_ids: &ids,
             database: None,
             terms: &terms(q),
-            kind: None,
+            kinds: &[],
             in_columns: false,
             limit: 50,
         })
@@ -1190,7 +1204,7 @@ mod tests {
             connection_ids: &["c1".to_string()],
             database: None,
             terms: &terms("pedido"),
-            kind: None,
+            kinds: &[],
             in_columns: false,
             limit: 2,
         });
@@ -1207,24 +1221,27 @@ mod tests {
         assert_eq!(find(&c, &["c1"], "pedidos").total, 2);
         assert_eq!(find(&c, &["c1", "c2"], "pedidos").total, 3);
         let ids = ["c1".to_string(), "c2".to_string()];
-        let q = |database, kind| {
+        let q = |database, kinds: &[ObjectKind]| {
             c.find_objects(&ObjectQuery {
                 connection_ids: &ids,
                 database,
                 terms: &terms("pedidos"),
-                kind,
+                kinds,
                 in_columns: false,
                 limit: 50,
             })
         };
-        let m = q(Some("a"), None);
+        let m = q(Some("a"), &[]);
         assert_eq!(m.hits.len(), 2);
         assert!(m.hits.iter().all(|h| h.database == "a"));
-        let m = q(None, Some(ObjectKind::View));
+        let m = q(None, &[ObjectKind::View]);
         assert_eq!(names(&m), ["PedidosV"]);
         assert_eq!(m.hits[0].connection_id, "c1");
         assert_eq!(m.hits[0].database, "b");
-        assert!(q(Some("b"), Some(ObjectKind::Table)).hits.is_empty());
+        assert!(q(Some("b"), &[ObjectKind::Table]).hits.is_empty());
+        // Several kinds at once.
+        let m = q(None, &[ObjectKind::View, ObjectKind::Table]);
+        assert_eq!(m.hits.len(), 3);
     }
 
     #[test]
@@ -1236,7 +1253,7 @@ mod tests {
             connection_ids: &ids,
             database: None,
             terms: &terms("age"),
-            kind: None,
+            kinds: &[],
             in_columns: true,
             limit: 50,
         });
@@ -1248,7 +1265,7 @@ mod tests {
             connection_ids: &ids,
             database: None,
             terms: &terms("users"),
-            kind: None,
+            kinds: &[],
             in_columns: true,
             limit: 50,
         });

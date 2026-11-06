@@ -121,6 +121,8 @@ async fn lists_the_five_tools_with_schemas() {
         "\"view\"",
         "\"procedure\"",
         "\"function\"",
+        "\"scalarFunction\"",
+        "\"tableFunction\"",
         "\"synonym\"",
     ] {
         assert!(schema.contains(kind), "kind schema lacks {kind}: {schema}");

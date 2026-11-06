@@ -48,13 +48,9 @@ pub fn objects_sql(prefix: &str) -> String {
         "SELECT s.name, o.name, o.type \
          FROM {prefix}sys.objects o \
          JOIN {prefix}sys.schemas s ON s.schema_id = o.schema_id \
-         WHERE o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'FS', 'FT') AND o.is_ms_shipped = 0 \
-         UNION ALL \
-         SELECT s.name, y.name, 'SN' \
-         FROM {prefix}sys.synonyms y \
-         JOIN {prefix}sys.schemas s ON s.schema_id = y.schema_id \
-         WHERE y.is_ms_shipped = 0 \
-         ORDER BY 1, 2"
+         WHERE o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'FS', 'FT', 'SN') \
+           AND o.is_ms_shipped = 0 \
+         ORDER BY s.name, o.name"
     )
 }
 
@@ -63,7 +59,8 @@ pub fn object_from_row(row: &Row) -> Option<DbObject> {
         "U" => ObjectKind::Table,
         "V" => ObjectKind::View,
         "P" => ObjectKind::Procedure,
-        "FN" | "IF" | "TF" | "FS" | "FT" => ObjectKind::Function,
+        "FN" | "FS" => ObjectKind::Function,
+        "IF" | "TF" | "FT" => ObjectKind::TableFunction,
         "SN" => ObjectKind::Synonym,
         _ => return None,
     };
@@ -249,19 +246,26 @@ pub fn indexes_from_rows(rows: &[Row]) -> Vec<IndexInfo> {
     indexes
 }
 
-/// Parameters: `@P1` object, `@P2` schema. The definition is `NULL` without
-/// the VIEW DEFINITION permission. A synonym has no source, so it yields the
-/// statement that would create it, which names its base object.
+/// Parameters: `@P1` object, `@P2` schema. Result: the definition, the object
+/// type and whether the module is encrypted. The definition is `NULL` when the
+/// module is encrypted or the login lacks VIEW DEFINITION. A synonym has no
+/// source, so it yields the statement that would create it, which names its
+/// base object. A CLR function has no module row; it is returned with a `NULL`
+/// definition so the caller can say where its code lives.
 pub fn definition_sql(prefix: &str) -> String {
     format!(
-        "SELECT m.definition \
-         FROM {prefix}sys.sql_modules m \
-         JOIN {prefix}sys.objects o ON o.object_id = m.object_id \
+        "SELECT m.definition, o.type, \
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM {prefix}sys.syscomments c \
+                                  WHERE c.id = o.object_id AND c.encrypted = 1) \
+                THEN 1 ELSE 0 END AS bit) \
+         FROM {prefix}sys.objects o \
          JOIN {prefix}sys.schemas s ON s.schema_id = o.schema_id \
+         LEFT JOIN {prefix}sys.sql_modules m ON m.object_id = o.object_id \
          WHERE o.name = @P1 AND s.name = @P2 \
+           AND (m.object_id IS NOT NULL OR o.type IN ('FS', 'FT')) \
          UNION ALL \
          SELECT 'CREATE SYNONYM ' + QUOTENAME(s.name) + '.' + QUOTENAME(y.name) \
-                + ' FOR ' + y.base_object_name \
+                + ' FOR ' + y.base_object_name, 'SN', CAST(0 AS bit) \
          FROM {prefix}sys.synonyms y \
          JOIN {prefix}sys.schemas s ON s.schema_id = y.schema_id \
          WHERE y.name = @P1 AND s.name = @P2"

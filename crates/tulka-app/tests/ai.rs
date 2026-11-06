@@ -423,6 +423,35 @@ async fn describe_resolves_the_schema_from_the_cache_or_dbo() {
 }
 
 #[tokio::test]
+async fn describe_a_synonym_points_to_its_base_object_without_naming_it() {
+    let f = Fixture::standard();
+    f.cache
+        .replace_database(
+            &id_of(&f, "Local"),
+            "master",
+            &DatabaseSnapshot {
+                objects: vec![DbObject {
+                    schema: "dbo".into(),
+                    name: "alias".into(),
+                    kind: ObjectKind::Synonym,
+                }],
+                columns: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
+    let out = describe_table(&f.state, "Local".into(), None, "alias".into()).await;
+    assert_eq!(
+        out,
+        ToolText {
+            text: "dbo.alias is a synonym; describe its base object.".into(),
+            is_error: true,
+        }
+    );
+    assert!(f.driver.script.structures_asked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn describe_ambiguous_name_lists_the_schemas() {
     let f = Fixture::standard();
     f.seed(
@@ -451,7 +480,7 @@ async fn describe_unknown_table_is_an_error() {
         out,
         ToolText {
             text:
-                "No table or view named dbo.nada in master on Local. Use search_objects to find it."
+                "No table, view or table-valued function named dbo.nada in master on Local. Use search_objects to find it."
                     .into(),
             is_error: true,
         }

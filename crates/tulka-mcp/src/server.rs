@@ -25,18 +25,24 @@ enum KindParam {
     Table,
     View,
     Procedure,
+    /// Scalar and table-valued functions.
     Function,
+    ScalarFunction,
+    TableFunction,
     Synonym,
 }
 
-impl From<KindParam> for ObjectKind {
-    fn from(kind: KindParam) -> Self {
-        match kind {
-            KindParam::Table => ObjectKind::Table,
-            KindParam::View => ObjectKind::View,
-            KindParam::Procedure => ObjectKind::Procedure,
-            KindParam::Function => ObjectKind::Function,
-            KindParam::Synonym => ObjectKind::Synonym,
+impl KindParam {
+    /// The kinds it stands for: `function` keeps meaning every function.
+    fn kinds(self) -> Vec<ObjectKind> {
+        match self {
+            KindParam::Table => vec![ObjectKind::Table],
+            KindParam::View => vec![ObjectKind::View],
+            KindParam::Procedure => vec![ObjectKind::Procedure],
+            KindParam::Function => vec![ObjectKind::Function, ObjectKind::TableFunction],
+            KindParam::ScalarFunction => vec![ObjectKind::Function],
+            KindParam::TableFunction => vec![ObjectKind::TableFunction],
+            KindParam::Synonym => vec![ObjectKind::Synonym],
         }
     }
 }
@@ -57,7 +63,8 @@ struct SearchObjectsParams {
     /// shared with you that tulkabd has indexed (a connection that selects
     /// databases is searched in those alone).
     database: Option<String>,
-    /// Only objects of this kind. Default: every kind (tables, views, procedures, functions and synonyms).
+    /// Only objects of this kind: table, view, procedure, function (scalar and
+    /// table-valued), scalarFunction, tableFunction or synonym. Default: every kind.
     kind: Option<KindParam>,
     /// Look in column names instead of object names.
     in_columns: Option<bool>,
@@ -203,7 +210,7 @@ impl TulkaServer {
             query: p.query,
             connection: p.connection,
             database: p.database,
-            kind: p.kind.map(ObjectKind::from),
+            kinds: p.kind.map(KindParam::kinds).unwrap_or_default(),
             in_columns: p.in_columns.unwrap_or(false),
             limit: p.limit,
         };

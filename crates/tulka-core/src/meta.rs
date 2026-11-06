@@ -5,15 +5,17 @@ use serde::{Deserialize, Serialize};
 /// Kind of a database object listed in the explorer.
 ///
 /// Serialized as a plain string: `"table"`, `"view"`, `"procedure"`,
-/// `"function"`, `"synonym"`.
+/// `"function"` (scalar), `"tableFunction"`, `"synonym"`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ObjectKind {
     Table,
     View,
     Procedure,
-    /// Scalar, inline table-valued, multi-statement table-valued or CLR.
+    /// Scalar function (T-SQL or CLR).
     Function,
+    /// Inline, multi-statement or CLR table-valued function; it has columns.
+    TableFunction,
     Synonym,
 }
 

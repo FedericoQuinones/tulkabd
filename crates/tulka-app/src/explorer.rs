@@ -996,6 +996,7 @@ pub async fn completion_metadata(
                 ObjectKind::View,
                 ObjectKind::Procedure,
                 ObjectKind::Function,
+                ObjectKind::TableFunction,
                 ObjectKind::Synonym,
             ] {
                 objects.extend(cache.objects(&connection_id, &database, kind));

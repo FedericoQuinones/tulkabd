@@ -66,6 +66,8 @@ GO
 CREATE FUNCTION dbo.fnLista() RETURNS @t TABLE(Id int, Cliente nvarchar(50), Total decimal(18,2))
 AS BEGIN INSERT @t SELECT Id, Cliente, Total FROM dbo.Pedidos; RETURN END
 GO
+CREATE PROCEDURE dbo.pSecreto WITH ENCRYPTION AS SELECT 1
+GO
 CREATE SYNONYM dbo.synPedidos FOR dbo.Pedidos
 ";
 
@@ -97,9 +99,14 @@ async fn snapshot_lists_objects_and_columns() {
         vec![
             ("dbo".into(), "Order Details".into(), ObjectKind::Table),
             ("dbo".into(), "Pedidos".into(), ObjectKind::Table),
-            ("dbo".into(), "fnDeCliente".into(), ObjectKind::Function),
+            (
+                "dbo".into(),
+                "fnDeCliente".into(),
+                ObjectKind::TableFunction
+            ),
             ("dbo".into(), "fnDoble".into(), ObjectKind::Function),
-            ("dbo".into(), "fnLista".into(), ObjectKind::Function),
+            ("dbo".into(), "fnLista".into(), ObjectKind::TableFunction),
+            ("dbo".into(), "pSecreto".into(), ObjectKind::Procedure),
             ("dbo".into(), "pTotal".into(), ObjectKind::Procedure),
             ("dbo".into(), "synPedidos".into(), ObjectKind::Synonym),
             ("dbo".into(), "vPedidos".into(), ObjectKind::View),
@@ -198,6 +205,11 @@ async fn definition_reads_views_procedures_functions_and_synonyms() {
     for name in ["fnDoble", "fnDeCliente", "fnLista"] {
         let text = s.definition("tulka_meta", "dbo", name).await.unwrap();
         assert!(text.starts_with("CREATE FUNCTION"), "{text}");
+    }
+    // An encrypted module says so instead of blaming a missing permission.
+    match s.definition("tulka_meta", "dbo", "pSecreto").await {
+        Err(DriverError::Other(m)) => assert!(m.contains("encrypted"), "{m}"),
+        other => panic!("{other:?}"),
     }
     // A synonym has no source: it yields the statement naming its base object.
     let synonym = s

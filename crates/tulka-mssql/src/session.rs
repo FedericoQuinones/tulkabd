@@ -9,9 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use tiberius::error::Error as TdsError;
-use tiberius::{
-    AuthMethod, Config, EncryptionLevel, QueryItem, Row, SqlBrowser, ToSql,
-};
+use tiberius::{AuthMethod, Config, EncryptionLevel, QueryItem, Row, SqlBrowser, ToSql};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
@@ -595,6 +593,17 @@ impl Session for MssqlSession {
         };
         match row.get::<&str, _>(0) {
             Some(text) => Ok(text.to_string()),
+            // A CLR function keeps its code in an assembly, not in the catalog.
+            None if matches!(row.get::<&str, _>(1).map(str::trim), Some("FS" | "FT")) => {
+                Err(DriverError::Other(format!(
+                    "`{schema}`.`{name}` is a CLR function; its definition is in an assembly"
+                )))
+            }
+            // WITH ENCRYPTION hides the text from everyone, not only from
+            // logins without VIEW DEFINITION.
+            None if row.get::<bool, _>(2).unwrap_or(false) => Err(DriverError::Other(format!(
+                "`{schema}`.`{name}` is encrypted, so its definition cannot be read"
+            ))),
             // The server hides the text from logins without VIEW DEFINITION.
             None => Err(DriverError::NoAccess(format!(
                 "no permission to view the definition of `{schema}`.`{name}` in `{database}`"
