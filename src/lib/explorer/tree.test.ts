@@ -312,6 +312,44 @@ test("indexProgress marks indexing and refreshes the counters", async () => {
   expect(counts).toEqual([12, 3, 4]);
 });
 
+test("a database whose snapshot failed shows an error, not indexing", async () => {
+  explorer.expanded.add("c2");
+  const st = explorer.state("c2");
+  st.status = "connected";
+  st.databases = [db("Ventas", { indexedAt: null })];
+  vi.mocked(ipc.explorerDatabases).mockResolvedValue([db("Ventas", { indexedAt: null })]);
+  explorer.handleEvent({ kind: "indexProgress", connectionId: "c2", database: "Ventas", done: false, noAccess: false });
+  explorer.handleEvent({ kind: "indexProgress", connectionId: "c2", database: "Ventas", done: true, noAccess: false });
+  await flush();
+  await flush();
+  const r = explorer.rows.find((x) => x.kind === "database");
+  expect(r?.kind === "database" && r.indexing).toBe(false);
+  expect(r?.kind === "database" && r.failed).toBe(true);
+});
+
+test("a connected status that trails a user disconnect is ignored", async () => {
+  vi.mocked(ipc.disconnectExplorer).mockResolvedValue();
+  await explorer.disconnect("c2");
+  explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "connected", message: null });
+  expect(explorer.state("c2").status).toBe("offline");
+  explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "connecting", message: null });
+  explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "connected", message: null });
+  expect(explorer.state("c2").status).toBe("connected");
+});
+
+test("a late done does not mark failed a database indexing again", async () => {
+  explorer.expanded.add("c2");
+  const st = explorer.state("c2");
+  st.status = "connected";
+  st.databases = [db("Ventas", { indexedAt: null })];
+  vi.mocked(ipc.explorerDatabases).mockResolvedValue([db("Ventas", { indexedAt: null })]);
+  explorer.handleEvent({ kind: "indexProgress", connectionId: "c2", database: "Ventas", done: true, noAccess: false });
+  explorer.handleEvent({ kind: "indexProgress", connectionId: "c2", database: "Ventas", done: false, noAccess: false });
+  await flush();
+  await flush();
+  expect(st.failed).toEqual([]);
+});
+
 test("progress after an error does not bring back indexing", () => {
   explorer.expanded.add("c2");
   const st = explorer.state("c2");
@@ -580,7 +618,7 @@ test("a database known only from search hits is not shown as indexing", async ()
 });
 
 test("deleting a connection unbinds the tabs that used it", async () => {
-  vi.mocked(ipc.deleteConnection).mockResolvedValue();
+  vi.mocked(ipc.deleteConnection).mockResolvedValue(false);
   const spy = vi.spyOn(tabs, "unbindConnection");
   expect(await explorer.deleteConnection(local.id)).toBe(true);
   expect(spy).toHaveBeenCalledWith(local.id);

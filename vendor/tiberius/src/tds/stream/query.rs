@@ -1,4 +1,4 @@
-use crate::tds::codec::{TokenDone, TokenInfo};
+use crate::tds::codec::{TokenDone, TokenError, TokenInfo};
 use crate::tds::stream::ReceivedToken;
 use crate::{row::ColumnType, Column, Row};
 use futures_util::{
@@ -267,7 +267,10 @@ impl<'a> QueryStream<'a> {
         let s = self.try_filter_map(|item| async {
             match item {
                 QueryItem::Row(row) => Ok(Some(row)),
-                QueryItem::Metadata(_) | QueryItem::Info(_) | QueryItem::Done(_) => Ok(None),
+                QueryItem::Metadata(_)
+                | QueryItem::Info(_)
+                | QueryItem::Error(_)
+                | QueryItem::Done(_) => Ok(None),
             }
         });
 
@@ -314,7 +317,7 @@ where
                 current.get_or_insert_with(Vec::new).push(row);
             }
             // tulka patch: messages and row counts are not part of the rows.
-            QueryItem::Info(_) | QueryItem::Done(_) => (),
+            QueryItem::Info(_) | QueryItem::Error(_) | QueryItem::Done(_) => (),
         }
     }
 
@@ -357,6 +360,11 @@ pub enum QueryItem {
     /// `PRINT`, `RAISERROR` with severity 10 or lower, `SET STATISTICS`
     /// output, ...), in the order the server sent it.
     Info(InfoMessage),
+    /// tulka patch: an error the server sent while the batch kept running
+    /// (an ERROR token), yielded in order. The stream still ends with
+    /// `Err(Error::Server(first_error))`, so callers that ignore this item
+    /// keep the upstream behaviour.
+    Error(TokenError),
     /// tulka patch: one item per DONE, DONEINPROC or DONEPROC token the
     /// server sends, in order; `rows_affected` is `None` when the token has no
     /// row count. This is not a strict one-item-per-statement mapping: nested
@@ -419,7 +427,10 @@ impl From<&TokenDone> for DoneInfo {
 /// `true` for the response of an RPC request.
 fn surfaced(token: &ReceivedToken, rpc: bool) -> bool {
     match token {
-        ReceivedToken::NewResultset(_) | ReceivedToken::Row(_) | ReceivedToken::Info(_) => true,
+        ReceivedToken::NewResultset(_)
+        | ReceivedToken::Row(_)
+        | ReceivedToken::Info(_)
+        | ReceivedToken::Error(_) => true,
         // The DONE acknowledging a cancel is not a statement.
         ReceivedToken::Done(done) | ReceivedToken::DoneInProc(done) => !done.is_attention(),
         // In a batch, a DONEPROC ends an `EXEC` statement. In an RPC response
@@ -523,6 +534,7 @@ impl<'a> Stream for QueryStream<'a> {
                 // tulka patch: informational messages and statement
                 // completions (see `surfaced` for the DONE tokens skipped).
                 ReceivedToken::Info(info) => Poll::Ready(Some(Ok(QueryItem::Info(info.into())))),
+                ReceivedToken::Error(error) => Poll::Ready(Some(Ok(QueryItem::Error(error)))),
                 ReceivedToken::Done(ref done)
                 | ReceivedToken::DoneInProc(ref done)
                 | ReceivedToken::DoneProc(ref done)
@@ -807,5 +819,47 @@ mod tests {
         .await
         .expect("into_row_stream");
         assert_eq!(rows.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn query_stream_yields_error_tokens_in_order() {
+        let err = |code: u32, class: u8, line: u32| {
+            ReceivedToken::Error(TokenError {
+                code,
+                state: 1,
+                class,
+                message: format!("e{code}"),
+                server: String::new(),
+                procedure: String::new(),
+                line,
+            })
+        };
+        let items: Vec<QueryItem> = query_stream(vec![
+            token_meta("first"),
+            token_row(),
+            err(1, 16, 3),
+            token_meta("second"),
+            err(2, 16, 5),
+        ])
+        .try_collect()
+        .await
+        .expect("items");
+        let kinds: Vec<String> = items
+            .iter()
+            .map(|i| match i {
+                QueryItem::Metadata(_) => "meta".into(),
+                QueryItem::Row(_) => "row".into(),
+                QueryItem::Error(e) => format!("err{}@{}", e.code(), e.line()),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, ["meta", "row", "err1@3", "meta", "err2@5"]);
+
+        // The row helpers ignore the error items.
+        let rows = query_stream(vec![token_meta("a"), err(1, 16, 1), token_row()])
+            .into_results()
+            .await
+            .expect("results");
+        assert_eq!(rows[0].len(), 1);
     }
 }

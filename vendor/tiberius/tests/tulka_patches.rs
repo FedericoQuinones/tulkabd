@@ -134,6 +134,36 @@ async fn print_yields_info_item() {
 }
 
 #[tokio::test]
+async fn errors_are_yielded_in_order_and_the_stream_ends_with_the_first() {
+    let Some(mut client) = connect("errors_are_yielded_in_order").await else {
+        return;
+    };
+
+    let mut stream = client
+        .simple_query("PRINT 'a'; RAISERROR('e1',16,1); SELECT 1; RAISERROR('e2',16,1); SELECT 2")
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    let end = loop {
+        match stream.try_next().await {
+            Ok(Some(QueryItem::Info(info))) => seen.push(format!("info {}", info.message)),
+            Ok(Some(QueryItem::Error(e))) => seen.push(format!("error {}", e.message())),
+            Ok(Some(QueryItem::Metadata(_))) => seen.push("meta".into()),
+            Ok(Some(_)) => {}
+            Ok(None) => break None,
+            Err(e) => break Some(e),
+        }
+    };
+    drop(stream);
+    assert_eq!(seen, ["info a", "error e1", "meta", "error e2", "meta"]);
+    match end {
+        Some(Error::Server(e)) => assert_eq!(e.message(), "e1"),
+        other => panic!("expected the first server error, got {other:?}"),
+    }
+    assert_eq!(select_one(&mut client).await, 1);
+}
+
+#[tokio::test]
 async fn update_yields_rows_affected() {
     let Some(mut client) = connect("update_yields_rows_affected").await else {
         return;
@@ -195,6 +225,7 @@ async fn every_statement_yields_one_done() {
             QueryItem::Metadata(_) => "meta",
             QueryItem::Row(_) => "row",
             QueryItem::Info(_) => "info",
+            QueryItem::Error(_) => "error",
             QueryItem::Done(_) => "done",
         })
         .collect();

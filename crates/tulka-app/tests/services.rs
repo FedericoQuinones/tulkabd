@@ -16,8 +16,8 @@ use tulka_core::{
     estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, AiAccess, CancelHandle, Column,
     ColumnInfo, ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, DatabaseSnapshot,
     DbObject, Driver, DriverError, Environment, ExecEvent, MemoryStore, MessageKind, NumberFormat,
-    ObjectKind, Preferences, SecretStore, ServerInfo, Session, TableStructure, UnavailableStore,
-    Value,
+    ObjectKind, Preferences, SecretError, SecretStore, ServerInfo, Session, TableStructure,
+    UnavailableStore, Value,
 };
 
 const PASSWORD: &str = "s3cret-pw";
@@ -472,6 +472,15 @@ async fn unavailable_keyring_saves_without_password_then_requires_it() {
         .await
         .unwrap_err();
     assert_eq!(err, PASSWORD_REQUIRED);
+}
+
+#[tokio::test]
+async fn open_session_on_an_unknown_connection_fails_with_not_found() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let err = open_session(&f.state, "t1".into(), "nope".into(), None, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err, NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1032,6 +1041,43 @@ async fn copy_results_in_excel_and_ai_formats() {
 }
 
 #[tokio::test]
+async fn copying_one_cell_has_no_header_but_two_cells_do() {
+    let (f, _) = connected("t1").await;
+    let (result, _) = run(&f.state, "t1", "rows 2").await;
+    assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
+    let clipboard = Arc::new(FakeClipboard::default());
+    let copy = |sel| {
+        copy_results(
+            &f.state,
+            "t1".into(),
+            0,
+            CopyMode::Excel,
+            sel,
+            clipboard.clone(),
+        )
+    };
+    copy(Selection::Cells {
+        rows: (1, 1),
+        cols: (0, 0),
+    })
+    .await
+    .unwrap();
+    let row = fake_row(1);
+    let expected = tulka_core::to_excel_value(&row[0], system_decimal_separator());
+    assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
+    assert!(!expected.contains('\n'));
+
+    copy(Selection::Cells {
+        rows: (1, 1),
+        cols: (0, 1),
+    })
+    .await
+    .unwrap();
+    let last = clipboard.texts.lock().unwrap().last().cloned().unwrap();
+    assert!(last.contains("\r\n"));
+}
+
+#[tokio::test]
 async fn large_cells_are_capped_with_one_warning_and_trimmed_for_display() {
     let (f, _) = connected("t1").await;
     let (result, events) = run(&f.state, "t1", "big 2; rows 1; big 1").await;
@@ -1079,15 +1125,8 @@ async fn large_cells_are_capped_with_one_warning_and_trimmed_for_display() {
     )
     .await
     .unwrap();
-    let doc_column = Column {
-        name: "doc".into(),
-        type_name: "fake".into(),
-    };
-    let expected = to_excel_tsv(
-        &[doc_column],
-        &[vec![Value::Text("x".repeat(MAX_CELL_BYTES))]],
-        system_decimal_separator(),
-    );
+    // A single cell copies as its bare value, without the header.
+    let expected = "x".repeat(MAX_CELL_BYTES);
     assert_eq!(clipboard.texts.lock().unwrap().last(), Some(&expected));
 
     // A run without large values has no warning.
@@ -2281,4 +2320,203 @@ async fn running_a_query_does_not_prune_the_run_log() {
     assert_eq!(result.unwrap().outcome, RunOutcome::Ok);
     // Pruning is the job of a background timer, never of the run itself.
     assert_eq!(list_run_log(&state, None, 10).await.len(), 2);
+}
+
+// ------------------------------------------------ saved password scope
+
+#[tokio::test]
+async fn saved_password_is_not_sent_to_another_server() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    assert!(test_connection(&f.state, saved.clone(), None).await.is_ok());
+
+    let mut other_host = saved.clone();
+    other_host.server = "other-host".into();
+    let mut other_port = saved.clone();
+    other_port.port = 1444;
+    let mut other_user = saved.clone();
+    other_user.user = "admin".into();
+    let mut no_encrypt = saved.clone();
+    no_encrypt.encrypt = false;
+    let mut trusting = saved.clone();
+    trusting.trust_server_certificate = true;
+    // `new_conn` encrypts by default and does not trust, so both are weaker.
+    assert!(saved.encrypt && !saved.trust_server_certificate);
+    for c in [other_host, other_port, other_user, no_encrypt, trusting] {
+        assert_eq!(
+            test_connection(&f.state, c.clone(), None)
+                .await
+                .unwrap_err(),
+            PASSWORD_REQUIRED
+        );
+        assert_eq!(
+            list_server_databases(&f.state, c, None).await.unwrap_err(),
+            PASSWORD_REQUIRED
+        );
+    }
+    // A typed password is always used.
+    let mut other_host = saved.clone();
+    other_host.server = "other-host".into();
+    assert!(test_connection(&f.state, other_host, Some(PASSWORD.into()))
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn saving_a_retargeted_connection_without_password_drops_the_secret() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+
+    let mut moved = saved.clone();
+    moved.server = "other-host".into();
+    let result = save_connection(&f.state, moved, None).await.unwrap();
+    assert!(!result.connection.password_saved && !result.secret_orphaned);
+    assert_eq!(f.secrets.get(&saved.id).unwrap(), None);
+    assert!(!list_connections(&f.state).await[0].password_saved);
+}
+
+#[tokio::test]
+async fn saving_a_retargeted_connection_with_password_stores_the_new_one() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    let mut moved = saved.clone();
+    moved.server = "other-host".into();
+    let result = save_connection(&f.state, moved, Some("new-pw".into()))
+        .await
+        .unwrap();
+    assert!(result.connection.password_saved);
+    assert_eq!(f.secrets.get(&saved.id).unwrap().as_deref(), Some("new-pw"));
+}
+
+/// Reads fine but cannot delete, like a keychain that went away.
+#[derive(Default)]
+struct StuckStore(MemoryStore);
+
+impl SecretStore for StuckStore {
+    fn set(&self, id: &str, secret: &str) -> Result<(), SecretError> {
+        self.0.set(id, secret)
+    }
+    fn get(&self, id: &str) -> Result<Option<String>, SecretError> {
+        self.0.get(id)
+    }
+    fn delete(&self, _id: &str) -> Result<(), SecretError> {
+        Err(SecretError::Unavailable("locked".into()))
+    }
+}
+
+#[tokio::test]
+async fn an_undeletable_secret_is_reported() {
+    let f = fixture(Arc::new(StuckStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    let mut moved = saved.clone();
+    moved.server = "other-host".into();
+    let result = save_connection(&f.state, moved, None).await.unwrap();
+    assert!(result.secret_orphaned && !result.connection.password_saved);
+
+    assert!(delete_connection(&f.state, saved.id.clone()).await.unwrap());
+}
+
+/// Stores and reads fine, but `set` can be made to fail.
+struct SetFailStore {
+    inner: MemoryStore,
+    set_error: Mutex<Option<SecretError>>,
+}
+
+impl SecretStore for SetFailStore {
+    fn set(&self, id: &str, secret: &str) -> Result<(), SecretError> {
+        if let Some(e) = self.set_error.lock().unwrap().clone() {
+            return Err(e);
+        }
+        self.inner.set(id, secret)
+    }
+    fn get(&self, id: &str) -> Result<Option<String>, SecretError> {
+        self.inner.get(id)
+    }
+    fn delete(&self, id: &str) -> Result<(), SecretError> {
+        self.inner.delete(id)
+    }
+}
+
+fn set_fail_store() -> Arc<SetFailStore> {
+    Arc::new(SetFailStore {
+        inner: MemoryStore::default(),
+        set_error: Mutex::new(None),
+    })
+}
+
+/// Makes the next write of the config file fail (the target is a folder).
+fn break_config(f: &Fixture) {
+    let path = f._dir.path().join("config.json");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_config_save_leaves_the_old_secret_and_flag() {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    break_config(&f);
+
+    // Retargeted without a password: the secret must not be deleted.
+    let mut moved = saved.clone();
+    moved.server = "other-host".into();
+    assert!(save_connection(&f.state, moved.clone(), None)
+        .await
+        .is_err());
+    assert_eq!(f.secrets.get(&saved.id).unwrap().as_deref(), Some(PASSWORD));
+    assert!(list_connections(&f.state).await[0].password_saved);
+
+    // Retargeted with a new password: the old target keeps its own password.
+    assert!(save_connection(&f.state, moved, Some("new-pw".into()))
+        .await
+        .is_err());
+    assert_eq!(f.secrets.get(&saved.id).unwrap().as_deref(), Some(PASSWORD));
+}
+
+#[tokio::test]
+async fn a_failed_secret_store_rolls_the_flag_back() {
+    let store = set_fail_store();
+    let f = fixture(store.clone());
+    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+
+    *store.set_error.lock().unwrap() = Some(SecretError::Other("boom".into()));
+    let mut moved = saved.clone();
+    moved.server = "other-host".into();
+    assert!(
+        save_connection(&f.state, moved.clone(), Some("new-pw".into()))
+            .await
+            .is_err()
+    );
+    let listed = list_connections(&f.state).await;
+    assert_eq!(listed, vec![saved.clone()]);
+
+    // Keychain unavailable for the new password: saved without one, and the
+    // old secret is reported as left behind.
+    *store.set_error.lock().unwrap() = Some(SecretError::Unavailable("locked".into()));
+    let result = save_connection(&f.state, moved, Some("new-pw".into()))
+        .await
+        .unwrap();
+    assert!(result.keyring_unavailable && result.secret_orphaned);
+    assert!(!result.connection.password_saved);
+    let listed = list_connections(&f.state).await;
+    assert!(!listed[0].password_saved);
+    assert_eq!(listed[0].server, "other-host");
 }

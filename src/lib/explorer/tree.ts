@@ -156,7 +156,7 @@ export interface NoticeAction {
 export type Row =
   | (RowBase & { kind: "folder"; folder: Folder })
   | (RowBase & { kind: "connection"; conn: ConnectionConfig; status: ConnStatus })
-  | (RowBase & { kind: "database"; connectionId: string; db: CachedDatabase; indexing: boolean })
+  | (RowBase & { kind: "database"; connectionId: string; db: CachedDatabase; indexing: boolean; failed: boolean })
   | (RowBase & { kind: "group"; connectionId: string; database: string; objectKind: ObjectKind; count: number | null })
   /** "Saved queries" under a database: those saved for a database of that name, whatever the connection. */
   | (RowBase & { kind: "saved"; connectionId: string; database: string; count: number })

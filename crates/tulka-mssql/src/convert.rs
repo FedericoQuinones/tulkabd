@@ -42,9 +42,9 @@ pub fn type_name(ty: ColumnType) -> &'static str {
     }
 }
 
-/// Converts one cell. `ty` is the column's declared type, needed for `money`,
-/// which the driver decodes as a float.
-pub fn to_value(data: ColumnData<'static>, ty: ColumnType) -> Value {
+/// Converts one cell. `money` and `smallmoney` arrive as a `Numeric` of
+/// scale 4 holding the exact wire integer.
+pub fn to_value(data: ColumnData<'static>) -> Value {
     match data {
         ColumnData::U8(v) => opt(v, |v| Value::Int(v.into())),
         ColumnData::I16(v) => opt(v, |v| Value::Int(v.into())),
@@ -55,10 +55,7 @@ pub fn to_value(data: ColumnData<'static>, ty: ColumnType) -> Value {
         ColumnData::F32(v) => opt(v, |v| {
             Value::Float(v.to_string().parse().unwrap_or(f64::from(v)))
         }),
-        ColumnData::F64(v) => opt(v, |v| match ty {
-            ColumnType::Money | ColumnType::Money4 => Value::Decimal(money(v)),
-            _ => Value::Float(v),
-        }),
+        ColumnData::F64(v) => opt(v, Value::Float),
         ColumnData::Bit(v) => opt(v, Value::Bool),
         ColumnData::String(v) => opt(v, |v| Value::Text(v.into_owned())),
         ColumnData::Guid(v) => opt(v, |v| {
@@ -96,16 +93,6 @@ fn scaled(value: i128, scale: u8) -> String {
     let digits = format!("{digits:0>width$}", width = scale + 1);
     let (int, frac) = digits.split_at(digits.len() - scale);
     format!("{sign}{int}.{frac}")
-}
-
-/// `money` has four decimals; the driver hands it over as `value / 10^4` in
-/// an `f64` (the wire integer converted to `f64`, then divided). Scaling back
-/// and rounding recovers the exact wire integer only while the two roundings
-/// stay under half a unit, about 2^51 / 10^4 (some 225 billion). Larger
-/// amounts can be off in the last decimal. Decoding money as an exact integer
-/// needs a patch to the Tiberius fork (later).
-fn money(v: f64) -> String {
-    scaled((v * 1e4).round() as i128, 4)
 }
 
 /// Converts days since 0001-01-01 to (year, month, day), proleptic Gregorian.
@@ -215,10 +202,18 @@ mod tests {
 
     #[test]
     fn money_is_exact() {
-        assert_eq!(money(12.5), "12.5000");
-        assert_eq!(money(-3.25), "-3.2500");
-        assert_eq!(money(0.0001), "0.0001");
-        assert_eq!(money(123_456_789.123_4), "123456789.1234");
+        let money = |v: i64| {
+            to_value(ColumnData::Numeric(Some(Numeric::new_with_scale(
+                v.into(),
+                4,
+            ))))
+        };
+        let dec = |s: &str| Value::Decimal(s.into());
+        assert_eq!(money(125_000), dec("12.5000"));
+        assert_eq!(money(-32_500), dec("-3.2500"));
+        assert_eq!(money(1), dec("0.0001"));
+        assert_eq!(money(i64::MAX), dec("922337203685477.5807"));
+        assert_eq!(money(i64::MIN), dec("-922337203685477.5808"));
     }
 
     #[test]

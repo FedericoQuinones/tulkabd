@@ -208,6 +208,12 @@
         {#if connections.startupError}
           <p class="error" role="alert">{t("explorer.startupError", { error: connections.startupError })}</p>
         {/if}
+        {#if connections.warning}
+          <p class="error" role="alert">
+            {connections.warning}
+            <button type="button" onclick={() => (connections.warning = null)}>{t("connection.dismiss")}</button>
+          </p>
+        {/if}
         {#if connections.error}
           <p class="error" role="alert">{t("explorer.loadFailed", { error: connections.error })}</p>
         {/if}

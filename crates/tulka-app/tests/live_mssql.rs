@@ -390,3 +390,28 @@ async fn seeded_server_indexing_and_search_timings() {
     }
     disconnect_explorer(&state, conn.id).await.unwrap();
 }
+
+#[tokio::test]
+async fn use_inside_a_script_updates_the_tab_database() {
+    let Some(l) = live().await else { return };
+    open_session(&l.state, "t1".into(), l.conn.id.clone(), None, None)
+        .await
+        .unwrap();
+    let (summary, _) = run(&l.state, "t1", "USE tempdb").await;
+    assert_eq!(summary.outcome, RunOutcome::Ok);
+    assert_eq!(summary.database.as_deref(), Some("tempdb"));
+    close_session(&l.state, "t1".into()).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_old_stop_does_not_cancel_the_next_run() {
+    let Some(l) = live().await else { return };
+    open_session(&l.state, "t1".into(), l.conn.id.clone(), None, None)
+        .await
+        .unwrap();
+    // A Stop with no run starting is dropped, not kept for the next run.
+    cancel_query(&l.state, "t1".into()).await.unwrap();
+    let (summary, _) = run(&l.state, "t1", "WAITFOR DELAY '00:00:01'").await;
+    assert_eq!(summary.outcome, RunOutcome::Ok);
+    close_session(&l.state, "t1".into()).await.unwrap();
+}

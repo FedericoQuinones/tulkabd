@@ -70,6 +70,12 @@ test("disconnected event then an other rejection stays disconnected", async () =
   expect(pane.status).toBe("disconnected");
 });
 
+test("open maps not_found to a readable error", async () => {
+  vi.mocked(ipc.openSession).mockRejectedValueOnce("not_found");
+  const r = await pane.open(conn);
+  expect(r).toEqual({ kind: "error", error: "That connection no longer exists." });
+});
+
 test("a stale run does not change state after Reconnect starts", async () => {
   const r = startRun();
   r.emit({ kind: "disconnected", reason: "x" });
@@ -380,4 +386,16 @@ test("reconnecting with the guard dialog open logs a cancelled run first", async
   expect(ipc.logCancelledRun).toHaveBeenCalledWith("t1", "DELETE FROM dbo.T");
   expect(pane.guardPrompt).toBeNull();
   expect(vi.mocked(ipc.logCancelledRun).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(ipc.closeSession).mock.invocationCallOrder.at(-1)!);
+});
+
+test("a USE inside the script moves the pane to the database the run ended in", async () => {
+  const r = startRun();
+  r.d.resolve({ ...ok, database: "Sales" });
+  await r.done;
+  expect(pane.database).toBe("Sales");
+  // Picking the old database is a real switch now, not an early return.
+  vi.mocked(ipc.useDatabase).mockResolvedValue();
+  await pane.changeDatabase("master");
+  expect(ipc.useDatabase).toHaveBeenCalledWith("t1", "master");
+  expect(pane.database).toBe("master");
 });

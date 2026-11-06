@@ -251,6 +251,86 @@ and reads past end-of-message up to `DONE_ATTN`. If upstream only fixes
 `cancel_query`, the multi-message drain can be dropped but `CancelHandle` must
 stay.
 
+## 6. Server errors in order: `QueryItem::Error`
+
+**What.** `QueryStream` yields `QueryItem::Error(TokenError)` for every ERROR
+token, in the order the server sent it, interleaved with the rows, messages
+and completions around it. Upstream keeps only the first error and returns it
+as the stream's last item. That behaviour stays: the stream still ends with
+`Err(Error::Server(first_error))`, so callers that ignore the new item
+(`into_results`, `into_row_stream`, ...) behave as before.
+
+**Why.** A batch such as `RAISERROR('e1',16,1); SELECT 1; RAISERROR('e2',16,1)`
+keeps running after a statement-terminating error. A SQL client must show
+each error where it happened; with upstream, they arrive at the end and all
+but the first are lost.
+
+**Files.**
+- `src/tds/stream/query.rs`: `QueryItem::Error`, the `poll_next` arm,
+  `surfaced` (so `forward_to_metadata` stops at it), the item helpers ignore
+  it, a unit test.
+- `tests/tulka_patches.rs`: a live test.
+
+**Drop when** upstream yields every ERROR token from `QueryStream`.
+
+## 7. OEM code pages 437 and 850 for `char`/`varchar`/`text`
+
+**What.** Values of columns with a `SQL_*_CP437_*` (sort ids 30 to 35) or
+`SQL_*_CP850_*` (sort ids 40 to 45, 49, 55 to 61) collation are decoded with
+two static 128-entry tables (`CP437`, `CP850` in `src/tds/collation.rs`)
+through the new `Collation::decode`, instead of failing the whole result with
+"unspported encoding". Bytes below 0x80 are ASCII. Decode only: encoding
+(`Collation::encoding`, used for bulk inserts and `TEXT` parameters) still
+reports these collations as unsupported.
+
+**Why.** `encoding_rs` has neither IBM437 nor IBM850. Upstream tiberius
+(commit 30f7b363) adds them with the `oem_cp` crate; two small tables avoid a
+dependency. The tables were generated from Python's `cp437` and `cp850`
+codecs.
+
+**Files.**
+- `src/tds/collation.rs`: `Collation::decode`, the tables, unit tests.
+- `src/tds/codec/column_data/{string,text,sql_variant}.rs`: decode through
+  `Collation::decode`.
+
+**Drop when** upstream releases CP437/CP850 support.
+
+## 8. Exact `money` / `smallmoney` decoding
+
+**What.** `money` and `smallmoney` values (fixed-length and nullable `MONEYN`)
+decode to `ColumnData::Numeric` with scale 4 holding the exact wire integer
+(an `i64`, or an `i32` for `smallmoney`), instead of `ColumnData::F64`. NULL is
+`ColumnData::Numeric(None)`. Encoding is unchanged (it already accepts `F64`
+and `Numeric`).
+
+**Why.** The `f64` lost the last digit above about 225 billion
+(`922337203685477.5807` came out as `...5808`).
+
+**Behaviour change.** `Row::get::<f64, _>` on a money column no longer works;
+read it as `Numeric`.
+
+**Files.**
+- `src/tds/codec/column_data/money.rs`: `decode` and its tests.
+- `src/tds/codec/column_data.rs`, `column_data/var_len.rs`: tests that
+  expected `F64` from a money column.
+
+**Drop when** upstream decodes money without going through `f64`.
+
+## 9. `ColumnType` of nullable `smallmoney` / `smalldatetime`
+
+**What.** A nullable `smallmoney` column (`MONEYN`, length 4) reports
+`ColumnType::Money4` and a nullable `smalldatetime` (`DATETIMEN`, length 4)
+reports `ColumnType::Datetime4`, as the NOT NULL ones already did. The
+8-byte forms keep `Money` and `Datetimen`.
+
+**Why.** Both used to report `Money` / `Datetimen`, so a client could not tell
+the types apart.
+
+**Files.** `src/row.rs`: the `VarLenSized` arm of `From<&TypeInfo>` and its
+test.
+
+**Drop when** upstream looks at the length for these two types.
+
 ## 4. Build plumbing
 
 - `Cargo.toml`: a `[[test]]` entry for `tests/tulka_patches.rs` (the published

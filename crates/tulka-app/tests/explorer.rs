@@ -612,6 +612,79 @@ async fn a_disconnect_during_connect_wins() {
     assert_eq!(f.driver.snapshots(), ["a", "b"]);
 }
 
+/// A secret store whose `get` blocks until released.
+struct GatedStore {
+    inner: MemoryStore,
+    entered: AtomicBool,
+    release: AtomicBool,
+}
+
+impl tulka_core::SecretStore for GatedStore {
+    fn set(&self, id: &str, secret: &str) -> Result<(), tulka_core::SecretError> {
+        self.inner.set(id, secret)
+    }
+    fn get(&self, id: &str) -> Result<Option<String>, tulka_core::SecretError> {
+        self.entered.store(true, Ordering::SeqCst);
+        while !self.release.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.inner.get(id)
+    }
+    fn delete(&self, id: &str) -> Result<(), tulka_core::SecretError> {
+        self.inner.delete(id)
+    }
+}
+
+#[tokio::test]
+async fn a_disconnect_during_the_keychain_read_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    let driver = Arc::new(Inner::new(&["a"]));
+    let events = Arc::new(Recorder::default());
+    let store = Arc::new(GatedStore {
+        inner: MemoryStore::default(),
+        entered: AtomicBool::new(false),
+        release: AtomicBool::new(true),
+    });
+    let state = Arc::new(
+        AppState::new(
+            ConfigStore::at(dir.path().join("config.json")),
+            store.clone(),
+            vec![Arc::new(MetaDriver(driver.clone()))],
+        )
+        .unwrap()
+        .with_metadata(Arc::new(MetaCache::in_memory()), events.clone()),
+    );
+    save_connection(&state, conn("c1", "Main", None), Some(PASSWORD.into()))
+        .await
+        .unwrap();
+    store.release.store(false, Ordering::SeqCst);
+    let st = state.clone();
+    let connecting = tokio::spawn(async move { connect_explorer(&st, "c1".into(), None).await });
+    tokio::time::timeout(TIMEOUT, async {
+        while !store.entered.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    disconnect_explorer(&state, "c1".into()).await.unwrap();
+    store.release.store(true, Ordering::SeqCst);
+    let result = tokio::time::timeout(TIMEOUT, connecting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.unwrap_err(), CLOSED);
+    assert_eq!(driver.open.load(Ordering::SeqCst), 0);
+    assert!(driver.snapshots().is_empty());
+    assert!(!events.all().iter().any(|e| matches!(
+        e,
+        AppEvent::ExplorerStatus {
+            status: ConnectionStatus::Connecting | ConnectionStatus::Connected,
+            ..
+        }
+    )));
+}
+
 #[tokio::test]
 async fn a_disconnect_during_a_failing_connect_reports_no_error() {
     let f = fx(Inner::new(&["a"]));

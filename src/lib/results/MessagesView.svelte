@@ -39,6 +39,9 @@
     font-family: var(--mono);
     font-size: 12px;
     color: var(--soft);
+    /* Thousands of messages stay cheap: off-screen rows skip layout and paint. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 24px;
   }
   .text {
     white-space: pre-wrap;

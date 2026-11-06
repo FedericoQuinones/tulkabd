@@ -170,6 +170,100 @@ async fn maps_types_and_unicode() {
 }
 
 #[tokio::test]
+async fn money_is_exact_at_the_extremes() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let (result, events) = collect(
+        s.as_mut(),
+        "SELECT CAST(922337203685477.5807 AS money), CAST(-922337203685477.5808 AS money), \
+         CAST(-0.0001 AS money), CAST(214748.3647 AS smallmoney), \
+         CAST(-214748.3648 AS smallmoney), CAST(-1.5 AS smallmoney), \
+         CAST(NULL AS money), \
+         ISNULL(CAST(922337203685477.5807 AS money), 0), ISNULL(CAST(-214748.3648 AS smallmoney), 0)",
+    )
+    .await;
+    result.unwrap();
+    let dec = |s: &str| Value::Decimal(s.into());
+    assert_eq!(
+        rows(&events),
+        vec![vec![
+            dec("922337203685477.5807"),
+            dec("-922337203685477.5808"),
+            dec("-0.0001"),
+            dec("214748.3647"),
+            dec("-214748.3648"),
+            dec("-1.5000"),
+            Value::Null,
+            dec("922337203685477.5807"),
+            dec("-214748.3648"),
+        ]]
+    );
+}
+
+#[tokio::test]
+async fn nullable_small_types_keep_their_names() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let (result, events) = collect(
+        s.as_mut(),
+        "CREATE TABLE #n(a smalldatetime NULL, b smallmoney NULL, c datetime NULL, d money NULL, \
+         e smalldatetime NOT NULL, f smallmoney NOT NULL); SELECT * FROM #n",
+    )
+    .await;
+    result.unwrap();
+    let names: Vec<String> = events
+        .iter()
+        .find_map(|ev| match ev {
+            ExecEvent::ResultStart { columns, .. } => {
+                Some(columns.iter().map(|c| c.type_name.clone()).collect())
+            }
+            _ => None,
+        })
+        .expect("a result set");
+    assert_eq!(
+        names,
+        [
+            "smalldatetime",
+            "smallmoney",
+            "datetime",
+            "money",
+            "smalldatetime",
+            "smallmoney"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn varchar_in_oem_collations_decodes() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    // CP437 (sort id 32) and CP850 (sort id 42), also through char and text.
+    let (result, events) = collect(
+        s.as_mut(),
+        "SELECT CAST(N'x\u{e7}\u{2591}' COLLATE SQL_Latin1_General_CP437_CI_AS AS varchar(10)), \
+         CAST(N'x\u{e7}\u{2591}' COLLATE SQL_Latin1_General_CP850_CI_AS AS varchar(10)), \
+         CAST(N'\u{f8}\u{a2}' COLLATE SQL_Latin1_General_CP850_CS_AS AS char(3)), \
+         CAST(N'\u{a2}\u{a5}' COLLATE SQL_Latin1_General_CP437_BIN AS varchar(10)), \
+         CAST(CAST(N'\u{e9}' COLLATE SQL_Latin1_General_CP850_CI_AS AS varchar(5)) AS sql_variant)",
+    )
+    .await;
+    result.unwrap();
+    assert_eq!(
+        rows(&events),
+        vec![vec![
+            Value::Text("x\u{e7}\u{2591}".into()),
+            Value::Text("x\u{e7}\u{2591}".into()),
+            Value::Text("\u{f8}\u{a2} ".into()),
+            Value::Text("\u{a2}\u{a5}".into()),
+            Value::Text("\u{e9}".into()),
+        ]]
+    );
+}
+
+#[tokio::test]
 async fn maps_temporal_and_numeric_types() {
     let Some(p) = test_params() else { return };
     let mut s = connect(&p).await;
@@ -317,6 +411,64 @@ async fn error_reports_editor_line() {
     assert!(!events.contains(&ExecEvent::BatchDone { batch: 1 }));
 
     // The session is still usable after a query error.
+    let (result, _) = collect(s.as_mut(), "SELECT 1").await;
+    result.unwrap();
+}
+
+/// The `(kind, text)` of the messages in `events`, in order.
+fn messages(events: &[ExecEvent]) -> Vec<(MessageKind, String)> {
+    events
+        .iter()
+        .filter_map(|ev| match ev {
+            ExecEvent::Message { kind, text, .. } => Some((*kind, text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn error_count(events: &[ExecEvent]) -> usize {
+    messages(events)
+        .iter()
+        .filter(|(k, _)| *k == MessageKind::Error)
+        .count()
+}
+
+#[tokio::test]
+async fn every_error_arrives_in_order() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let (result, events) = collect(
+        s.as_mut(),
+        "PRINT 'a'; RAISERROR('e1',16,1); PRINT 'b'; SELECT 1; RAISERROR('e2',16,1); SELECT 2",
+    )
+    .await;
+    // The batch failed with its first error.
+    assert!(
+        matches!(&result, Err(DriverError::Query { message, .. }) if message == "e1"),
+        "{result:?}"
+    );
+    let all: Vec<String> = events
+        .iter()
+        .filter_map(|ev| match ev {
+            ExecEvent::Message { kind, text, .. } => Some(format!("{kind:?} {text}")),
+            ExecEvent::ResultStart { index, .. } => Some(format!("result {index}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        all,
+        ["Info a", "Error e1", "Info b", "result 0", "Error e2", "result 1"]
+    );
+
+    let (result, events) = collect(s.as_mut(), "SELECT 1/0; SELECT 2").await;
+    assert!(
+        matches!(result, Err(DriverError::Query { .. })),
+        "{result:?}"
+    );
+    assert_eq!(rows(&events), vec![vec![Value::Int(2)]]);
+    assert_eq!(error_count(&events), 1);
+    // The session is still usable.
     let (result, _) = collect(s.as_mut(), "SELECT 1").await;
     result.unwrap();
 }

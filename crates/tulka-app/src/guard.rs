@@ -127,6 +127,7 @@ pub(crate) async fn check(
         finished_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         outcome,
         findings,
+        database: None,
     }))
 }
 
@@ -153,6 +154,8 @@ mod tests {
                 database: "master".into(),
                 session: None,
                 cancel: None,
+                starting: false,
+                stop_pending: false,
                 results: Vec::new(),
                 disconnected: false,
             },

@@ -153,6 +153,9 @@ pub trait Session: Send {
     async fn set_lock_timeout(&mut self, _ms: u32) -> Result<(), DriverError> {
         Ok(())
     }
+    /// Forgets a cancel requested earlier, so it does not stop the next
+    /// `execute`. Called before the cancel handle is published for a run.
+    fn reset_cancel(&mut self) {}
     /// Every object of `database` with the columns of its tables and views.
     async fn snapshot(&mut self, database: &str) -> Result<DatabaseSnapshot, DriverError>;
     /// Columns, foreign keys and indexes of one table.

@@ -207,19 +207,23 @@ impl Explorer {
             .spawn(move || {
                 // Set even if loading panics, or every index update would
                 // wait forever.
-                let _loaded = MarkLoaded(&loader);
-                let entries = loader
-                    .cache
-                    .all_objects()
-                    .into_iter()
-                    .map(|(connection_id, database, object)| SearchEntry {
-                        connection_id,
-                        database,
-                        object,
-                    })
-                    .collect();
-                let built = SearchIndex::build(entries);
-                *loader.index.write().unwrap_or_else(PoisonError::into_inner) = built;
+                {
+                    let _loaded = MarkLoaded(&loader);
+                    let entries = loader
+                        .cache
+                        .all_objects()
+                        .into_iter()
+                        .map(|(connection_id, database, object)| SearchEntry {
+                            connection_id,
+                            database,
+                            object,
+                        })
+                        .collect();
+                    let built = SearchIndex::build(entries);
+                    *loader.index.write().unwrap_or_else(PoisonError::into_inner) = built;
+                }
+                // After the guard: a search made on this event must not count the load as indexing.
+                loader.emit(AppEvent::IndexLoaded);
             });
         if spawned.is_err() {
             // Search starts empty and fills up as connections are indexed.
@@ -568,10 +572,30 @@ pub async fn connect_explorer(
         .iter()
         .find(|c| c.id == connection_id)
         .cloned()
-        .ok_or_else(|| "the connection does not exist".to_string())?;
-    let password = resolve_password(state, &conn, password).await?;
-    let driver = state.driver(&conn.driver)?;
+        .ok_or_else(|| NOT_FOUND.to_string())?;
+    // Before the keychain read, so a disconnect meanwhile cancels this attempt.
     let epoch = explorer.begin_attempt(&connection_id);
+    let password = match resolve_password(state, &conn, password).await {
+        Ok(password) => password,
+        Err(e) => {
+            if explorer.is_current_attempt(&connection_id, epoch) {
+                explorer.cancel_attempt(&connection_id);
+            }
+            return Err(e);
+        }
+    };
+    if !explorer.is_current_attempt(&connection_id, epoch) {
+        return Err(CLOSED.into());
+    }
+    let driver = match state.driver(&conn.driver) {
+        Ok(driver) => driver,
+        Err(e) => {
+            if explorer.is_current_attempt(&connection_id, epoch) {
+                explorer.cancel_attempt(&connection_id);
+            }
+            return Err(e);
+        }
+    };
     if let Some(old) = explorer.take(&connection_id, None) {
         Explorer::stop(old).await;
     }

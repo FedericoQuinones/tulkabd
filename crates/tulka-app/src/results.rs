@@ -252,7 +252,9 @@ impl ResultBuffer {
                 let order = match (&a.1, &b.1) {
                     (Some(Parsed::Dec(x)), Some(Parsed::Dec(y))) => x.cmp(y),
                     (Some(Parsed::Instant(x)), Some(Parsed::Instant(y))) => x.cmp(y),
-                    (Some(Parsed::Folded(x)), Some(Parsed::Folded(y))) => x.cmp(y),
+                    (Some(Parsed::Folded(x, xo)), Some(Parsed::Folded(y, yo))) => {
+                        x.cmp(y).then_with(|| lowercase_cmp(xo, yo))
+                    }
                     _ => compare_values(a.0, b.0),
                 };
                 if descending {
@@ -412,9 +414,10 @@ enum SortKind {
 enum Parsed<'a> {
     Dec(Dec<'a>),
     Instant(Instant<'a>),
-    /// A text-like value (see [`SortKind::Text`]) lower-cased; UTF-8 byte order is the order of its chars, so
-    /// comparing two of these is [`compare_ignoring_case`].
-    Folded(Cow<'a, str>),
+    /// A text-like value (see [`SortKind::Text`]) as its [`fold_key`], with
+    /// the original text for ties; UTF-8 byte order is the order of the
+    /// chars, so comparing two keys is [`compare_ignoring_case`].
+    Folded(Cow<'a, str>, &'a str),
 }
 
 impl<'a> Parsed<'a> {
@@ -424,13 +427,7 @@ impl<'a> Parsed<'a> {
             Value::DateTimeOffset(t) => Instant::parse(t).map(Self::Instant),
             v if sort_kind(v) == SortKind::Text => {
                 let t = text_of(v);
-                Some(Self::Folded(
-                    if t.is_ascii() && !t.bytes().any(|c| c.is_ascii_uppercase()) {
-                        Cow::Borrowed(t)
-                    } else {
-                        Cow::Owned(t.chars().flat_map(char::to_lowercase).collect())
-                    },
-                ))
+                Some(Self::Folded(fold_key(t), t))
             }
             _ => None,
         }
@@ -534,6 +531,11 @@ fn text_of(v: &Value) -> &str {
     }
 }
 
+/// Text order: ignoring case and accents (`Ávila` sorts with the `A`s), with
+/// `ñ` a letter of its own between `n` and `o`. Texts equal under that order
+/// but spelled differently (`ávila`, `avila`) are told apart by their
+/// lower-cased text, so the order does not depend on arrival; texts that
+/// differ only in case stay equal.
 fn compare_ignoring_case(a: &str, b: &str) -> Ordering {
     // Same result as the general case, without its per-char work.
     if a.is_ascii() && b.is_ascii() {
@@ -541,10 +543,60 @@ fn compare_ignoring_case(a: &str, b: &str) -> Ordering {
             .map(|c| c.to_ascii_lowercase())
             .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
     } else {
-        a.chars()
-            .flat_map(char::to_lowercase)
-            .cmp(b.chars().flat_map(char::to_lowercase))
+        fold_key(a)
+            .cmp(&fold_key(b))
+            .then_with(|| lowercase_cmp(a, b))
     }
+}
+
+fn lowercase_cmp(a: &str, b: &str) -> Ordering {
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(b.chars().flat_map(char::to_lowercase))
+}
+
+/// `t` lower-cased with the Latin letters of Latin-1 Supplement and Latin
+/// Extended-A reduced to their base letters (`ß` to `ss`, `æ` to `ae`, `ø`
+/// to `o`). `ñ` becomes `n` plus the highest char, which sorts after every
+/// other `n…` text and before `o`, as in Spanish.
+fn fold_key(t: &str) -> Cow<'_, str> {
+    if t.is_ascii() && !t.bytes().any(|c| c.is_ascii_uppercase()) {
+        return Cow::Borrowed(t);
+    }
+    let mut out = String::with_capacity(t.len());
+    for c in t.chars().flat_map(char::to_lowercase) {
+        match c {
+            'à'..='å' | 'ā' | 'ă' | 'ą' => out.push('a'),
+            'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => out.push('c'),
+            'ď' | 'đ' | 'ð' => out.push('d'),
+            'è'..='ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => out.push('e'),
+            'ĝ' | 'ğ' | 'ġ' | 'ģ' => out.push('g'),
+            'ĥ' | 'ħ' => out.push('h'),
+            'ì'..='ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => out.push('i'),
+            'ĵ' => out.push('j'),
+            'ķ' => out.push('k'),
+            'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => out.push('l'),
+            'ñ' => {
+                out.push('n');
+                out.push(char::MAX);
+            }
+            'ń' | 'ņ' | 'ň' | 'ŉ' => out.push('n'),
+            'ò'..='ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => out.push('o'),
+            'ŕ' | 'ŗ' | 'ř' => out.push('r'),
+            'ś' | 'ŝ' | 'ş' | 'š' => out.push('s'),
+            'ţ' | 'ť' | 'ŧ' => out.push('t'),
+            'ù'..='ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => out.push('u'),
+            'ŵ' => out.push('w'),
+            'ý' | 'ÿ' | 'ŷ' => out.push('y'),
+            'ź' | 'ż' | 'ž' => out.push('z'),
+            'ß' => out.push_str("ss"),
+            'æ' => out.push_str("ae"),
+            'œ' => out.push_str("oe"),
+            'þ' => out.push_str("th"),
+            c => out.push(c),
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// A numeric value as a sortable key: infinities around the finite values,
@@ -654,11 +706,50 @@ fn plain_text(v: &Value) -> Option<Cow<'_, str>> {
         Value::Null => return None,
         Value::Bool(b) => Cow::Borrowed(if *b { "1" } else { "0" }),
         Value::Int(i) => Cow::Owned(i.to_string()),
-        Value::Float(f) => Cow::Owned(f.to_string()),
+        Value::Float(f) => Cow::Owned(js_number_text(*f)),
         Value::Decimal(d) => Cow::Borrowed(d),
         Value::Bytes(b) => Cow::Owned(hex(b, true)),
         other => Cow::Borrowed(text_of(other)),
     })
+}
+
+/// `f` as JavaScript's `String(f)` writes it, which is what the grid shows
+/// for a float: the shortest text that round-trips, in an exponent form
+/// from 1e21 up and below 1e-6 (`1e-7`, `1e+21`), and `-0` as `0`.
+fn js_number_text(f: f64) -> String {
+    if f.is_nan() {
+        return "NaN".into();
+    }
+    if f.is_infinite() {
+        return if f < 0.0 { "-Infinity" } else { "Infinity" }.into();
+    }
+    if f == 0.0 {
+        return "0".into();
+    }
+    // `{:e}` gives the shortest round-trip digits: `d.ddde<exp>`.
+    let sci = format!("{:e}", f.abs());
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let k = digits.len() as i32;
+    // The value is 0.<digits> * 10^n.
+    let n = exp.parse::<i32>().unwrap_or(0) + 1;
+    let sign = if f < 0.0 { "-" } else { "" };
+    let body = if k <= n && n <= 21 {
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else {
+        let e = n - 1;
+        let tail = format!("e{}{}", if e < 0 { '-' } else { '+' }, e.abs());
+        if k == 1 {
+            format!("{digits}{tail}")
+        } else {
+            format!("{}.{}{tail}", &digits[..1], &digits[1..])
+        }
+    };
+    format!("{sign}{body}")
 }
 
 /// `0x` and the hex digits of `bytes`.
@@ -740,7 +831,8 @@ fn contains_ignoring_case(haystack: &str, needle_lower: &str) -> bool {
     }
 }
 
-/// The `Equals` filter: the cell's text is exactly `text`.
+/// The `Equals` filter: the cell's text is exactly `text`, ignoring case
+/// (SQL Server's default collation does; `0xab` finds `0xAB`).
 /// Besides the full value, a long text or binary cell also matches the
 /// shortened form the grid shows (see [`display_cell`]): its first
 /// [`DISPLAY_TEXT_CHARS`] characters, or `0x` and its first [`DISPLAY_BYTES`]
@@ -749,20 +841,40 @@ fn cell_equals(value: &Value, text: &str) -> bool {
     let Some(plain) = plain_text(value) else {
         return false;
     };
-    if plain == text {
+    if equals_ignoring_case(&plain, text) {
         return true;
     }
     match value {
-        Value::Int(_) | Value::Float(_) | Value::Decimal(_) => group_digits(&plain) == text,
+        // `js_number_text` can differ from JavaScript in the last digit of
+        // an exact tie, so a float also matches the number the text reads as.
+        Value::Float(f) => {
+            equals_ignoring_case(&group_digits(&plain), text)
+                || text
+                    .replace(',', "")
+                    .parse::<f64>()
+                    .is_ok_and(|n| n == *f && n.is_finite())
+        }
+        Value::Int(_) | Value::Decimal(_) => equals_ignoring_case(&group_digits(&plain), text),
         Value::Text(full) => text.strip_suffix('…').is_some_and(|shown| {
             full.char_indices()
                 .nth(DISPLAY_TEXT_CHARS)
-                .is_some_and(|(end, _)| &full[..end] == shown)
+                .is_some_and(|(end, _)| equals_ignoring_case(&full[..end], shown))
         }),
         Value::Bytes(bytes) => text.strip_suffix('…').is_some_and(|shown| {
-            bytes.len() > DISPLAY_BYTES && hex(&bytes[..DISPLAY_BYTES], true) == shown
+            bytes.len() > DISPLAY_BYTES
+                && equals_ignoring_case(&hex(&bytes[..DISPLAY_BYTES], true), shown)
         }),
         _ => false,
+    }
+}
+
+fn equals_ignoring_case(a: &str, b: &str) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a.chars()
+            .flat_map(char::to_lowercase)
+            .eq(b.chars().flat_map(char::to_lowercase))
     }
 }
 
@@ -1004,6 +1116,51 @@ mod tests {
     }
 
     #[test]
+    fn floats_read_as_javascript_writes_them() {
+        for (f, want) in [
+            (1e-7, "1e-7"),
+            (1.5e-7, "1.5e-7"),
+            (1e21, "1e+21"),
+            (1.2345e25, "1.2345e+25"),
+            (1e20, "100000000000000000000"),
+            (123.456, "123.456"),
+            (-0.0, "0"),
+            (0.0, "0"),
+            (0.000001, "0.000001"),
+            (-2.5, "-2.5"),
+            (3.0, "3"),
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "Infinity"),
+            (f64::NEG_INFINITY, "-Infinity"),
+        ] {
+            assert_eq!(js_number_text(f), want);
+        }
+    }
+
+    #[test]
+    fn equals_ignores_case_for_text_binary_and_guids() {
+        assert!(cell_equals(&Value::Text("Hello".into()), "hELLO"));
+        assert!(cell_equals(&Value::Text("Ávila".into()), "ÁVILA"));
+        assert!(!cell_equals(&Value::Text("Hello".into()), "Hell"));
+        assert!(cell_equals(&Value::Bytes(vec![0xAB, 0x01]), "0xab01"));
+        let guid = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
+        assert!(cell_equals(&Value::Uuid(guid.into()), &guid.to_lowercase()));
+    }
+
+    #[test]
+    fn equals_finds_floats_as_the_grid_shows_them() {
+        assert!(cell_equals(&Value::Float(1e-7), "1e-7"));
+        assert!(cell_equals(&Value::Float(1e21), "1e+21"));
+        assert!(cell_equals(&Value::Float(-0.0), "0"));
+        // The grid's JS text of an exact tie differs from Rust's.
+        #[allow(clippy::excessive_precision)]
+        let tie = 199073113327400.625;
+        assert!(cell_equals(&Value::Float(tie), "199073113327400.62"));
+        assert!(cell_equals(&Value::Float(tie), "199,073,113,327,400.62"));
+        assert!(!cell_equals(&Value::Float(tie), "199073113327400.5"));
+    }
+
+    #[test]
     fn display_cell_trims_long_text_by_characters() {
         let at_limit = "é".repeat(DISPLAY_TEXT_CHARS);
         assert_eq!(
@@ -1231,6 +1388,47 @@ mod tests {
     }
 
     #[test]
+    fn text_sorts_accents_with_their_base_letter() {
+        use std::cmp::Ordering::*;
+        let cmp = |a: &str, b: &str| compare_values(&text(a), &text(b));
+        assert_eq!(cmp("Ávila", "Zurich"), Less);
+        assert_eq!(cmp("Ávila", "Barcelona"), Less);
+        assert_eq!(cmp("Zurich", "Ávila"), Greater);
+        // ñ is a letter after n, before o.
+        assert_eq!(cmp("nz", "ñ"), Less);
+        assert_eq!(cmp("ñu", "nzz"), Greater);
+        assert_eq!(cmp("ñandú", "oso"), Less);
+        assert_eq!(cmp("Ñ", "ñ"), Equal);
+        assert_eq!(cmp("straße", "strasse"), Greater);
+        assert_eq!(cmp("straße", "strassf"), Less);
+        assert_eq!(cmp("Øre", "Ore"), Greater);
+        assert_eq!(cmp("Øre", "Orf"), Less);
+        // Same base letters: told apart by the original, not by arrival.
+        assert_eq!(cmp("avila", "ávila"), Less);
+        assert_eq!(cmp("ávila", "avila"), Greater);
+        assert_eq!(cmp("ÉCLAIR", "éclair"), Equal);
+
+        let mut b = buffer_of(vec![
+            vec![text("Zurich")],
+            vec![text("Ávila")],
+            vec![text("ñu")],
+            vec![text("nube")],
+            vec![text("Oslo")],
+        ]);
+        b.set_view(&sorted(0, false));
+        assert_eq!(
+            first_cells(&b),
+            vec![
+                text("Ávila"),
+                text("nube"),
+                text("ñu"),
+                text("Oslo"),
+                text("Zurich")
+            ]
+        );
+    }
+
+    #[test]
     fn view_sort_is_stable_with_equal_values() {
         let mut b = buffer_of(vec![
             vec![text("b"), Value::Int(0)],
@@ -1312,7 +1510,7 @@ mod tests {
             ..ViewSpec::default()
         });
         assert_eq!(first_cells(&b), vec![Value::Int(3)]);
-        // Equals is exact text; numbers also match their grouped form.
+        // Equals is exact text ignoring case; numbers also match their grouped form.
         let mut b = buffer_of(vec![
             vec![text("X")],
             vec![dec("1234.50")],
@@ -1326,6 +1524,8 @@ mod tests {
             ..ViewSpec::default()
         };
         b.set_view(&equals("x"));
+        assert_eq!(b.visible_len(), 1);
+        b.set_view(&equals("xx"));
         assert_eq!(b.visible_len(), 0);
         b.set_view(&equals("1,234.50"));
         assert_eq!(first_cells(&b), vec![dec("1234.50")]);
