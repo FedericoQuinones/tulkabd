@@ -413,6 +413,87 @@ async fn module_errors_name_the_procedure_and_do_not_jump() {
     );
 }
 
+/// The text and editor line of the first error message of `events`.
+fn first_error(events: &[ExecEvent]) -> (String, Option<u32>) {
+    events
+        .iter()
+        .find_map(|ev| match ev {
+            ExecEvent::Message {
+                kind: MessageKind::Error,
+                text,
+                line,
+            } => Some((text.clone(), *line)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no error message in {events:?}"))
+}
+
+#[tokio::test]
+async fn module_ddl_errors_keep_the_editor_line() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    // The server names the module here, but counts lines from the batch start.
+    let cases = [
+        (
+            "-- leading comment\nCREATE PROCEDURE dbo.tulka_p AS\nBEGIN\n  SELECT 1 FROM\nEND",
+            5,
+        ),
+        (
+            "SELECT 1\nGO\nCREATE OR ALTER PROCEDURE dbo.tulka_p2 AS\nBEGIN\n  SELECT nope FROM sys.objects\nEND",
+            5,
+        ),
+        (
+            "SELECT 1\nGO\n/* c */ create view dbo.tulka_v as\nSELECT nope FROM sys.objects",
+            4,
+        ),
+        (
+            "SELECT 1\nGO\nCREATE TRIGGER dbo.tulka_trg ON dbo.tulka_no_table AFTER INSERT AS\nSELECT 1",
+            3,
+        ),
+    ];
+    for (sql, line) in cases {
+        let (result, events) = collect(s.as_mut(), sql).await;
+        assert!(result.is_err(), "{sql}");
+        let error = first_error(&events);
+        assert_eq!(error.1, Some(line), "{sql}\n{events:?}");
+    }
+}
+
+#[tokio::test]
+async fn messages_from_inside_a_module_have_no_editor_line() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let sql = "CREATE PROCEDURE #tulka_talks AS\nBEGIN\n  PRINT 'inside'\n  RAISERROR('low', 10, 1)\nEND\nGO\nPRINT 'outside'\nEXEC #tulka_talks";
+    let (result, events) = collect(s.as_mut(), sql).await;
+    result.unwrap();
+    let info = |wanted: &str| {
+        events.iter().find_map(|ev| match ev {
+            ExecEvent::Message {
+                kind: MessageKind::Info,
+                text,
+                line,
+            } if text == wanted => Some(*line),
+            _ => None,
+        })
+    };
+    assert_eq!(info("outside"), Some(Some(7)), "{events:?}");
+    assert_eq!(info("inside"), Some(None), "{events:?}");
+    assert_eq!(info("low"), Some(None), "{events:?}");
+}
+
+#[tokio::test]
+async fn dynamic_sql_errors_past_the_batch_have_no_editor_line() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let sql = "DECLARE @s nvarchar(max) = N'SELECT 1' + CHAR(10) + CHAR(10) + CHAR(10) + N'SELECT 1/0'; EXEC(@s)";
+    let (result, events) = collect(s.as_mut(), sql).await;
+    assert!(result.is_err());
+    assert_eq!(first_error(&events).1, None, "{events:?}");
+}
+
 #[tokio::test]
 async fn announced_database_uses_the_catalog_spelling() {
     let Some(mut p) = test_params() else { return };

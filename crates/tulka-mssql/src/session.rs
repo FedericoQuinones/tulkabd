@@ -22,6 +22,7 @@ use tulka_core::{
 
 use crate::batches::{split_batches, Batch};
 use crate::convert::{to_value, type_name};
+use crate::lexer::{lex, Kind};
 use crate::meta;
 use crate::readonly;
 
@@ -88,11 +89,11 @@ pub struct MssqlSession {
     /// Whether the server hosts a single database (Azure SQL Database),
     /// learned on first use.
     single_database: Option<bool>,
-}
     /// What `DB_NAME()` returned when the client announced the database under
     /// the spelling in `.0`. The login ENVCHANGE echoes the name as the client
     /// or the login wrote it (`TEMPDB`), which is not the catalog's spelling.
     database_spelling: Option<(String, String)>,
+}
 
 /// The default SQL Server port. With a named instance it means "ask SQL
 /// Server Browser for the instance's port".
@@ -170,8 +171,8 @@ pub async fn connect(p: &ConnectParams) -> Result<MssqlSession, DriverError> {
         cancel,
         cancel_requested: Arc::new(AtomicBool::new(false)),
         single_database: None,
-    })
         database_spelling: None,
+    })
 }
 
 fn config(p: &ConnectParams, target: &Target, timeout: Option<Duration>) -> Config {
@@ -286,16 +287,82 @@ fn login_error(e: TdsError) -> DriverError {
     }
 }
 
-/// Maps an error of a running request. `line_of` turns a server line number
-/// (1-based within the batch) into an editor line.
-fn request_error(e: TdsError, line_of: impl Fn(u32) -> Option<u32>) -> DriverError {
+/// Where the batch being run sits in the editor, to turn the line numbers
+/// the server reports into editor lines.
+struct Site {
+    /// The editor line (1-based) where the batch starts.
+    start_line: u32,
+    /// How many lines the batch has.
+    lines: u32,
+    /// Whether the batch is `CREATE`/`ALTER` of a module: the server then
+    /// names the module in its errors, but counts lines from the batch start.
+    module_ddl: bool,
+}
+
+impl Site {
+    /// For statements the app sends itself: no line maps to the editor.
+    const NONE: Site = Site {
+        start_line: 0,
+        lines: 0,
+        module_ddl: false,
+    };
+
+    fn of(batch: &Batch) -> Site {
+        Site {
+            start_line: batch.start_line,
+            lines: batch.text.split('\n').count() as u32,
+            module_ddl: is_module_ddl(&batch.text),
+        }
+    }
+
+    /// The editor line of a message from `procedure` (empty for the batch
+    /// itself), or `None` when it has none. Inside a procedure or trigger the
+    /// line counts from the start of that module, so it is no editor line;
+    /// only the batch that defines a module names it and still counts batch
+    /// lines. A number past the end of the batch comes from other text
+    /// (dynamic SQL).
+    fn message_line(&self, procedure: &str, line: u32) -> Option<u32> {
+        let own = procedure.is_empty() || self.module_ddl;
+        (own && line > 0 && line <= self.lines).then(|| self.start_line + line - 1)
+    }
+}
+
+/// Whether the batch starts, after comments, with `CREATE`, `CREATE OR ALTER`
+/// or `ALTER` followed by `PROC`, `PROCEDURE`, `FUNCTION`, `TRIGGER` or `VIEW`.
+fn is_module_ddl(text: &str) -> bool {
+    let Ok(tokens) = lex(text) else { return false };
+    let word = |i: usize| {
+        tokens
+            .get(i)
+            .filter(|t| t.kind == Kind::Word)
+            .map(|t| text[t.start..t.end].to_ascii_uppercase())
+    };
+    let mut at = 1;
+    match word(0).as_deref() {
+        Some("CREATE") => {
+            if word(1).as_deref() == Some("OR") && word(2).as_deref() == Some("ALTER") {
+                at = 3;
+            }
+        }
+        Some("ALTER") => {}
+        _ => return false,
+    }
+    matches!(
+        word(at).as_deref(),
+        Some("PROC" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "VIEW")
+    )
+}
+
+/// Maps an error of a running request; `site` turns a server line number into
+/// an editor line.
+fn request_error(e: TdsError, site: &Site) -> DriverError {
     match e {
         TdsError::Cancelled => DriverError::Cancelled,
         TdsError::Server(te) if te.class() >= FATAL_SEVERITY => {
             DriverError::Disconnected(te.message().to_string())
         }
         TdsError::Server(te) => {
-            let (message, line) = error_site(&te, line_of);
+            let (message, line) = error_site(&te, site);
             DriverError::Query { message, line }
         }
         TdsError::Io { message, .. } => DriverError::Disconnected(message),
@@ -304,14 +371,19 @@ fn request_error(e: TdsError, line_of: impl Fn(u32) -> Option<u32>) -> DriverErr
 }
 
 /// The text and editor line of a server error. An error raised inside a
-/// stored procedure, function or trigger carries the name of that module and
-/// a line counted from its own start, so the line says nothing about the
-/// editor: it goes into the text and gets no jump. Errors of the batch itself
-/// have an empty procedure name.
-fn error_site(error: &TokenError, line_of: impl Fn(u32) -> Option<u32>) -> (String, Option<u32>) {
+/// stored procedure or trigger carries the name of that module and a line
+/// counted from its own start (functions carry no name), so the line says
+/// nothing about the editor: it goes into the text and gets no jump. Errors
+/// of the batch itself have an empty procedure name, and compile errors of a
+/// module's own `CREATE`/`ALTER` batch name the module but count batch lines,
+/// so both keep their jump.
+fn error_site(error: &TokenError, site: &Site) -> (String, Option<u32>) {
     let procedure = error.procedure();
-    if procedure.is_empty() {
-        return (error.message().to_string(), line_of(error.line()));
+    if procedure.is_empty() || site.module_ddl {
+        return (
+            error.message().to_string(),
+            site.message_line(procedure, error.line()),
+        );
     }
     let text = if error.line() > 0 {
         format!(
@@ -334,7 +406,7 @@ impl MssqlSession {
     async fn query_rows(&mut self, sql: &str) -> Result<Vec<Row>, DriverError> {
         let client = self.client.as_mut().ok_or_else(closed)?;
         let result = async { client.simple_query(sql).await?.into_first_result().await }.await;
-        result.map_err(|e| self.fail(request_error(e, |_| None)))
+        result.map_err(|e| self.fail(request_error(e, &Site::NONE)))
     }
 
     /// Runs a statement with `@P1`, `@P2`... parameters and returns the rows of
@@ -639,7 +711,11 @@ impl Session for MssqlSession {
     }
 
     fn announced_database(&self) -> Option<String> {
-        self.client.as_ref()?.database().map(str::to_string)
+        let announced = self.client.as_ref()?.database()?;
+        match &self.database_spelling {
+            Some((spelled, name)) if spelled == announced => Some(name.clone()),
+            _ => Some(announced.to_string()),
+        }
     }
 
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError> {
@@ -779,12 +855,12 @@ async fn run_batch(
     next_result: &mut u32,
     out: &mut Emitter,
 ) -> Result<(), DriverError> {
-    let line_of = |line: u32| (line > 0).then(|| batch.start_line + line - 1);
+    let site = Site::of(batch);
 
     let stream = client.simple_query(batch.text.as_str());
     let mut stream = resend_cancel_while(stream, out)
         .await
-        .map_err(|e| request_error(e, line_of))?;
+        .map_err(|e| request_error(e, &site))?;
 
     let mut current: Option<ResultSet> = None;
     let mut buffer = RowBuffer {
@@ -839,7 +915,7 @@ async fn run_batch(
                 out.send(ExecEvent::Message {
                     kind: MessageKind::Info,
                     text: info.message,
-                    line: line_of(info.line),
+                    line: site.message_line(&info.procedure, info.line),
                 })
                 .await;
             }
@@ -848,10 +924,10 @@ async fn run_batch(
                 // A fatal error ends the connection: report it as the error
                 // of the request, not as a message.
                 if error.class() >= FATAL_SEVERITY {
-                    return Err(request_error(TdsError::Server(error), line_of));
+                    return Err(request_error(TdsError::Server(error), &site));
                 }
                 out.error_sent = true;
-                let (text, line) = error_site(&error, line_of);
+                let (text, line) = error_site(&error, &site);
                 out.send(ExecEvent::Message {
                     kind: MessageKind::Error,
                     text,
@@ -868,7 +944,7 @@ async fn run_batch(
             }
             Err(e) => {
                 buffer.flush(index_of(&current), out).await;
-                return Err(request_error(e, line_of));
+                return Err(request_error(e, &site));
             }
         }
     }
