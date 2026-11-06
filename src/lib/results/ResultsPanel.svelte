@@ -4,7 +4,10 @@
   import * as ipc from "../ipc";
   import type { ViewSpec } from "../ipc";
   import type { PaneState } from "../pane/pane.svelte";
+  import ContextMenu from "../explorer/ContextMenu.svelte";
+  import type { MenuItem } from "../explorer/tree";
   import CopyToast from "./CopyToast.svelte";
+  import { defaultSaveName } from "./saveName";
   import MessagesView from "./MessagesView.svelte";
   import RunLogView from "../runlog/RunLogView.svelte";
   import { runLog } from "../runlog/runlog.svelte";
@@ -139,6 +142,44 @@
     flushFilter();
   });
 
+  const SAVE_FORMATS: ipc.SaveFormat[] = ["csv", "tsv", "json"];
+  let saving = false;
+  let saveMenu = $state<{ x: number; y: number; trigger: HTMLElement } | null>(null);
+  const saveItems: MenuItem[] = SAVE_FORMATS.map((f) => ({
+    id: f,
+    label: t(`results.saveAs.${f}`),
+    run: () => save(f),
+  }));
+
+  function openSaveMenu(e: MouseEvent) {
+    const trigger = e.currentTarget as HTMLElement;
+    const r = trigger.getBoundingClientRect();
+    saveMenu = { x: r.left, y: r.bottom + 2, trigger };
+  }
+
+  function closeSaveMenu(refocus: boolean) {
+    const trigger = saveMenu?.trigger;
+    saveMenu = null;
+    if (refocus) trigger?.focus();
+  }
+
+  /** Writes the rows the grid shows (its sort and filter apply, as for Copy) to a file the user picks. */
+  async function save(format: ipc.SaveFormat) {
+    if (index === null || !result || saving || viewPending || !ready) return;
+    const run = pane.runCount;
+    saving = true;
+    try {
+      const out = await ipc.saveResults(pane.tabId, index, format, defaultSaveName(format), t(`results.saveFilter.${format}`));
+      // Cancelling the dialog does nothing.
+      if (out === null || run !== pane.runCount) return;
+      show(out.rows === 1 ? t("results.toast.savedOne") : t("results.toast.saved", { rows: count(out.rows) }));
+    } catch (e) {
+      show(t("results.saveFailed", { error: String(e) }), true);
+    } finally {
+      saving = false;
+    }
+  }
+
   async function copy(mode: "excel" | "ai") {
     // While a view is on its way, the selection's row indexes may belong to either order.
     if (index === null || !result || copying || viewPending) return;
@@ -211,6 +252,15 @@
     {/if}
     <button type="button" class="ghost" disabled={!result || viewPending} onclick={() => copy("excel")}>{t("results.copy")}</button>
     <button type="button" class="ghost" disabled={!result || viewPending} onclick={() => copy("ai")}>{t("results.copyAi")}</button>
+    <button
+      type="button"
+      class="ghost"
+      aria-haspopup="menu"
+      aria-expanded={saveMenu !== null}
+      disabled={!result || viewPending || !ready}
+      title={ready ? undefined : t("results.saveWhenDone")}
+      onclick={openSaveMenu}>{t("results.save")}</button
+    >
   </div>
   <div class="body">
     {#if active === "runlog"}
@@ -222,10 +272,14 @@
         <ResultGrid bind:this={grid} tabId={pane.tabId} resultIndex={index} {result} {view} {ready}
           final={pane.status !== "running" || pane.results.length > index + 1}
           oncopy={() => copy("excel")}
+          onsave={save}
           scroll={pane.gridScroll[index]}
           onscrolled={(top) => (pane.gridScroll[index] = top)}
         />
       {/key}
+    {/if}
+    {#if saveMenu}
+      <ContextMenu items={saveItems} x={saveMenu.x} y={saveMenu.y} label={t("results.saveMenu")} onclose={closeSaveMenu} />
     {/if}
     {#if toast}<CopyToast text={toast.text} error={toast.error} />{/if}
   </div>

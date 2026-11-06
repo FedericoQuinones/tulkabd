@@ -7,6 +7,7 @@ vi.mock("../ipc", async (original) => ({
   fetchRows: vi.fn(),
   setResultView: vi.fn(),
   copyResults: vi.fn(),
+  saveResults: vi.fn(),
 }));
 
 import * as ipc from "../ipc";
@@ -47,6 +48,7 @@ beforeEach(() => {
   vi.mocked(ipc.fetchRows).mockResolvedValue(rows);
   vi.mocked(ipc.setResultView).mockResolvedValue(3);
   vi.mocked(ipc.copyResults).mockResolvedValue({ rows: 2, tokens: 0 });
+  vi.mocked(ipc.saveResults).mockResolvedValue({ rows: 20 });
   pane = new PaneState(`tab-${Math.random()}`);
   pane.runCount = 1;
   pane.results = [
@@ -368,4 +370,68 @@ test("coming back to the tab keeps the result set shown and the grid scroll", as
   await settle();
   expect(pane.resultTab).toBe(0);
   expect(pane.gridScroll).toEqual([]);
+});
+
+const saveButton = () => [...document.querySelectorAll<HTMLButtonElement>("button.ghost")].find((b) => b.textContent === "Save as…")!;
+const menuItem = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent?.includes(label))!;
+
+test("Save as… offers the formats and saves the chosen one with a dated default name", async () => {
+  open();
+  await settle();
+  saveButton().click();
+  flushSync();
+  expect([...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent?.trim())).toEqual([
+    "Save as CSV…",
+    "Save as TSV…",
+    "Save as JSON…",
+  ]);
+  menuItem("JSON").click();
+  await settle();
+  expect(ipc.saveResults).toHaveBeenCalledTimes(1);
+  const [tabId, index, format, name, filter] = vi.mocked(ipc.saveResults).mock.calls[0];
+  expect([tabId, index, format, filter]).toEqual([pane.tabId, 0, "json", "JSON"]);
+  expect(name).toMatch(/^result-\d{8}-\d{6}\.json$/);
+  expect(document.body.textContent).toContain("Saved · 20 rows");
+});
+
+test("cancelling the save dialog shows nothing", async () => {
+  vi.mocked(ipc.saveResults).mockResolvedValue(null);
+  open();
+  await settle();
+  saveButton().click();
+  flushSync();
+  menuItem("CSV").click();
+  await settle();
+  expect(ipc.saveResults).toHaveBeenCalledTimes(1);
+  expect(document.querySelector('[role="status"]')).toBeNull();
+});
+
+test("a failed save shows the error", async () => {
+  vi.mocked(ipc.saveResults).mockRejectedValue("Could not save /x/a.csv: disk full");
+  open();
+  await settle();
+  saveButton().click();
+  flushSync();
+  menuItem("TSV").click();
+  await settle();
+  expect(document.body.textContent).toContain("Could not save: Could not save /x/a.csv: disk full");
+});
+
+test("saving waits for the run to end", async () => {
+  open("running");
+  await settle();
+  expect(saveButton().disabled).toBe(true);
+});
+
+test("the cell menu saves the whole result too", async () => {
+  open();
+  await settle();
+  grid().focus();
+  grid().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+  flushSync();
+  grid().dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  flushSync();
+  menuItem("Save as CSV").click();
+  await settle();
+  expect(ipc.saveResults).toHaveBeenCalledWith(pane.tabId, 0, "csv", expect.stringMatching(/\.csv$/), "CSV (comma-separated)");
 });

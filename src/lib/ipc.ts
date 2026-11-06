@@ -114,6 +114,11 @@ export interface CopyOutcome {
   rows: number;
   tokens: number;
 }
+/** File formats of `saveResults`. */
+export type SaveFormat = "csv" | "tsv" | "json";
+export interface SaveOutcome {
+  rows: number;
+}
 /** A filter on one column of a result; filters combine with AND. */
 export type ColumnFilter =
   | { kind: "isNull"; column: number }
@@ -365,6 +370,19 @@ export const copyResults = (
   mode: "excel" | "ai",
   selection: Selection,
 ) => invoke<CopyOutcome>("copy_results", { tabId, resultIndex, mode, selection });
+
+/**
+ * Asks for a file in the native save dialog and writes the visible rows of the result there (the
+ * current sort and filter apply, as for Copy). `defaultName` and `filterName` only label the
+ * dialog. Resolves to `null` when the dialog is cancelled; fails with "busy" while the tab runs.
+ */
+export const saveResults = (
+  tabId: string,
+  resultIndex: number,
+  format: SaveFormat,
+  defaultName: string,
+  filterName: string,
+) => invoke<SaveOutcome | null>("save_results", { tabId, resultIndex, format, defaultName, filterName });
 
 export const closeSession = (tabId: string) => invoke<void>("close_session", { tabId });
 

@@ -8,7 +8,7 @@
   import type { MenuItem } from "../explorer/tree";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
-  import type { ColumnFilter, Value } from "../ipc";
+  import type { ColumnFilter, SaveFormat, Value } from "../ipc";
   import type { PaneResult } from "../pane/reduce";
   import { cellText } from "./cellText";
   import { fitWidth, MAX_RESIZE_WIDTH, MIN_COLUMN_WIDTH, recallWidths, rememberWidth } from "./columnWidths";
@@ -47,12 +47,14 @@
     ready: boolean;
     /** Ctrl+C in the grid. */
     oncopy: () => void;
+    /** "Save as…" in the cell menu: saves the whole result, not the selection. */
+    onsave: (format: SaveFormat) => void;
     /** Where the grid was scrolled to when it was last shown. */
     scroll?: number;
     /** Reports the scroll position, so a remount can come back to it. */
     onscrolled?: (top: number) => void;
   }
-  let { tabId, resultIndex, result, final, view, ready, oncopy, scroll = 0, onscrolled }: Props = $props();
+  let { tabId, resultIndex, result, final, view, ready, oncopy, onsave, scroll = 0, onscrolled }: Props = $props();
 
   const NUMERIC = new Set(["int", "bigint", "smallint", "tinyint", "decimal", "numeric", "float", "real", "money", "smallmoney"]);
   const gridId = `result-grid-${++nextGridId}`;
@@ -260,6 +262,12 @@
       items: [
         { id: "copy", label: t("results.copy"), run: () => oncopy() },
         { id: "filterValue", label: t("results.filter.byValue"), run: () => filterByValue(at, value) },
+        ...(["csv", "tsv", "json"] as const).map((f, i) => ({
+          id: `save-${f}`,
+          label: t(`results.saveAs.${f}`),
+          run: () => onsave(f),
+          separator: i === 0,
+        })),
       ],
     };
   }
