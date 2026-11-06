@@ -17,7 +17,7 @@ import * as ipc from "../ipc";
 import { connections } from "../connections/store.svelte";
 import { explorer } from "../explorer/tree.svelte";
 import { tabs } from "../tabs/tabs.svelte";
-import { groupHits, highlight, MAX_HITS_PER_GROUP, paletteKey } from "./hits";
+import { canRun, groupHits, highlight, MAX_HITS_PER_GROUP, paletteKey } from "./hits";
 import { palette } from "./paletteState.svelte";
 import Palette from "./Palette.svelte";
 
@@ -26,7 +26,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 const conn = (id: string, name: string, passwordSaved = true) =>
   ({ id, name, folderId: null, passwordSaved, environment: "local", color: "#4a8ad6" }) as ConnectionConfig;
 
-function hit(over: Partial<PaletteHit> & { name: string; schema?: string; kind?: "table" | "view" | "procedure" }): PaletteHit {
+function hit(over: Partial<PaletteHit> & { name: string; schema?: string; kind?: PaletteHit["object"]["kind"] }): PaletteHit {
   const { name, schema = "dbo", kind = "table", ...rest } = over;
   return {
     connectionId: "c1",
@@ -214,6 +214,13 @@ test("a not connected procedure waits for the password prompt before opening its
   await flush();
   expect(ipc.connectExplorer).toHaveBeenLastCalledWith("c2", "pw");
   expect(open).toHaveBeenCalledWith({ kind: "definition", connectionId: "c2", database: "Ventas", schema: "dbo", name: "CerrarMes" });
+});
+
+test("functions and synonyms open their definition, and Select top 10 only suits synonyms", () => {
+  expect(canRun("selectTop", "function")).toBe(false);
+  expect(canRun("selectTop", "synonym")).toBe(true);
+  expect(canRun("definition", "function")).toBe(true);
+  expect(canRun("definition", "synonym")).toBe(true);
 });
 
 test("a cancelled password prompt opens nothing", async () => {

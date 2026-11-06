@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import type { CachedDatabase, ConnectionConfig, Folder, PaletteHit, SearchResponse } from "../ipc";
+import type { CachedDatabase, ObjectKind, ConnectionConfig, Folder, PaletteHit, SearchResponse } from "../ipc";
 
 vi.mock("../ipc", () => ({
   connectExplorer: vi.fn(),
@@ -64,6 +64,8 @@ const db = (name: string, over: Partial<CachedDatabase> = {}): CachedDatabase =>
   tables: 0,
   views: 0,
   procedures: 0,
+  functions: 0,
+  synonyms: 0,
   ...over,
 });
 
@@ -299,7 +301,7 @@ test("indexProgress marks indexing and refreshes the counters", async () => {
   const row = () => explorer.rows.find((r) => r.kind === "database");
   expect(row()?.kind === "database" && row()!.indexing).toBe(true);
 
-  vi.mocked(ipc.explorerDatabases).mockResolvedValue([db("Ventas", { indexedAt: 5, tables: 12, views: 3, procedures: 4 })]);
+  vi.mocked(ipc.explorerDatabases).mockResolvedValue([db("Ventas", { indexedAt: 5, tables: 12, views: 3, procedures: 4, functions: 2, synonyms: 1 })]);
   explorer.handleEvent({ kind: "indexProgress", connectionId: "c2", database: "Ventas", done: true, noAccess: false });
   await flush();
   await flush();
@@ -309,7 +311,7 @@ test("indexProgress marks indexing and refreshes the counters", async () => {
 
   explorer.expanded.add(keyOf.db("c2", "Ventas"));
   const counts = explorer.rows.filter((x) => x.kind === "group").map((g) => (g.kind === "group" ? g.count : 0));
-  expect(counts).toEqual([12, 3, 4]);
+  expect(counts).toEqual([12, 3, 4, 2, 1]);
 });
 
 test("a reindex during an object read triggers a second read", async () => {
@@ -408,7 +410,7 @@ test("tables load lazily and expand into columns", async () => {
   const obj = { schema: "dbo", name: "Pedidos", kind: "table" as const };
   await explorer.expand(keyOf.object("c2", "Ventas", obj));
   expect(ipc.explorerColumns).toHaveBeenCalledWith("c2", "Ventas", "dbo", "Pedidos");
-  expect(labels().slice(-5)).toEqual(["dbo.Pedidos", "col:Id", "col:Nota", "group:view", "group:procedure"]);
+  expect(labels().slice(-7)).toEqual(["dbo.Pedidos", "col:Id", "col:Nota", "group:view", "group:procedure", "group:function", "group:synonym"]);
 });
 
 test("a group of thousands of objects shows a page at a time", async () => {
@@ -545,7 +547,7 @@ const actions = (): MenuActions => ({
 test("object menus follow the kind", () => {
   explorer.expanded.add("c2");
   const base = { connectionId: "c2", database: "Ventas", level: 4, parent: null, expandable: true, expanded: false };
-  const mk = (kind: "table" | "view" | "procedure"): Row => ({
+  const mk = (kind: ObjectKind): Row => ({
     ...base,
     key: kind,
     kind: "object",
@@ -555,6 +557,9 @@ test("object menus follow the kind", () => {
   expect(ids(mk("table"))).toEqual(["selectTop", "structure", "copyName"]);
   expect(ids(mk("view"))).toEqual(["selectTop", "structure", "definition", "copyName"]);
   expect(ids(mk("procedure"))).toEqual(["definition", "copyName"]);
+  // A function needs arguments, so no Select top 10; a synonym has no columns of its own to show.
+  expect(ids(mk("function"))).toEqual(["structure", "definition", "copyName"]);
+  expect(ids(mk("synonym"))).toEqual(["selectTop", "definition", "copyName"]);
   expect(buildMenu(mk("table"), actions(), explorer).find((m) => m.id === "copyName")?.hint).toBe("[dbo].[Order Details]");
 });
 

@@ -35,7 +35,13 @@ export const objectTabs = {
   definition: (o: ObjectTarget) => tabs.open({ kind: "definition", ...o }),
 };
 
-export const OBJECT_KINDS: ObjectKind[] = ["table", "view", "procedure"];
+export const OBJECT_KINDS: ObjectKind[] = ["table", "view", "procedure", "function", "synonym"];
+
+/** Kinds whose rows expand into columns: a scalar function simply has none. */
+export const hasColumns = (kind: ObjectKind) => kind === "table" || kind === "view" || kind === "function";
+
+/** Kinds that `SELECT TOP 10 *` works on; a function needs arguments and a procedure is run, not read. */
+export const canSelectTop = (kind: ObjectKind) => kind === "table" || kind === "view" || kind === "synonym";
 
 /**
  * Row keys. Folders and connections use their own id (that is what `set_expanded`
@@ -299,15 +305,15 @@ export function buildMenu(row: Row, ui: MenuActions, store: MenuStore): MenuItem
       const { schema, name, kind } = object;
       const target: ObjectTarget = { connectionId, database, schema, name };
       const items: MenuItem[] = [];
-      if (kind !== "procedure") {
-        items.push(
-          {
-            id: "selectTop",
-            label: t("explorer.menu.selectTop"),
-            run: () => objectTabs.selectTop(target),
-          },
-          { id: "structure", label: t("explorer.menu.structure"), run: () => objectTabs.structure(target) },
-        );
+      if (canSelectTop(kind)) {
+        items.push({
+          id: "selectTop",
+          label: t("explorer.menu.selectTop"),
+          run: () => objectTabs.selectTop(target),
+        });
+      }
+      if (hasColumns(kind)) {
+        items.push({ id: "structure", label: t("explorer.menu.structure"), run: () => objectTabs.structure(target) });
       }
       if (kind !== "table") {
         items.push({ id: "definition", label: t("explorer.menu.definition"), run: () => objectTabs.definition(target) });

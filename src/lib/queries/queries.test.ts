@@ -34,7 +34,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 
 const conn = (id: string, name: string) =>
   ({ id, name, folderId: null, passwordSaved: true, environment: "local", color: "#4a8ad6" }) as ConnectionConfig;
-const db = (name: string): CachedDatabase => ({ name, noAccess: false, indexedAt: 1, tables: 0, views: 0, procedures: 0 });
+const db = (name: string): CachedDatabase => ({ name, noAccess: false, indexedAt: 1, tables: 0, views: 0, procedures: 0, functions: 0, synonyms: 0 });
 const session = (database: string, databases = [database]) => ({
   server: { version: "16", user: "sa", singleDatabase: false },
   databases,
@@ -177,7 +177,7 @@ test("the tree shows Saved queries first under each database, with the count and
   const first = under()[0];
   expect(first.kind).toBe("saved");
   expect(first.kind === "saved" && first.count).toBe(2);
-  expect(under().map((r) => r.kind)).toEqual(["saved", "group", "group", "group"]);
+  expect(under().map((r) => r.kind)).toEqual(["saved", "group", "group", "group", "group", "group"]);
   explorer.expanded.add(keyOf.saved("c2", "Ventas"));
   const names = explorer.rows.flatMap((r) => (r.kind === "savedQuery" ? [r.name] : []));
   expect(names).toEqual(["Reporte", "Top clientes"]);

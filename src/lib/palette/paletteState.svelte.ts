@@ -136,7 +136,7 @@ class PaletteStore {
       objectTabs.selectTop(target);
       return;
     }
-    const open = () => (action === "definition" || kind === "procedure" ? objectTabs.definition(target) : objectTabs.structure(target));
+    const open = () => (action === "definition" || kind === "procedure" || kind === "function" || kind === "synonym" ? objectTabs.definition(target) : objectTabs.structure(target));
     const status = explorer.conns[hit.connectionId]?.status;
     // The store knows a connection only once the Explorer touched it; until then trust the hit.
     if (status === "connected" || (status === undefined && hit.connected)) {

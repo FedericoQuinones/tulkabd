@@ -290,7 +290,13 @@ function qualifierBefore(text: string, end: number): string[] {
   return parts;
 }
 
-const KIND_TYPE: Record<DbObject["kind"], string> = { table: "class", view: "interface", procedure: "function" };
+const KIND_TYPE: Record<DbObject["kind"], string> = {
+  table: "class",
+  view: "interface",
+  procedure: "function",
+  function: "method",
+  synonym: "type",
+};
 
 /** Completions for `meta`, the cached metadata of the tab's database. */
 export function completionSource(meta: CompletionMetadata): CompletionSource {
