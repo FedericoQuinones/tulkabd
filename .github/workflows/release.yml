@@ -28,7 +28,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+          - os: macos-latest
+            # One universal dmg for Apple Silicon and Intel Macs.
+            args: --target universal-apple-darwin
+          - os: ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -38,6 +43,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - name: System libraries
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -50,6 +57,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tauriScript: pnpm tauri
+          args: ${{ matrix.args }}
           tagName: ${{ github.ref_name }}
           releaseName: tulkabd ${{ github.ref_name }}
           releaseDraft: true
