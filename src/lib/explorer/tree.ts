@@ -203,6 +203,8 @@ export interface MenuItem {
   label: string;
   run: () => unknown;
   danger?: boolean;
+  /** Shown but not selectable. */
+  disabled?: boolean;
   /** Draws a rule above the item. */
   separator?: boolean;
   /** Shown muted on the right, e.g. the name Copy name copies. */

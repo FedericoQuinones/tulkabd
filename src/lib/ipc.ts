@@ -118,6 +118,10 @@ export interface CopyOutcome {
 export type SaveFormat = "csv" | "tsv" | "json";
 export interface SaveOutcome {
   rows: number;
+  /** The result was cut by the row cap or the memory limit: the file holds only the kept rows. */
+  truncated: boolean;
+  /** Some values over 1 MB were shortened when the result was received. */
+  capped: boolean;
 }
 /** A filter on one column of a result; filters combine with AND. */
 export type ColumnFilter =

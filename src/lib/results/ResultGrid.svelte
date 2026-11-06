@@ -49,12 +49,14 @@
     oncopy: () => void;
     /** "Save as…" in the cell menu: saves the whole result, not the selection. */
     onsave: (format: SaveFormat) => void;
+    /** False while a run is in progress or a save is under way: the Save items are disabled. */
+    canSave: boolean;
     /** Where the grid was scrolled to when it was last shown. */
     scroll?: number;
     /** Reports the scroll position, so a remount can come back to it. */
     onscrolled?: (top: number) => void;
   }
-  let { tabId, resultIndex, result, final, view, ready, oncopy, onsave, scroll = 0, onscrolled }: Props = $props();
+  let { tabId, resultIndex, result, final, view, ready, oncopy, onsave, canSave, scroll = 0, onscrolled }: Props = $props();
 
   const NUMERIC = new Set(["int", "bigint", "smallint", "tinyint", "decimal", "numeric", "float", "real", "money", "smallmoney"]);
   const gridId = `result-grid-${++nextGridId}`;
@@ -266,6 +268,7 @@
           id: `save-${f}`,
           label: t(`results.saveAs.${f}`),
           run: () => onsave(f),
+          disabled: !canSave,
           separator: i === 0,
         })),
       ],

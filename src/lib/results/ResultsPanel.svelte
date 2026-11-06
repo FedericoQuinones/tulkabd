@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, untrack } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
   import type { ViewSpec } from "../ipc";
@@ -138,12 +138,12 @@
     toastTimer = setTimeout(() => (toast = null), error ? ERROR_TOAST_MS : TOAST_MS);
   }
   onDestroy(() => {
+    destroyed = true;
     clearTimeout(toastTimer);
     flushFilter();
   });
 
   const SAVE_FORMATS: ipc.SaveFormat[] = ["csv", "tsv", "json"];
-  let saving = false;
   let saveMenu = $state<{ x: number; y: number; trigger: HTMLElement } | null>(null);
   const saveItems: MenuItem[] = SAVE_FORMATS.map((f) => ({
     id: f,
@@ -163,22 +163,41 @@
     if (refocus) trigger?.focus();
   }
 
+  let destroyed = false;
+
   /** Writes the rows the grid shows (its sort and filter apply, as for Copy) to a file the user picks. */
   async function save(format: ipc.SaveFormat) {
-    if (index === null || !result || saving || viewPending || !ready) return;
+    if (index === null || !result || pane.saving || viewPending || !ready) return;
     const run = pane.runCount;
-    saving = true;
+    pane.saving = true;
+    let notice: { text: string; error: boolean } | null = null;
     try {
       const out = await ipc.saveResults(pane.tabId, index, format, defaultSaveName(format), t(`results.saveFilter.${format}`));
       // Cancelling the dialog does nothing.
-      if (out === null || run !== pane.runCount) return;
-      show(out.rows === 1 ? t("results.toast.savedOne") : t("results.toast.saved", { rows: count(out.rows) }));
+      if (out !== null) notice = { text: savedText(out), error: false };
     } catch (e) {
-      show(t("results.saveFailed", { error: String(e) }), true);
+      const error = String(e) === "busy" ? t("results.saveBusy") : String(e);
+      notice = { text: t("results.saveFailed", { error }), error: true };
     } finally {
-      saving = false;
+      pane.saving = false;
     }
+    if (!notice) return;
+    // This panel may be gone (another tab was shown meanwhile): the pane keeps the notice for the next one.
+    if (destroyed) pane.saveNotice = notice;
+    else if (run === pane.runCount || notice.error) show(notice.text, notice.error);
   }
+
+  function savedText(out: ipc.SaveOutcome) {
+    const base = out.rows === 1 ? t("results.toast.savedOne") : t("results.toast.saved", { rows: count(out.rows) });
+    const notes = [out.truncated ? t("results.toast.savedCut") : "", out.capped ? t("results.toast.savedCapped") : ""].filter(Boolean);
+    return notes.length ? `${base} · ${notes.join(" · ")}` : base;
+  }
+
+  onMount(() => {
+    const notice = pane.saveNotice;
+    pane.saveNotice = null;
+    if (notice) show(notice.text, notice.error);
+  });
 
   async function copy(mode: "excel" | "ai") {
     // While a view is on its way, the selection's row indexes may belong to either order.
@@ -257,9 +276,9 @@
       class="ghost"
       aria-haspopup="menu"
       aria-expanded={saveMenu !== null}
-      disabled={!result || viewPending || !ready}
+      disabled={!result || viewPending || !ready || pane.saving}
       title={ready ? undefined : t("results.saveWhenDone")}
-      onclick={openSaveMenu}>{t("results.save")}</button
+      onclick={openSaveMenu}>{pane.saving ? t("results.saving") : t("results.save")}</button
     >
   </div>
   <div class="body">
@@ -273,6 +292,7 @@
           final={pane.status !== "running" || pane.results.length > index + 1}
           oncopy={() => copy("excel")}
           onsave={save}
+          canSave={ready && !viewPending && !pane.saving}
           scroll={pane.gridScroll[index]}
           onscrolled={(top) => (pane.gridScroll[index] = top)}
         />

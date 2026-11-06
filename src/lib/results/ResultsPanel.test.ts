@@ -48,7 +48,7 @@ beforeEach(() => {
   vi.mocked(ipc.fetchRows).mockResolvedValue(rows);
   vi.mocked(ipc.setResultView).mockResolvedValue(3);
   vi.mocked(ipc.copyResults).mockResolvedValue({ rows: 2, tokens: 0 });
-  vi.mocked(ipc.saveResults).mockResolvedValue({ rows: 20 });
+  vi.mocked(ipc.saveResults).mockResolvedValue({ rows: 20, truncated: false, capped: false });
   pane = new PaneState(`tab-${Math.random()}`);
   pane.runCount = 1;
   pane.results = [
@@ -407,14 +407,14 @@ test("cancelling the save dialog shows nothing", async () => {
 });
 
 test("a failed save shows the error", async () => {
-  vi.mocked(ipc.saveResults).mockRejectedValue("Could not save /x/a.csv: disk full");
+  vi.mocked(ipc.saveResults).mockRejectedValue("/x/a.csv: disk full");
   open();
   await settle();
   saveButton().click();
   flushSync();
   menuItem("TSV").click();
   await settle();
-  expect(document.body.textContent).toContain("Could not save: Could not save /x/a.csv: disk full");
+  expect(document.body.textContent).toContain("Could not save: /x/a.csv: disk full");
 });
 
 test("saving waits for the run to end", async () => {
@@ -434,4 +434,75 @@ test("the cell menu saves the whole result too", async () => {
   menuItem("Save as CSV").click();
   await settle();
   expect(ipc.saveResults).toHaveBeenCalledWith(pane.tabId, 0, "csv", expect.stringMatching(/\.csv$/), "CSV (comma-separated)");
+});
+
+test("a result that was cut says so in the saved toast", async () => {
+  vi.mocked(ipc.saveResults).mockResolvedValue({ rows: 5, truncated: true, capped: true });
+  open();
+  await settle();
+  saveButton().click();
+  flushSync();
+  menuItem("CSV").click();
+  await settle();
+  const text = document.body.textContent ?? "";
+  expect(text).toContain("Saved · 5 rows · the result was cut at its row or memory limit · values over 1 MB were shortened");
+});
+
+test("a busy error is shown in plain words", async () => {
+  vi.mocked(ipc.saveResults).mockRejectedValue("busy");
+  open();
+  await settle();
+  saveButton().click();
+  flushSync();
+  menuItem("CSV").click();
+  await settle();
+  expect(document.body.textContent).toContain("Could not save: wait for the run to end");
+});
+
+test("the button shows Saving… and is disabled until the save ends", async () => {
+  let done!: (v: ipc.SaveOutcome | null) => void;
+  vi.mocked(ipc.saveResults).mockImplementation(() => new Promise((r) => (done = r)));
+  open();
+  await settle();
+  saveButton().click();
+  flushSync();
+  menuItem("CSV").click();
+  await settle();
+  const busy = [...document.querySelectorAll<HTMLButtonElement>("button.ghost")].find((b) => b.textContent === "Saving…")!;
+  expect(busy.disabled).toBe(true);
+  done({ rows: 1, truncated: false, capped: false });
+  await settle();
+  expect(saveButton().disabled).toBe(false);
+  expect(document.body.textContent).toContain("Saved · 1 row");
+});
+
+test("a save that ends after the panel was closed shows its outcome when it comes back", async () => {
+  let fail!: (e: unknown) => void;
+  vi.mocked(ipc.saveResults).mockImplementation(() => new Promise((_, r) => (fail = r)));
+  open();
+  await settle();
+  saveButton().click();
+  flushSync();
+  menuItem("CSV").click();
+  await settle();
+  close();
+  fail("disk full");
+  await settle();
+  expect(pane.saveNotice).toEqual({ text: "Could not save: disk full", error: true });
+  open();
+  await settle();
+  expect(document.body.textContent).toContain("Could not save: disk full");
+  expect(pane.saveNotice).toBeNull();
+});
+
+test("the cell menu's Save items are disabled while a save is under way", async () => {
+  pane.saving = true;
+  open();
+  await settle();
+  grid().focus();
+  grid().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+  flushSync();
+  grid().dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  flushSync();
+  expect(menuItem("Save as CSV").disabled).toBe(true);
 });

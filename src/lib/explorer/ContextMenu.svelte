@@ -25,7 +25,7 @@
   });
 
   function buttons() {
-    return [...el.querySelectorAll<HTMLButtonElement>("button")];
+    return [...el.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
   }
 
   function onkeydown(e: KeyboardEvent) {
@@ -54,7 +54,7 @@
 <div class="menu" role="menu" aria-label={label} tabindex="-1" bind:this={el} style:left="{left}px" style:top="{top}px" {onkeydown}>
   {#each items as item (item.id)}
     {#if item.separator}<div class="hr" role="separator"></div>{/if}
-    <button type="button" role="menuitem" tabindex="-1" class:danger={item.danger} onclick={() => pick(item)}>
+    <button type="button" role="menuitem" tabindex="-1" class:danger={item.danger} disabled={item.disabled} onclick={() => pick(item)}>
       <span>{item.label}</span>
       {#if item.hint}<small>{item.hint}</small>{/if}
     </button>
@@ -91,7 +91,11 @@
     white-space: nowrap;
     cursor: pointer;
   }
-  button:hover,
+  button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  button:hover:not(:disabled),
   button:focus-visible {
     outline: none;
     color: var(--text);
