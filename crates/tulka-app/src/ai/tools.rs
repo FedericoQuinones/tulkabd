@@ -171,7 +171,8 @@ pub struct SearchRequest {
     pub query: String,
     pub connection: Option<String>,
     pub database: Option<String>,
-    pub kind: Option<ObjectKind>,
+    /// Only these kinds; empty means every kind.
+    pub kinds: Vec<ObjectKind>,
     pub in_columns: bool,
     pub limit: Option<u32>,
 }
@@ -190,6 +191,9 @@ fn kind_name(kind: ObjectKind) -> &'static str {
         ObjectKind::Table => "table",
         ObjectKind::View => "view",
         ObjectKind::Procedure => "procedure",
+        ObjectKind::Function => "scalarFunction",
+        ObjectKind::TableFunction => "tableFunction",
+        ObjectKind::Synonym => "synonym",
     }
 }
 
@@ -208,7 +212,7 @@ pub async fn search_objects_until(
     search_objects_text(s, req, cancelled).await.within_budget()
 }
 
-/// Finds tables, views and procedures (or columns) whose name contains every
+/// Finds tables, views, procedures, functions and synonyms (or columns) whose name contains every
 /// word of the query, among the connections shared with the AI. It reads the
 /// cache the app keeps, except for one named database that is not in it,
 /// which is read from the server.
@@ -299,7 +303,7 @@ async fn search_objects_text(
             Err(e) => return e,
         }
     } else {
-        let (kind, in_columns, db) = (req.kind, req.in_columns, database.clone());
+        let (kinds, in_columns, db) = (req.kinds.clone(), req.in_columns, database.clone());
         let found = s
             .with_cache(move |c| {
                 c.find_objects_in(
@@ -307,7 +311,7 @@ async fn search_objects_text(
                         connection_ids: &ids,
                         database: db.as_deref(),
                         terms: &terms,
-                        kind,
+                        kinds: &kinds,
                         in_columns,
                         limit,
                     },
@@ -395,7 +399,7 @@ async fn live_search(
     };
     let mut hits = Vec::new();
     for (i, object) in snapshot.objects.iter().enumerate() {
-        if req.kind.is_some_and(|k| k != object.kind) {
+        if !req.kinds.is_empty() && !req.kinds.contains(&object.kind) {
             continue;
         }
         let hit = |column: Option<String>| Hit {
@@ -535,7 +539,7 @@ async fn describe_on_server(
     };
     if structure.columns.is_empty() {
         return ToolText::error(format!(
-            "No table or view named {schema}.{name} in {database} on {}. Use search_objects to find it.",
+            "No table, view or table-valued function named {schema}.{name} in {database} on {}. Use search_objects to find it.",
             v.label
         ));
     }
@@ -559,21 +563,32 @@ async fn resolve_schema(
     let schema_filter = schema.as_ref().map(|s| s.to_lowercase());
     let found: Vec<DbObject> = s
         .with_cache(move |c: &MetaCache| {
-            [ObjectKind::Table, ObjectKind::View]
-                .into_iter()
-                .flat_map(|kind| c.objects(&id, &db, kind))
-                .filter(|o| o.name.to_lowercase() == wanted)
-                .filter(|o| {
-                    schema_filter
-                        .as_ref()
-                        .is_none_or(|f| o.schema.to_lowercase() == *f)
-                })
-                .collect()
+            [
+                ObjectKind::Table,
+                ObjectKind::View,
+                ObjectKind::TableFunction,
+                ObjectKind::Synonym,
+            ]
+            .into_iter()
+            .flat_map(|kind| c.objects(&id, &db, kind))
+            .filter(|o| o.name.to_lowercase() == wanted)
+            .filter(|o| {
+                schema_filter
+                    .as_ref()
+                    .is_none_or(|f| o.schema.to_lowercase() == *f)
+            })
+            .collect()
         })
         .await
         .unwrap_or_default();
     match found.as_slice() {
         [] => Ok((schema.unwrap_or_else(|| "dbo".to_string()), name)),
+        // The server resolves a synonym at run time; the base name stays out of
+        // the answer, so it cannot be used to reach what the user did not share.
+        [one] if one.kind == ObjectKind::Synonym => Err(ToolText::error(format!(
+            "{}.{} is a synonym; describe its base object.",
+            one.schema, one.name
+        ))),
         [one] => Ok((one.schema.clone(), one.name.clone())),
         several => Err(ToolText::error(format!(
             "\"{name}\" exists in several schemas of {database}: {}. Use schema.name.",

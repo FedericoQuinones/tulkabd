@@ -48,7 +48,8 @@ pub fn objects_sql(prefix: &str) -> String {
         "SELECT s.name, o.name, o.type \
          FROM {prefix}sys.objects o \
          JOIN {prefix}sys.schemas s ON s.schema_id = o.schema_id \
-         WHERE o.type IN ('U', 'V', 'P') AND o.is_ms_shipped = 0 \
+         WHERE o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'FS', 'FT', 'SN') \
+           AND o.is_ms_shipped = 0 \
          ORDER BY s.name, o.name"
     )
 }
@@ -58,6 +59,9 @@ pub fn object_from_row(row: &Row) -> Option<DbObject> {
         "U" => ObjectKind::Table,
         "V" => ObjectKind::View,
         "P" => ObjectKind::Procedure,
+        "FN" | "FS" => ObjectKind::Function,
+        "IF" | "TF" | "FT" => ObjectKind::TableFunction,
+        "SN" => ObjectKind::Synonym,
         _ => return None,
     };
     Some(DbObject {
@@ -67,7 +71,7 @@ pub fn object_from_row(row: &Row) -> Option<DbObject> {
     })
 }
 
-/// Columns of tables and views, in object and column order. With `one`, only
+/// Columns of tables, views and table-valued functions, in object and column order. With `one`, only
 /// the object named by `@P1` (name) and `@P2` (schema).
 ///
 /// Result: schema, object, column, type, user-defined, max_length, precision,
@@ -96,7 +100,7 @@ pub fn columns_sql(prefix: &str, one: bool) -> String {
            ON pk.object_id = c.object_id AND pk.column_id = c.column_id \
          LEFT JOIN {prefix}sys.default_constraints dc \
            ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id \
-         WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0 {filter} \
+         WHERE o.type IN ('U', 'V', 'IF', 'TF', 'FT') AND o.is_ms_shipped = 0 {filter} \
          ORDER BY s.name, o.name, c.column_id"
     )
 }
@@ -242,15 +246,29 @@ pub fn indexes_from_rows(rows: &[Row]) -> Vec<IndexInfo> {
     indexes
 }
 
-/// Parameters: `@P1` object, `@P2` schema. The definition is `NULL` without
-/// the VIEW DEFINITION permission.
+/// Parameters: `@P1` object, `@P2` schema. Result: the definition, the object
+/// type and whether the module is encrypted. The definition is `NULL` when the
+/// module is encrypted or the login lacks VIEW DEFINITION. A synonym has no
+/// source, so it yields the statement that would create it, which names its
+/// base object. A CLR function has no module row; it is returned with a `NULL`
+/// definition so the caller can say where its code lives.
 pub fn definition_sql(prefix: &str) -> String {
     format!(
-        "SELECT m.definition \
-         FROM {prefix}sys.sql_modules m \
-         JOIN {prefix}sys.objects o ON o.object_id = m.object_id \
+        "SELECT m.definition, o.type, \
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM {prefix}sys.syscomments c \
+                                  WHERE c.id = o.object_id AND c.encrypted = 1) \
+                THEN 1 ELSE 0 END AS bit) \
+         FROM {prefix}sys.objects o \
          JOIN {prefix}sys.schemas s ON s.schema_id = o.schema_id \
-         WHERE o.name = @P1 AND s.name = @P2"
+         LEFT JOIN {prefix}sys.sql_modules m ON m.object_id = o.object_id \
+         WHERE o.name = @P1 AND s.name = @P2 \
+           AND (m.object_id IS NOT NULL OR o.type IN ('FS', 'FT')) \
+         UNION ALL \
+         SELECT 'CREATE SYNONYM ' + QUOTENAME(s.name) + '.' + QUOTENAME(y.name) \
+                + ' FOR ' + y.base_object_name, 'SN', CAST(0 AS bit) \
+         FROM {prefix}sys.synonyms y \
+         JOIN {prefix}sys.schemas s ON s.schema_id = y.schema_id \
+         WHERE y.name = @P1 AND s.name = @P2"
     )
 }
 

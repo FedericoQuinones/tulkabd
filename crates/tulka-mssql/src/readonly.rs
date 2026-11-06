@@ -22,7 +22,10 @@
 //!   [`referenced_databases`]. A column written with its schema and table
 //!   (`dbo.t.col`) looks the same and is taken as database `dbo`.
 //! - A synonym or view may point at a linked server; only four-part names
-//!   written in the text are caught.
+//!   written in the text are caught. The server resolves a synonym when the
+//!   query runs, so one can also name an object in another database that the
+//!   selection or the denied names would have refused: those checks read the
+//!   text, and the login's permissions remain the real boundary.
 //! - Unbracketed columns named like non-reserved forbidden words (`Send`,
 //!   `Get`, `Move`, `Open`, `Close`, `Save`, `Load`) are refused; bracket
 //!   them.

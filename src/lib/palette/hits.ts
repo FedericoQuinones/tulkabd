@@ -107,7 +107,7 @@ export function paletteKey(e: KeyboardEvent, isMac: boolean, caretAtEnd: boolean
 
 /** Whether an action applies to an object kind: Enter opens anything, Select top 10 needs rows, definitions need code. */
 export function canRun(action: PaletteAction, kind: PaletteHit["object"]["kind"]): boolean {
-  if (action === "selectTop") return kind !== "procedure";
+  if (action === "selectTop") return kind === "table" || kind === "view" || kind === "synonym";
   if (action === "definition") return kind !== "table";
   return true;
 }

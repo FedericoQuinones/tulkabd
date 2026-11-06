@@ -26,6 +26,9 @@
     table: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 6.5h12M6 6.5V13"/>',
     view: '<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 6.5h12" stroke-dasharray="2 1.5"/>',
     procedure: '<path d="M5 3 2 8l3 5M11 3l3 5-3 5"/>',
+    function: '<path d="M10.5 2.8c-1.7-.4-2.6.4-2.9 2L6.4 12c-.3 1.6-1.2 2.3-2.9 1.9M4.6 7.5h5.4"/>',
+    tableFunction: '<path d="M10.5 1.8c-1.7-.4-2.6.4-2.9 2L6.4 10c-.3 1.6-1.2 2.3-2.9 1.9M4.6 6.5h5.4M7 14h7M10.5 11.5V14"/>',
+    synonym: '<path d="M6.5 9.5l3-3M5.2 7.8 3.7 9.3a2.1 2.1 0 003 3l1.5-1.5M10.8 8.2l1.5-1.5a2.1 2.1 0 00-3-3L7.8 5.2"/>',
     saved: '<path d="M8 1.8l1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.6l-3.8 2 .7-4.3-3.1-3 4.3-.6z"/>',
     savedQuery: '<path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13M6.5 8.5h4M6.5 11h4"/>',
   };

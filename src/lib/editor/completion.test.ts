@@ -14,6 +14,9 @@ const meta: CompletionMetadata = {
     { schema: "dbo", name: "Order", kind: "view" },
     { schema: "we]ird", name: "a]b", kind: "table" },
     { schema: "dbo", name: "CerrarMes", kind: "procedure" },
+    { schema: "dbo", name: "fnTotal", kind: "function" },
+    { schema: "dbo", name: "fnRows", kind: "tableFunction" },
+    { schema: "ventas", name: "synClientes", kind: "synonym" },
   ],
   columns: {
     "dbo.Pedidos": ["Id", "Cliente", "Total"],
@@ -62,7 +65,7 @@ test("after p. it offers the columns of the aliased table", async () => {
 test("after a table name or schema.table it offers columns; after a schema, its objects", async () => {
   expect(labels(await complete("SELECT Pedidos.| FROM Pedidos"))).toEqual(["Id", "Cliente", "Total"]);
   expect(labels(await complete("SELECT ventas.Clientes.| FROM ventas.Clientes"))).toEqual(["Id", "Nombre"]);
-  expect(labels(await complete("SELECT * FROM ventas.|"))).toEqual(["Pedidos_Año", "Clientes"]);
+  expect(labels(await complete("SELECT * FROM ventas.|"))).toEqual(["Pedidos_Año", "Clientes", "synClientes"]);
 });
 
 test("names that need brackets are inserted quoted", async () => {
@@ -94,6 +97,16 @@ test("plain words offer keywords, schemas, tables and views", async () => {
   const all = labels(await complete("|", true));
   for (const l of ["dbo", "ventas", "Pedidos", "Order"]) expect(all).toContain(l);
   expect(all).not.toContain("CerrarMes");
+  // Functions and synonyms sit where tables do; a schema-qualified one takes its schema.
+  expect(all).toContain("fnTotal");
+  expect(all).toContain("synClientes");
+  expect(option(await complete("|", true), "synClientes")?.apply).toBe("ventas.synClientes");
+  // A scalar function needs a two-part name, so even dbo ones are inserted with their schema.
+  expect(option(await complete("|", true), "fnTotal")?.apply).toBe("dbo.fnTotal");
+  expect(option(await complete("|", true), "fnRows")?.apply).toBe("dbo.fnRows");
+  expect(option(await complete("|", true), "Pedidos")?.apply).toBeUndefined();
+  expect(labels(await complete("ventas.|"))).toContain("synClientes");
+  expect(labels(await complete("dbo.|"))).toContain("fnTotal");
 });
 
 test("nothing inside strings or comments, or with no word unless asked", async () => {

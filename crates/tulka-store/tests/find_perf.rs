@@ -44,7 +44,7 @@ fn find_objects_750k_under_budget() {
             connection_ids: &connections,
             database: None,
             terms: &terms,
-            kind: None,
+            kinds: &[],
             in_columns: false,
             limit: 50,
         };

@@ -186,7 +186,7 @@ pub struct SavedQuery {
 pub struct CompletionMetadata {
     /// Distinct schemas of the objects, sorted.
     pub schemas: Vec<String>,
-    /// Tables, views and procedures.
+    /// Tables, views, procedures, functions and synonyms.
     pub objects: Vec<DbObject>,
     /// Column names of each table and view in ordinal order, keyed by the
     /// unquoted `"schema.name"`.
