@@ -21,7 +21,8 @@
     const r = el.getBoundingClientRect();
     left = Math.max(4, Math.min(x, window.innerWidth - r.width - 4));
     top = Math.max(4, Math.min(y, window.innerHeight - r.height - 4));
-    el.querySelector<HTMLButtonElement>("button")?.focus();
+    // A disabled first item cannot take the focus; the menu itself does, so the keys still work.
+    (el.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? el).focus();
   });
 
   function buttons() {
@@ -54,7 +55,7 @@
 <div class="menu" role="menu" aria-label={label} tabindex="-1" bind:this={el} style:left="{left}px" style:top="{top}px" {onkeydown}>
   {#each items as item (item.id)}
     {#if item.separator}<div class="hr" role="separator"></div>{/if}
-    <button type="button" role="menuitem" tabindex="-1" class:danger={item.danger} disabled={item.disabled} onclick={() => pick(item)}>
+    <button type="button" role="menuitem" tabindex="-1" class:danger={item.danger} disabled={item.disabled} title={item.title} onclick={() => pick(item)}>
       <span>{item.label}</span>
       {#if item.hint}<small>{item.hint}</small>{/if}
     </button>

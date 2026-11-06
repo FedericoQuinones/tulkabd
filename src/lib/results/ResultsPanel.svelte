@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, untrack } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
   import type { ViewSpec } from "../ipc";
@@ -138,7 +138,6 @@
     toastTimer = setTimeout(() => (toast = null), error ? ERROR_TOAST_MS : TOAST_MS);
   }
   onDestroy(() => {
-    destroyed = true;
     clearTimeout(toastTimer);
     flushFilter();
   });
@@ -163,8 +162,6 @@
     if (refocus) trigger?.focus();
   }
 
-  let destroyed = false;
-
   /** Writes the rows the grid shows (its sort and filter apply, as for Copy) to a file the user picks. */
   async function save(format: ipc.SaveFormat) {
     if (index === null || !result || pane.saving || viewPending || !ready) return;
@@ -181,10 +178,9 @@
     } finally {
       pane.saving = false;
     }
-    if (!notice) return;
-    // This panel may be gone (another tab was shown meanwhile): the pane keeps the notice for the next one.
-    if (destroyed) pane.saveNotice = notice;
-    else if (run === pane.runCount || notice.error) show(notice.text, notice.error);
+    // Always through the pane: this panel may be gone by now (another tab was shown, maybe shown
+    // again by a newer panel), and the one panel that is mounted shows it once, in the effect below.
+    if (notice && (notice.error || run === pane.runCount)) pane.saveNotice = notice;
   }
 
   function savedText(out: ipc.SaveOutcome) {
@@ -193,10 +189,11 @@
     return notes.length ? `${base} · ${notes.join(" · ")}` : base;
   }
 
-  onMount(() => {
+  $effect(() => {
     const notice = pane.saveNotice;
+    if (!notice) return;
     pane.saveNotice = null;
-    if (notice) show(notice.text, notice.error);
+    untrack(() => show(notice.text, notice.error));
   });
 
   async function copy(mode: "excel" | "ai") {

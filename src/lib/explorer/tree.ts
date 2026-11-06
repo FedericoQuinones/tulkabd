@@ -205,6 +205,8 @@ export interface MenuItem {
   danger?: boolean;
   /** Shown but not selectable. */
   disabled?: boolean;
+  /** Tooltip, e.g. why the item is disabled. */
+  title?: string;
   /** Draws a rule above the item. */
   separator?: boolean;
   /** Shown muted on the right, e.g. the name Copy name copies. */

@@ -38,6 +38,9 @@ const TEMP_SUFFIX: &str = ".part";
 /// Rows formatted under one lock.
 const CHUNK_ROWS: usize = 2048;
 
+/// A chunk also ends when its formatted text passes this many bytes.
+const FLUSH_BYTES: usize = 8 * 1024 * 1024;
+
 /// Returned by [`save_results`].
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -127,11 +130,16 @@ fn write_result(
         let mut file = BufWriter::new(fs::File::create_new(&tmp)?);
         // Formats into memory under the lock; the file is written without it.
         let mut w = TableWriter::new(Vec::new(), format, &columns)?;
-        for part in indexes.chunks(chunk.max(1)) {
+        let mut next = 0;
+        while next < indexes.len() {
             {
                 let b = buffer.blocking_read();
-                for &i in part {
-                    w.write_row(b.row(i))?;
+                let end = (next + chunk.max(1)).min(indexes.len());
+                // A chunk also ends once its text is large, so wide or binary
+                // rows never pile up in memory.
+                while next < end && w.get_mut().len() < FLUSH_BYTES {
+                    w.write_row(b.row(indexes[next]))?;
+                    next += 1;
                 }
             }
             file.write_all(w.get_mut())?;

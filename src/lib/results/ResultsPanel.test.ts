@@ -506,3 +506,34 @@ test("the cell menu's Save items are disabled while a save is under way", async 
   flushSync();
   expect(menuItem("Save as CSV").disabled).toBe(true);
 });
+
+test("a save that ends after switching away and back is shown by the panel that is mounted then", async () => {
+  let fail!: (e: unknown) => void;
+  vi.mocked(ipc.saveResults).mockImplementation(() => new Promise((_, r) => (fail = r)));
+  open();
+  await settle();
+  saveButton().click();
+  flushSync();
+  menuItem("CSV").click();
+  await settle();
+  close();
+  open();
+  await settle();
+  fail("disk full");
+  await settle();
+  expect(document.body.textContent).toContain("Could not save: disk full");
+  expect(pane.saveNotice).toBeNull();
+  expect(document.body.textContent?.split("Could not save: disk full").length).toBe(2);
+});
+
+test("Save items disabled in the cell menu explain why", async () => {
+  pane.saving = true;
+  open();
+  await settle();
+  grid().focus();
+  grid().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+  flushSync();
+  grid().dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  flushSync();
+  expect(menuItem("Save as CSV").title).toBe("Saving is available when the run ends");
+});

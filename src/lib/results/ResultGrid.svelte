@@ -269,6 +269,7 @@
           label: t(`results.saveAs.${f}`),
           run: () => onsave(f),
           disabled: !canSave,
+          title: canSave ? undefined : t("results.saveWhenDone"),
           separator: i === 0,
         })),
       ],
