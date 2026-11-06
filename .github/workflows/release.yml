@@ -62,3 +62,26 @@ jobs:
           releaseName: tulkabd ${{ github.ref_name }}
           releaseDraft: true
           prerelease: false
+
+  notices:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: node scripts/third-party-notices.mjs THIRD-PARTY-NOTICES.txt
+      - name: Attach to the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" THIRD-PARTY-NOTICES.txt --clobber
