@@ -8,10 +8,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
-use tiberius::error::Error as TdsError;
-use tiberius::{
-    AuthMethod, Config, EncryptionLevel, QueryItem, Row, SqlBrowser, ToSql,
-};
+use tiberius::error::{Error as TdsError, TokenError};
+use tiberius::{AuthMethod, Config, EncryptionLevel, QueryItem, Row, SqlBrowser, ToSql};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
@@ -291,13 +289,35 @@ fn request_error(e: TdsError, line_of: impl Fn(u32) -> Option<u32>) -> DriverErr
         TdsError::Server(te) if te.class() >= FATAL_SEVERITY => {
             DriverError::Disconnected(te.message().to_string())
         }
-        TdsError::Server(te) => DriverError::Query {
-            message: te.message().to_string(),
-            line: line_of(te.line()),
-        },
+        TdsError::Server(te) => {
+            let (message, line) = error_site(&te, line_of);
+            DriverError::Query { message, line }
+        }
         TdsError::Io { message, .. } => DriverError::Disconnected(message),
         other => DriverError::Other(other.to_string()),
     }
+}
+
+/// The text and editor line of a server error. An error raised inside a
+/// stored procedure, function or trigger carries the name of that module and
+/// a line counted from its own start, so the line says nothing about the
+/// editor: it goes into the text and gets no jump. Errors of the batch itself
+/// have an empty procedure name.
+fn error_site(error: &TokenError, line_of: impl Fn(u32) -> Option<u32>) -> (String, Option<u32>) {
+    let procedure = error.procedure();
+    if procedure.is_empty() {
+        return (error.message().to_string(), line_of(error.line()));
+    }
+    let text = if error.line() > 0 {
+        format!(
+            "{}\nProcedure {procedure}, line {}",
+            error.message(),
+            error.line()
+        )
+    } else {
+        format!("{}\nProcedure {procedure}", error.message())
+    };
+    (text, None)
 }
 
 fn closed() -> DriverError {
@@ -606,6 +626,10 @@ impl Session for MssqlSession {
         self.query_string("SELECT DB_NAME()").await
     }
 
+    fn announced_database(&self) -> Option<String> {
+        self.client.as_ref()?.database().map(str::to_string)
+    }
+
     async fn execute(&mut self, sql: &str, tx: Sender<ExecEvent>) -> Result<(), DriverError> {
         self.run_events(sql, tx).await
     }
@@ -626,10 +650,6 @@ impl Session for MssqlSession {
 
     async fn transaction_count(&mut self) -> Result<u32, DriverError> {
         let rows = self.query_rows("SELECT @@TRANCOUNT").await?;
-    fn announced_database(&self) -> Option<String> {
-        self.client.as_ref()?.database().map(str::to_string)
-    }
-
         // No answer is not "no transaction": report it rather than let a close go ahead.
         let count = rows
             .first()
@@ -819,10 +839,11 @@ async fn run_batch(
                     return Err(request_error(TdsError::Server(error), line_of));
                 }
                 out.error_sent = true;
+                let (text, line) = error_site(&error, line_of);
                 out.send(ExecEvent::Message {
                     kind: MessageKind::Error,
-                    text: error.message().to_string(),
-                    line: line_of(error.line()),
+                    text,
+                    line,
                 })
                 .await;
             }

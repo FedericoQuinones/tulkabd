@@ -380,6 +380,40 @@ async fn messages_report_editor_lines() {
 }
 
 #[tokio::test]
+async fn module_errors_name_the_procedure_and_do_not_jump() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    // The error is on line 3 of the procedure, which the batch calls on its
+    // line 7: neither number may be offered as an editor line.
+    let sql = "CREATE PROCEDURE #tulka_fails AS\nBEGIN\n  SELECT 1/0\nEND\nGO\nSELECT 1\nEXEC #tulka_fails";
+    let (result, events) = collect(s.as_mut(), sql).await;
+
+    let error = events
+        .iter()
+        .find_map(|ev| match ev {
+            ExecEvent::Message {
+                kind: MessageKind::Error,
+                text,
+                line,
+            } => Some((text.clone(), *line)),
+            _ => None,
+        })
+        .expect("error message");
+    assert_eq!(error.1, None, "{events:?}");
+    assert!(error.0.contains("Divide by zero"), "{}", error.0);
+    assert!(
+        error.0.contains("Procedure #tulka_fails") && error.0.contains(", line 3"),
+        "{}",
+        error.0
+    );
+    assert!(
+        matches!(result, Err(DriverError::Query { .. })),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
 async fn use_inside_a_script_is_announced_without_a_query() {
     let Some(p) = test_params() else { return };
     let mut s = connect(&p).await;
