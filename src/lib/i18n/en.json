@@ -350,7 +350,7 @@
   "explorer.menu.open": "Open",
   "explorer.menu.reveal": "Reveal in file manager",
   "explorer.connstr.copied": "Copied the connection string",
-  "explorer.connstr.copiedWithPassword": "Copied — includes the password",
+  "explorer.connstr.copiedWithPassword": "Copied with the password; the clipboard clears in 45 seconds",
   "explorer.connstr.copiedNoPassword": "Copied without the password: none is saved",
   "explorer.errors.cycle": "A folder can't go inside itself.",
   "explorer.errors.notFound": "That item no longer exists.",

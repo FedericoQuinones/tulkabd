@@ -157,7 +157,8 @@ pub struct NewRun {
 }
 
 /// Local history of executed statements in its own SQLite file. It keeps
-/// statement text only, never passwords or result rows. Every call is blocking.
+/// statement text only, never result rows; secret literals such as
+/// `PASSWORD = '...'` are replaced by `***` before storing. Every call is blocking.
 pub struct RunLogStore {
     conn: Mutex<Connection>,
     /// Set while the log lives in memory only because the file could not be
@@ -288,6 +289,15 @@ fn checkpoint(conn: &Connection) {
     let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
 }
 
+/// Stored in place of a statement the masker failed on, so a bug in it can
+/// neither lose the entry nor store the text unchecked.
+const NOT_STORED: &str = "-- SQL not stored: it could not be checked for passwords";
+
+/// Runs `mask`; if it panics, returns the placeholder.
+fn masked_or_redacted(mask: impl FnOnce() -> String + std::panic::UnwindSafe) -> String {
+    std::panic::catch_unwind(mask).unwrap_or_else(|_| NOT_STORED.to_string())
+}
+
 /// Cuts `sql` to at most `MAX_LOGGED_SQL_BYTES`, on a char boundary.
 fn cap_sql(sql: &str) -> (&str, bool) {
     if sql.len() <= MAX_LOGGED_SQL_BYTES {
@@ -326,7 +336,13 @@ fn insert_entry(conn: &Connection, e: &RunLogEntry) -> rusqlite::Result<()> {
 
 /// Writes one run, cutting its text and client name to their caps.
 fn insert_run(conn: &Connection, run: &NewRun) -> Result<RunLogEntry, String> {
-    let (sql, sql_truncated) = cap_sql(&run.sql);
+    // Cut first, so a huge script is not scanned whole, then masked, so a cut
+    // can never leave the start of a secret. Masking can make the text longer,
+    // hence the second cut.
+    let (head, cut) = cap_sql(&run.sql);
+    let masked = masked_or_redacted(|| crate::mask::mask_secrets(head));
+    let (sql, cut_again) = cap_sql(&masked);
+    let sql_truncated = cut || cut_again;
     let client: Option<String> = run
         .client
         .as_ref()
@@ -687,6 +703,49 @@ mod tests {
         assert!(!a.sql_truncated);
         assert_eq!(a.connection_name, "prod");
         assert_eq!(a.rows, Some(3));
+    }
+
+    #[test]
+    fn secret_literals_are_masked_in_the_stored_text() {
+        let store = RunLogStore::in_memory();
+        let entry = store
+            .insert(&run("CREATE LOGIN x WITH PASSWORD = 'Secret1'", 1))
+            .unwrap();
+        assert_eq!(entry.sql, "CREATE LOGIN x WITH PASSWORD = '***'");
+        assert_eq!(store.list(None, 1)[0].sql, entry.sql);
+    }
+
+    #[test]
+    fn a_cut_inside_a_secret_literal_leaves_no_part_of_it() {
+        let store = RunLogStore::in_memory();
+        let lead = "-- pad\n".repeat((MAX_LOGGED_SQL_BYTES - 40) / 7);
+        let prefix = format!("{lead}CREATE LOGIN x WITH PASSWORD = '");
+        assert!(prefix.len() < MAX_LOGGED_SQL_BYTES);
+        let sql = format!("{prefix}{}'", "TopSecret".repeat(20));
+        assert!(sql.len() > MAX_LOGGED_SQL_BYTES);
+        let entry = store.insert(&run(&sql, 1)).unwrap();
+        assert!(entry.sql_truncated);
+        assert!(!entry.sql.contains("Top"), "{}", &entry.sql[prefix.len()..]);
+        assert!(entry.sql.ends_with("PASSWORD = '***"));
+    }
+
+    #[test]
+    fn masking_that_lengthens_the_text_is_capped_again() {
+        let store = RunLogStore::in_memory();
+        // `pwd=` values of one char grow to three once masked.
+        let sql = "'pwd=a;'+".repeat(MAX_LOGGED_SQL_BYTES / 9);
+        let entry = store.insert(&run(&sql, 1)).unwrap();
+        assert!(entry.sql.len() <= MAX_LOGGED_SQL_BYTES);
+        assert!(entry.sql_truncated);
+    }
+
+    #[test]
+    fn a_failing_masker_stores_the_placeholder() {
+        assert_eq!(masked_or_redacted(|| "ok".to_string()), "ok");
+        assert_eq!(
+            masked_or_redacted(|| panic!("masker bug")),
+            "-- SQL not stored: it could not be checked for passwords"
+        );
     }
 
     #[test]

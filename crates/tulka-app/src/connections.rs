@@ -261,7 +261,12 @@ pub async fn copy_connection_string(
     let included = password.is_some();
     blocking(move || {
         let text = format_connection_string(&conn, password.as_deref());
-        clipboard.write_text(text)
+        // Only a text that carries the password is kept out of the history.
+        if password.is_some() {
+            clipboard.write_secret_text(text)
+        } else {
+            clipboard.write_text(text)
+        }
     })
     .await??;
     Ok(included)
