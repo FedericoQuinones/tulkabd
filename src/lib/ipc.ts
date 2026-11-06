@@ -496,6 +496,8 @@ export interface OpenedFile {
   text: string;
   encoding: FileEncoding;
   lineEnding: LineEnding;
+  /** Last change of the file, Unix milliseconds (0 if unknown). */
+  modifiedMs: number;
 }
 
 /**
@@ -514,9 +516,14 @@ export const sqlFilesExist = (paths: string[]) => invoke<(boolean | null)[]>("sq
  * could not be read.
  */
 export const readSqlFile = (path: string) => invoke<OpenedFile>("read_sql_file", { path });
-/** Writes atomically, recreating a deleted file. Rejects with `"not_allowed"` or why it could not be written. */
+/** Last change of a file, Unix milliseconds (0 if unknown). Rejects with `"not_allowed"` or `"not_found"`. */
+export const sqlFileModified = (path: string) => invoke<number>("sql_file_modified", { path });
+/**
+ * Writes atomically, recreating a deleted file, and returns the file's new modified time (Unix
+ * milliseconds, 0 if unknown). Rejects with `"not_allowed"` or why it could not be written.
+ */
 export const writeSqlFile = (path: string, text: string, encoding: FileEncoding, lineEnding: LineEnding) =>
-  invoke<void>("write_sql_file", { path, text, encoding, lineEnding });
+  invoke<number>("write_sql_file", { path, text, encoding, lineEnding });
 
 /**
  * `.sql` files the user dropped on the window. The backend has already allowed them (it reads the

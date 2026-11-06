@@ -756,14 +756,23 @@ mod tests {
     #[test]
     fn a_uri_parameter_that_does_not_decode_is_an_error() {
         assert_eq!(err("sqlserver://h?app=%ZZ"), "bad_value:Application Name");
-        assert_eq!(err("sqlserver://h?mystery=%ZZ&encrypt=false"), "unrecognized");
+        assert_eq!(
+            err("sqlserver://h?mystery=%ZZ&encrypt=false"),
+            "unrecognized"
+        );
         assert_eq!(err("sqlserver://h?encrypt=%ZZ"), "bad_value:Encrypt");
     }
 
     #[test]
     fn connect_timeout_takes_plain_digits_only() {
-        assert_eq!(err("Server=x;Connect Timeout=+30"), "bad_value:Connect Timeout");
-        assert_eq!(parse("Server=x;Connect Timeout=30").connect_timeout_s, Some(30));
+        assert_eq!(
+            err("Server=x;Connect Timeout=+30"),
+            "bad_value:Connect Timeout"
+        );
+        assert_eq!(
+            parse("Server=x;Connect Timeout=30").connect_timeout_s,
+            Some(30)
+        );
     }
 
     #[test]

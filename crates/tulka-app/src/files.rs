@@ -41,6 +41,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
+use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
@@ -95,6 +96,16 @@ pub struct OpenedFile {
     pub text: String,
     pub encoding: FileEncoding,
     pub line_ending: LineEnding,
+    /// Last change of the file, Unix milliseconds (0 if unknown).
+    pub modified_ms: u64,
+}
+
+/// Last change of a file in Unix milliseconds, 0 when it cannot be told.
+fn modified_ms(meta: &fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
 }
 
 /// Decodes a file (see the module docs); [`NOT_TEXT`] when it is not text.
@@ -250,7 +261,8 @@ pub async fn read_sql_file(state: &AppState, path: String) -> Result<OpenedFile,
             ErrorKind::NotFound => NOT_FOUND.to_string(),
             _ => format!("could not read {}: {e}", p.display()),
         };
-        if fs::metadata(&p).map_err(fail)?.len() > MAX_SQL_FILE_BYTES {
+        let meta = fs::metadata(&p).map_err(fail)?;
+        if meta.len() > MAX_SQL_FILE_BYTES {
             return Err(TOO_LARGE.to_string());
         }
         let bytes = fs::read(&p).map_err(fail)?;
@@ -267,7 +279,21 @@ pub async fn read_sql_file(state: &AppState, path: String) -> Result<OpenedFile,
             text: file.text,
             encoding: file.encoding,
             line_ending: file.line_ending,
+            modified_ms: modified_ms(&meta),
         })
+    })
+    .await?
+}
+
+/// Last change of an allowed `.sql` file, Unix milliseconds (0 if unknown):
+/// [`NOT_ALLOWED`], [`NOT_FOUND`]. The UI compares it with the one it saw
+/// when it read or wrote the file, to notice another program changed it.
+pub async fn sql_file_modified(state: &AppState, path: String) -> Result<u64, String> {
+    let p = check_allowed(state, &path)?;
+    blocking(move || match fs::metadata(&p) {
+        Ok(meta) => Ok(modified_ms(&meta)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Err(NOT_FOUND.to_string()),
+        Err(e) => Err(format!("could not read {}: {e}", p.display())),
     })
     .await?
 }
@@ -312,14 +338,15 @@ fn file_exists(path: &Path) -> Option<bool> {
 }
 
 /// Writes `text` to an allowed `.sql` file in `encoding` and `line_ending`,
-/// atomically: [`NOT_ALLOWED`], or why it could not be written.
+/// atomically, and returns the file's new modified time (see
+/// [`sql_file_modified`]): [`NOT_ALLOWED`], or why it could not be written.
 pub async fn write_sql_file(
     state: &AppState,
     path: String,
     text: String,
     encoding: FileEncoding,
     line_ending: LineEnding,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let p = check_allowed(state, &path)?;
     let session = state.session.clone();
     blocking(move || {
@@ -336,7 +363,7 @@ pub async fn write_sql_file(
         let dir = target.parent().ok_or_else(|| fail(&"it has no folder"))?;
         write_atomic(dir, &target, &bytes, permissions).map_err(|e| fail(&e))?;
         session.remember_allowed(std::slice::from_ref(&p));
-        Ok(())
+        Ok(fs::metadata(&target).map_or(0, |meta| modified_ms(&meta)))
     })
     .await?
 }

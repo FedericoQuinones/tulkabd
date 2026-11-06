@@ -38,6 +38,7 @@ const opened = (path: string, text = `SELECT '${path}';`): OpenedFile => ({
   text,
   encoding: "utf16Le",
   lineEnding: "crlf",
+  modifiedMs: 100,
 });
 
 let cmp: ReturnType<typeof mount> | undefined;
@@ -48,7 +49,7 @@ beforeEach(async () => {
   vi.mocked(ipc.openSession).mockImplementation(async (_tab, _conn, database) => session(database ?? "master"));
   vi.mocked(ipc.listSavedQueries).mockResolvedValue([]);
   vi.mocked(ipc.saveQuery).mockResolvedValue();
-  vi.mocked(ipc.writeSqlFile).mockResolvedValue();
+  vi.mocked(ipc.writeSqlFile).mockResolvedValue(1);
   vi.mocked(ipc.readSqlFile).mockImplementation(async (path) => opened(path));
   connections.list = [conn];
   queries.reset();
@@ -77,8 +78,8 @@ test("openFiles opens one tab per file, bound to the active tab's connection and
   const files = tabs.list.filter((x) => x.file);
   expect(files.map((x) => x.title)).toEqual(["Reporte mensual.sql", "b.sql"]);
   expect(files.map((x) => x.file)).toEqual([
-    { path: "/home/u/sql/Reporte mensual.sql", encoding: "utf16Le", lineEnding: "crlf" },
-    { path: "/home/u/sql/b.sql", encoding: "utf16Le", lineEnding: "crlf" },
+    { path: "/home/u/sql/Reporte mensual.sql", encoding: "utf16Le", lineEnding: "crlf", modifiedMs: 100 },
+    { path: "/home/u/sql/b.sql", encoding: "utf16Le", lineEnding: "crlf", modifiedMs: 100 },
   ]);
   expect(files.map((x) => x.pane!.text())).toEqual(["SELECT '/home/u/sql/Reporte mensual.sql';", "SELECT '/home/u/sql/b.sql';"]);
   expect(files.every((x) => !x.dirty && !x.savedQuery)).toBe(true);
@@ -151,7 +152,7 @@ test("typing while the file is written leaves the tab unsaved", async () => {
   const tab = tabs.active!;
   tab.dirty = true;
   let release!: () => void;
-  vi.mocked(ipc.writeSqlFile).mockReturnValue(new Promise<void>((r) => (release = r)));
+  vi.mocked(ipc.writeSqlFile).mockReturnValue(new Promise<number>((r) => (release = () => r(1))));
   const saving = tabs.saveActive();
   tab.pane!.edited();
   release();

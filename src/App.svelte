@@ -8,6 +8,8 @@
   import ConnectionDialog from "./lib/connections/ConnectionDialog.svelte";
   import PasswordPrompt from "./lib/connections/PasswordPrompt.svelte";
   import TransactionDialog from "./lib/tabs/TransactionDialog.svelte";
+  import UnsavedDialog from "./lib/tabs/UnsavedDialog.svelte";
+  import FileChangedDialog from "./lib/tabs/FileChangedDialog.svelte";
   import { connections } from "./lib/connections/store.svelte";
   import ExplorerTree from "./lib/explorer/ExplorerTree.svelte";
   import { explorer } from "./lib/explorer/tree.svelte";
@@ -62,10 +64,15 @@
   let restored = $state(false);
   let destroyed = false;
   let stopAutosave: (() => void) | null = null;
+  // Closing the window or Cmd+Q is heard from the start; it waits for the restore to finish.
+  let restoreDone!: () => void;
+  const restoreReady = new Promise<void>((resolve) => (restoreDone = resolve));
+  const stopGuard = tabs.guardWindow(restoreReady);
   let stopDrop: (() => void) | null = null;
   onDestroy(() => {
     destroyed = true;
     stopAutosave?.();
+    stopGuard();
     stopDrop?.();
   });
 
@@ -79,6 +86,13 @@
     })
     .catch(() => {});
   async function restoreSession() {
+    try {
+      await restoreSessionNow();
+    } finally {
+      restoreDone();
+    }
+  }
+  async function restoreSessionNow() {
     // `undefined` when the saved session could not be loaded at all.
     const [json, loaded] = await Promise.all([
       loadSession().catch(() => undefined),
@@ -195,7 +209,7 @@
   }
 </script>
 
-<svelte:window {onkeydown} />
+<svelte:window {onkeydown} onfocus={() => void tabs.checkFilesOnDisk()} />
 
 <div class="win">
   <div class="cols" class:no-explorer={explorerHidden}>
@@ -284,6 +298,16 @@
 {/if}
 {#if tabs.closePrompt}
   <TransactionDialog prompt={tabs.closePrompt} onanswer={(commit) => void tabs.answerClose(commit)} oncancel={() => tabs.cancelClose()} />
+{/if}
+{#if tabs.unsavedPrompt}
+  <UnsavedDialog prompt={tabs.unsavedPrompt} onanswer={(save) => void tabs.answerUnsaved(save)} oncancel={() => tabs.cancelUnsaved()} />
+{/if}
+{#if tabs.fileConflict}
+  <FileChangedDialog
+    conflict={tabs.fileConflict}
+    onanswer={(choice) => void tabs.answerFileConflict(choice)}
+    oncancel={() => void tabs.answerFileConflict("cancel")}
+  />
 {/if}
 {#if tabs.nameRequest}
   {#key tabs.nameRequest}

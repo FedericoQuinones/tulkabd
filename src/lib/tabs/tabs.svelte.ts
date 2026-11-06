@@ -8,6 +8,7 @@ import { ENVIRONMENTS } from "../connections/env";
 import { PaneState } from "../pane/pane.svelte";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { groups, removeGroup, split, type Layout } from "../workspace/layout";
+import { prefs } from "../settings/prefs.svelte";
 import { snapshot, watchSession } from "../workspace/session";
 import { checkFrom, closePlan, errorText, type CloseCheck } from "./closeFlow";
 
@@ -31,6 +32,8 @@ export interface TabFile {
   path: string;
   encoding: FileEncoding;
   lineEnding: LineEnding;
+  /** Last change of the file when this tab read or wrote it (Unix ms); unknown when 0 or missing. */
+  modifiedMs?: number;
 }
 
 export interface Tab {
@@ -89,6 +92,9 @@ export const END_RETRY_MS = 50;
 /** Attempts before giving up on a tab whose query does not stop. */
 export const END_RETRIES = 100;
 
+/** Pause between looks at whether the dialog in the way has been answered. */
+export const MODAL_POLL_MS = 50;
+
 /** Longest wait for a tab to say how many transactions it holds before it counts as unknown. */
 export const CHECK_TIMEOUT_MS = 3000;
 const GUARD_LOG_WAIT_MS = 500;
@@ -120,6 +126,22 @@ export interface ClosePrompt {
   error: string | null;
 }
 
+/** The dialog asking whether to save the unsaved changes of a tab before it closes. */
+export interface UnsavedPrompt {
+  scope: "tab" | "window";
+  tabs: { tabId: string; title: string }[];
+  /** An answer is being carried out. */
+  busy: boolean;
+  /** Why the last answer failed; the tabs stay open. */
+  error: string | null;
+}
+
+/** The dialog asking what to do when a file tab is saved over a file another program changed. */
+export interface FileConflict {
+  tabId: string;
+  title: string;
+}
+
 /** Resolves when `p` settles or after `ms`, whichever comes first; never rejects. */
 function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -148,6 +170,19 @@ export function fileErrorText(e: unknown): string {
   return s;
 }
 
+/**
+ * A path as compared to find an open tab: one kind of separator, no doubled or trailing ones, and
+ * case ignored where file systems usually do (Windows and macOS).
+ */
+export function pathKey(path: string): string {
+  const platform = typeof navigator !== "undefined" ? navigator.platform : "";
+  let key = path;
+  // Backslashes separate folders only on Windows (elsewhere they are part of a name).
+  if (/Win/.test(platform)) key = key.replace(/^\\\\\?\\/, "").replace(/\\/g, "/");
+  key = key.replace(/\/{2,}/g, "/").replace(/(.)\/$/, "$1");
+  return /Win|Mac/.test(platform) ? key.toLowerCase() : key;
+}
+
 const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
 /** Environment color of the connection a tab is bound to; the neutral control color when unbound. */
@@ -172,9 +207,16 @@ export class TabsStore {
   fileError = $state<string | null>(null);
   /** Open transactions the user must answer for before a tab or the window closes. */
   closePrompt = $state.raw<ClosePrompt | null>(null);
+  /** Unsaved changes the user must answer for before a tab closes. */
+  unsavedPrompt = $state.raw<UnsavedPrompt | null>(null);
+  /** A file tab saved over a file that changed on disk: overwrite, reload or cancel. */
+  fileConflict = $state.raw<FileConflict | null>(null);
+  private checkingDisk = false;
 
   /** Grows whenever a tab is added or brought forward, so the shell can leave a screen covering the tabs. */
   shown = $state(0);
+  /** The last session save failed or ran out of time: closing the window may lose unsaved text. */
+  private sessionSaveFailed = false;
   private counter = 0;
   private pending = new Map<string, Pending>();
   private saveNotices = new WeakMap<PaneState, string>();
@@ -277,7 +319,9 @@ export class TabsStore {
     if (spec.kind === "query" && spec.sql) pane.initialDoc = spec.sql;
     const tab: Tab = { id, kind: "query", title, pane, connectError: null, dirty: false };
     if (saved) tab.savedQuery = { database: saved.database, name: saved.name };
-    if (file) tab.file = { path: file.path, encoding: file.encoding, lineEnding: file.lineEnding };
+    if (file) {
+      tab.file = { path: file.path, encoding: file.encoding, lineEnding: file.lineEnding, modifiedMs: file.modifiedMs };
+    }
     if (spec.kind === "definition") {
       tab.connectionId = spec.connectionId;
       tab.database = spec.database;
@@ -401,8 +445,32 @@ export class TabsStore {
     void tab.pane?.close();
   }
 
-  /** Closes a tab the way the UI asks for it: first asks what to do with an open transaction. */
+  /**
+   * True when closing the tab would lose text: it was edited since it was opened or saved. An
+   * untitled tab with no text has nothing to lose.
+   */
+  isDirty(tab: Tab): boolean {
+    if (!tab.pane || !tab.dirty) return false;
+    const untitled = !tab.savedQuery && !tab.file && tab.name === undefined;
+    return !(untitled && tab.pane.text() === "");
+  }
+
+  /**
+   * Closes a tab the way the UI asks for it: first asks what to do with unsaved changes, then with
+   * an open transaction.
+   */
   async requestClose(id: string): Promise<void> {
+    const tab = this.list.find((x) => x.id === id);
+    if (!tab || this.modalOpen()) return;
+    if (this.isDirty(tab)) {
+      this.unsavedPrompt = { scope: "tab", tabs: [{ tabId: id, title: tab.title }], busy: false, error: null };
+      return;
+    }
+    await this.closeChecked(id);
+  }
+
+  /** Closes a tab that has nothing unsaved, asking first about an open transaction. */
+  private async closeChecked(id: string): Promise<void> {
     const tab = this.list.find((x) => x.id === id);
     if (!tab || this.closePrompt) return;
     const plan = closePlan([await this.checkTab(tab)]);
@@ -410,6 +478,82 @@ export class TabsStore {
     if (!this.list.some((x) => x.id === id) || this.closePrompt) return;
     if (plan.ask) this.closePrompt = { scope: "tab", items: this.itemsOf(plan.tabs), busy: false, error: null };
     else this.close(id);
+  }
+
+  /** Carries out the user's answer to `unsavedPrompt`: save the changes, or leave them behind. */
+  async answerUnsaved(save: boolean): Promise<void> {
+    const prompt = this.unsavedPrompt;
+    if (!prompt || prompt.busy) return;
+    if (prompt.scope === "window") return this.answerUnsavedWindow(prompt, save);
+    const id = prompt.tabs[0].tabId;
+    const tab = this.list.find((x) => x.id === id);
+    if (!tab || !save) {
+      this.unsavedPrompt = null;
+      if (tab) await this.closeChecked(id);
+      return;
+    }
+    if (!tab.savedQuery && !tab.file) {
+      // Not saved anywhere yet: the name dialog comes first, and the tab closes once it is saved.
+      this.unsavedPrompt = null;
+      this.askName(tab, tab.name ?? "", false, () => void this.closeChecked(id));
+      return;
+    }
+    this.unsavedPrompt = { ...prompt, busy: true, error: null };
+    const saved = await this.saveTab(tab, "ask");
+    if (this.unsavedPrompt?.scope !== "tab") return;
+    if (this.fileConflict) {
+      // The file changed on disk: that dialog decides; the tab stays open.
+      this.unsavedPrompt = null;
+      return;
+    }
+    if (saved && !tab.dirty) {
+      this.unsavedPrompt = null;
+      await this.closeChecked(id);
+    } else {
+      this.unsavedPrompt = { ...prompt, busy: false, error: t("unsaved.failed", { title: tab.title }) };
+    }
+  }
+
+  /**
+   * The window is closing with unsaved tabs. Save all writes the ones that have a saved query or a
+   * file; one with neither needs a name, so it stays and the prompt says so. Whatever fails stops
+   * there and the window stays open.
+   */
+  private async answerUnsavedWindow(prompt: UnsavedPrompt, save: boolean): Promise<void> {
+    if (save) {
+      this.unsavedPrompt = { ...prompt, busy: true, error: null };
+      let nameless = 0;
+      let failed: string | null = null;
+      for (const { tabId } of prompt.tabs) {
+        const tab = this.list.find((x) => x.id === tabId);
+        if (!tab || !this.isDirty(tab)) continue;
+        if (!tab.savedQuery && !tab.file) nameless++;
+        else {
+          const saved = await this.saveTab(tab, "ask");
+          if (this.fileConflict) {
+            this.unsavedPrompt = null;
+            return;
+          }
+          if (!saved || tab.dirty) failed ??= t("unsaved.failed", { title: tab.title });
+        }
+      }
+      if (this.unsavedPrompt?.scope !== "window") return;
+      const left = this.list.filter((x) => this.isDirty(x));
+      if (failed || nameless > 0) {
+        const error = failed ?? t("unsaved.needsName", { count: nameless });
+        this.unsavedPrompt = { ...prompt, tabs: left.map((x) => ({ tabId: x.id, title: x.title })), busy: false, error };
+        return;
+      }
+    }
+    this.unsavedPrompt = null;
+    let kept = false;
+    await this.confirmTransactions({ preventDefault: () => (kept = true) });
+    if (!kept) await getCurrentWindow().destroy();
+  }
+
+  /** Keeps the tab (or the window) open with its unsaved changes. */
+  cancelUnsaved(): void {
+    if (this.unsavedPrompt && !this.unsavedPrompt.busy) this.unsavedPrompt = null;
   }
 
   /** What the tab's session holds. A tab with no session or a lost one holds nothing. */
@@ -453,13 +597,37 @@ export class TabsStore {
     clearTimeout(timer);
   }
 
-  /** The window is being closed: ask once for every tab that holds, or may hold, a transaction. */
+  /**
+   * Tabs the window close would lose: with "open with the last session" off, every unsaved tab;
+   * with it on, only when the last session save did not land.
+   */
+  private unsavedForWindow(): Tab[] {
+    if (prefs.value.restoreSession && !this.sessionSaveFailed) return [];
+    return this.list.filter((x) => this.isDirty(x));
+  }
+
+  /** The window is being closed: ask about unsaved tabs, then once for every tab that holds, or may hold, a transaction. */
   private async confirmWindowClose(event: { preventDefault: () => void }): Promise<void> {
-    if (this.closePrompt) {
+    if (this.modalOpen()) {
       // Answering an earlier prompt: the window stays until that is done.
       event.preventDefault();
       return;
     }
+    const dirty = this.unsavedForWindow();
+    if (dirty.length > 0) {
+      event.preventDefault();
+      this.unsavedPrompt = {
+        scope: "window",
+        tabs: dirty.map((x) => ({ tabId: x.id, title: x.title })),
+        busy: false,
+        error: null,
+      };
+      return;
+    }
+    await this.confirmTransactions(event);
+  }
+
+  private async confirmTransactions(event: { preventDefault: () => void }): Promise<void> {
     const checks = await Promise.all(this.list.map((x) => this.checkTab(x)));
     const plan = closePlan(checks);
     if (!plan.ask) {
@@ -597,7 +765,7 @@ export class TabsStore {
       await this.promptIdle();
       checks = await Promise.all(affected().map((x) => this.checkTab(x)));
       // Another prompt took over while counting: wait for it and count again.
-      if (!this.closePrompt) break;
+      if (!this.modalOpen()) break;
     }
     const plan = closePlan(checks);
     const asked = new Set(plan.ask ? plan.tabs.map((c) => c.tabId) : []);
@@ -618,12 +786,27 @@ export class TabsStore {
     tab.pane.notice = t("tabs.connectionDeleted");
   }
 
+  /** A dialog is asking the user something; another must not open over it. */
+  private modalOpen(): boolean {
+    return !!(this.closePrompt || this.unsavedPrompt || this.nameRequest || this.fileConflict);
+  }
+
   private promptWaiters: (() => void)[] = [];
 
-  /** Resolves once no close prompt is showing. */
-  private promptIdle(): Promise<void> {
-    if (!this.closePrompt) return Promise.resolve();
-    return new Promise((resolve) => this.promptWaiters.push(resolve));
+  /**
+   * Resolves once no dialog is showing: woken when a close prompt ends, and looking again every
+   * MODAL_POLL_MS for the other dialogs.
+   */
+  private async promptIdle(): Promise<void> {
+    while (this.modalOpen()) {
+      await new Promise<void>((resolve) => {
+        this.promptWaiters.push(resolve);
+        setTimeout(() => {
+          this.promptWaiters = this.promptWaiters.filter((w) => w !== resolve);
+          resolve();
+        }, MODAL_POLL_MS);
+      });
+    }
   }
 
   /** Dismisses the close prompt and lets whatever waited for it go on. */
@@ -692,7 +875,7 @@ export class TabsStore {
         if (!tab) return;
         check = await this.checkTab(tab);
         // Another prompt took over while counting: wait for it and count again.
-        if (!this.closePrompt) break;
+        if (!this.modalOpen()) break;
       }
       const pane = this.list.find((x) => x.id === id)?.pane;
       // Closed meanwhile.
@@ -736,8 +919,60 @@ export class TabsStore {
    */
   async saveActive(): Promise<void> {
     const tab = this.active;
-    const pane = tab?.pane;
-    if (!tab || !pane) return;
+    if (tab?.pane) await this.saveTab(tab, "ask");
+  }
+
+  /**
+   * Carries out the user's answer to `fileConflict`. Overwrite writes the tab's text over the
+   * file, Reload takes the file's text in place of the tab's, Cancel leaves both as they are.
+   */
+  async answerFileConflict(choice: "overwrite" | "reload" | "cancel"): Promise<void> {
+    const conflict = this.fileConflict;
+    if (!conflict) return;
+    this.fileConflict = null;
+    const tab = this.list.find((x) => x.id === conflict.tabId);
+    if (!tab || choice === "cancel") return;
+    if (choice === "overwrite") await this.saveTab(tab, "force");
+    else await this.reloadFile(tab.id);
+  }
+
+  /**
+   * When the window gets the focus: a clean file tab whose file changed on disk is reloaded
+   * quietly; an unsaved one keeps its text and says so (saving then asks what to do).
+   */
+  async checkFilesOnDisk(): Promise<void> {
+    if (this.checkingDisk) return;
+    this.checkingDisk = true;
+    try {
+      for (const { id } of [...this.list]) {
+        const tab = this.list.find((x) => x.id === id);
+        const known = tab?.file?.modifiedMs;
+        if (!tab?.pane || !tab.file || !known) continue;
+        const path = tab.file.path;
+        let current: number;
+        try {
+          current = await ipc.sqlFileModified(path);
+        } catch {
+          continue;
+        }
+        const now = this.list.find((x) => x.id === id);
+        if (!now?.pane || now.file?.path !== path || !current || current === now.file.modifiedMs) continue;
+        if (!now.dirty) await this.reloadFile(id, true);
+        else this.saveNotice(now.pane, t("files.changedOnDisk"));
+      }
+    } finally {
+      this.checkingDisk = false;
+    }
+  }
+
+  /**
+   * Saves a query tab as `saveActive` does; true when its text reached its saved query or file. A
+   * file that changed on disk since the tab read or wrote it is not overwritten: with "ask" the
+   * user is asked (`fileConflict`), with "fail" the tab says so; "force" writes anyway.
+   */
+  private async saveTab(tab: Tab, mode: "ask" | "fail" | "force" = "fail"): Promise<boolean> {
+    const pane = tab.pane;
+    if (!pane) return false;
     if (tab.savedQuery) {
       const { database, name } = tab.savedQuery;
       const edits = pane.edits;
@@ -745,28 +980,44 @@ export class TabsStore {
         await queries.save(database, name, pane.text(), true);
       } catch (e) {
         this.saveNotice(pane, t("queries.saveFailed", { error: String(e) }));
-        return;
+        return false;
       }
       // Typing while the save was in flight leaves the tab unsaved.
       if (pane.edits === edits) tab.dirty = false;
       this.clearSaveNotice(pane);
-      return;
+      return true;
     }
     if (tab.file) {
       // Written back in place, in its own encoding and line endings; never asks for a name.
-      const { path, encoding, lineEnding } = tab.file;
+      const { path, encoding, lineEnding, modifiedMs } = tab.file;
+      if (mode !== "force" && modifiedMs) {
+        let current = 0;
+        try {
+          current = await ipc.sqlFileModified(path);
+        } catch {
+          // Gone or unreadable: writing it again is what the user asked for.
+        }
+        if (current && current !== modifiedMs) {
+          if (mode === "ask") this.fileConflict = { tabId: tab.id, title: tab.title };
+          else this.saveNotice(pane, t("files.changedOnDisk"));
+          return false;
+        }
+      }
       const edits = pane.edits;
+      let written: unknown;
       try {
-        await ipc.writeSqlFile(path, pane.text(), encoding, lineEnding);
+        written = await ipc.writeSqlFile(path, pane.text(), encoding, lineEnding);
       } catch (e) {
         this.saveNotice(pane, t("files.saveFailed", { error: fileErrorText(e) }));
-        return;
+        return false;
       }
+      if (tab.file?.path === path) tab.file.modifiedMs = typeof written === "number" && written > 0 ? written : undefined;
       if (pane.edits === edits) tab.dirty = false;
       this.clearSaveNotice(pane);
-      return;
+      return true;
     }
     this.askName(tab, tab.name ?? "");
+    return false;
   }
 
   /**
@@ -784,8 +1035,9 @@ export class TabsStore {
   /**
    * Asks for a name (through `nameRequest`) and saves the tab's text under its database; without a
    * database it says so. With `copy` the tab is left as it is; otherwise it becomes the saved query.
+   * `onSaved` runs once the tab is saved and has no edits since.
    */
-  private askName(tab: Tab, initial: string, copy = false): void {
+  private askName(tab: Tab, initial: string, copy = false, onSaved?: () => void): void {
     const pane = tab.pane!;
     // A definition still loading (or that could not load) has nothing to save yet.
     if (tab.name !== undefined && pane.text() === "") return;
@@ -818,6 +1070,7 @@ export class TabsStore {
         }
         this.markSaved(x, { database, name });
         if (x.pane.edits === edits) x.dirty = false;
+        if (!x.dirty) onSaved?.();
         return null;
       },
       oncancel: () => {
@@ -833,8 +1086,8 @@ export class TabsStore {
    * its tab instead. A file that cannot be read opens nothing and is reported in `fileError`.
    */
   async openFiles(paths: string[]): Promise<void> {
-    const { connectionId, database } = this.binding(this.active);
-    const unique = [...new Set(paths)];
+    const seen = new Set<string>();
+    const unique = paths.filter((p) => !seen.has(pathKey(p)) && seen.add(pathKey(p)));
     const read = await Promise.all(
       unique.map((path) =>
         this.tabOfFile(path)
@@ -845,6 +1098,8 @@ export class TabsStore {
             ),
       ),
     );
+    // The active tab may have changed while the files were read.
+    const { connectionId, database } = this.binding(this.active);
     const errors: string[] = [];
     unique.forEach((path, i) => {
       const open = this.tabOfFile(path);
@@ -859,7 +1114,13 @@ export class TabsStore {
           connectionId: connectionId ?? undefined,
           database: connectionId ? (database ?? undefined) : undefined,
           sql: file.text,
-          file: { path: file.path, name: file.name, encoding: file.encoding, lineEnding: file.lineEnding },
+          file: {
+            path: file.path,
+            name: file.name,
+            encoding: file.encoding,
+            lineEnding: file.lineEnding,
+            modifiedMs: file.modifiedMs,
+          },
         });
       }
     });
@@ -878,8 +1139,55 @@ export class TabsStore {
     if (paths.length) await this.openFiles(paths);
   }
 
+  /**
+   * Reads a file tab's file again and shows it, unless the tab was edited meanwhile (or, with
+   * `onlyIfClean`, is unsaved). The tab is then saved as of that read. True when it was reloaded.
+   */
+  async reloadFile(id: string, onlyIfClean = false): Promise<boolean> {
+    const tab = this.list.find((x) => x.id === id);
+    const pane = tab?.pane;
+    const path = tab?.file?.path;
+    if (!pane || path === undefined) return false;
+    const edits = pane.edits;
+    let read: Awaited<ReturnType<typeof ipc.readSqlFile>>;
+    try {
+      read = await ipc.readSqlFile(path);
+    } catch {
+      return false;
+    }
+    const now = this.list.find((x) => x.id === id);
+    if (!read || !now?.pane || now.file?.path !== path || now.pane.edits !== edits) return false;
+    if (onlyIfClean && now.dirty) return false;
+    now.file = { path, encoding: read.encoding, lineEnding: read.lineEnding, modifiedMs: read.modifiedMs };
+    if (read.text !== now.pane.text()) now.pane.reloadText(read.text);
+    now.dirty = false;
+    this.clearSaveNotice(now.pane);
+    return true;
+  }
+
+  /** Reads a saved query tab's file again and shows it, unless the tab is unsaved or was edited meanwhile. */
+  async reloadSavedQuery(id: string): Promise<boolean> {
+    const tab = this.list.find((x) => x.id === id);
+    const pane = tab?.pane;
+    const q = tab?.savedQuery;
+    if (!pane || !q || tab.dirty) return false;
+    const edits = pane.edits;
+    let text: string;
+    try {
+      text = await ipc.readSavedQuery(q.database, q.name);
+    } catch {
+      return false;
+    }
+    const now = this.list.find((x) => x.id === id);
+    if (typeof text !== "string" || !now?.pane || now.dirty || now.pane.edits !== edits) return false;
+    if (now.savedQuery?.database !== q.database || now.savedQuery.name !== q.name) return false;
+    if (text !== now.pane.text()) now.pane.reloadText(text);
+    return true;
+  }
+
   private tabOfFile(path: string): Tab | undefined {
-    return this.list.find((x) => x.file?.path === path);
+    const key = pathKey(path);
+    return this.list.find((x) => x.file && pathKey(x.file.path) === key);
   }
 
   /** The tab now holds a saved query: it takes its name, and a definition tab stops being one. */
@@ -969,24 +1277,46 @@ export class TabsStore {
   }
 
   /**
-   * Replaces the whole workspace with a restored one (see `restore` in workspace/session). Nothing
-   * connects: a bound tab opens its session on its first Run. Untitled numbering continues after
-   * the highest restored `untitled-N`.
+   * Puts a restored workspace in place (see `restore` in workspace/session). Nothing connects: a
+   * bound tab opens its session on its first Run. Untitled numbering continues after the highest
+   * restored `untitled-N`. Tabs the user opened before the restore finished are not dropped: they
+   * join the restored active group, after the restored tabs, and the last of them is shown.
    */
   replaceWorkspace(w: { list: Tab[]; tabGroups: TabGroup[]; layout: Layout; activeGroupId: string }): void {
-    const old = this.list.map((x) => x.pane);
-    this.list = w.list;
+    // A file the user opened early that the session restored too shows the restored tab.
+    const restoredFiles = new Map(w.list.flatMap((x) => (x.file ? [[pathKey(x.file.path), x.id] as const] : [])));
+    let duplicate: string | undefined;
+    const early = this.list.filter((x) => {
+      const same = x.file && !x.dirty ? restoredFiles.get(pathKey(x.file.path)) : undefined;
+      if (same === undefined) return true;
+      duplicate = same;
+      this.dropRequest(x.id);
+      this.pending.delete(x.id);
+      this.wanted.delete(x.id);
+      if (x.pane) x.pane.onedit = null;
+      void x.pane?.close();
+      return false;
+    });
+    this.list = [...w.list, ...early];
     this.tabGroups = w.tabGroups;
     this.layout = w.layout;
     this.activeGroupId = w.activeGroupId;
-    this.passwordRequests = [];
-    this.nameRequest = null;
-    this.endPrompt();
-    this.pending.clear();
-    this.wanted.clear();
+    const group = this.group(w.activeGroupId);
+    if (group && early.length > 0) {
+      group.tabIds.push(...early.map((x) => x.id));
+      group.activeId = early[early.length - 1].id;
+      this.shown++;
+    } else if (duplicate !== undefined) {
+      const g = this.group(this.groupOf(duplicate));
+      if (g) {
+        g.activeId = duplicate;
+        this.activeGroupId = g.id;
+        this.shown++;
+      }
+    }
     for (const tab of w.list) this.track(tab);
-    this.counter = Math.max(0, ...w.list.map((x) => Number(/^untitled-(\d+)$/.exec(x.title)?.[1] ?? 0)));
-    for (const p of old) void p?.close();
+    const restored = w.list.map((x) => Number(/^untitled-(\d+)$/.exec(x.title)?.[1] ?? 0));
+    this.counter = Math.max(this.counter, 0, ...restored);
   }
 
   /**
@@ -1005,15 +1335,27 @@ export class TabsStore {
     // Started by the first unsaved change, so continuous typing still saves.
     let maxTimer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
-    let unlisten: (() => void) | null = null;
-    const write = (json: string): Promise<void> => {
+    const write = async (json: string): Promise<void> => {
       let saving: Promise<unknown>;
       try {
-        saving = save(json);
+        saving = Promise.resolve(save(json));
       } catch {
-        return Promise.resolve();
+        this.sessionSaveFailed = true;
+        return;
       }
-      return settleWithin(saving, SAVE_TIMEOUT_MS);
+      let settled = false;
+      const tracked = saving.then(
+        () => {
+          settled = true;
+          this.sessionSaveFailed = false;
+        },
+        () => {
+          settled = true;
+          this.sessionSaveFailed = true;
+        },
+      );
+      await settleWithin(tracked, SAVE_TIMEOUT_MS);
+      if (!settled) this.sessionSaveFailed = true;
     };
     // Saves run one after another, so an older one never lands after a newer one.
     let queue: Promise<void> | null = null;
@@ -1026,6 +1368,7 @@ export class TabsStore {
       try {
         json = JSON.stringify(snapshot(this));
       } catch {
+        this.sessionSaveFailed = true;
         return queue ?? Promise.resolve();
       }
       const next: Promise<void> = queue ? queue.then(() => write(json)) : write(json);
@@ -1048,9 +1391,51 @@ export class TabsStore {
         maxTimer ??= setTimeout(() => void flush(), AUTOSAVE_MAX_WAIT_MS);
       });
     });
+    this.flushOnClose = async () => {
+      if (!stopped && !held) await flush();
+    };
+    // Listening already (see `guardWindow`) or not: the close flow below is the same.
+    const stopListening = this.guardStop ? null : this.listenForClose(Promise.resolve());
+    return () => {
+      stopped = true;
+      this.flushOnClose = null;
+      clearTimeout(timer);
+      clearTimeout(maxTimer);
+      stopEffect();
+      stopListening?.();
+    };
+  }
+
+  private guardStop: (() => void) | null = null;
+  /** Saves the session right away when the window is asked to close (set by `startAutosave`). */
+  private flushOnClose: (() => Promise<void>) | null = null;
+
+  /**
+   * Listens for the window close request and for Cmd+Q from now on, so neither is swallowed while
+   * the app is still starting. They wait for `ready` (the session restore) before deciding, then
+   * go through the same flow as when autosave runs. Returns a function that stops listening.
+   */
+  guardWindow(ready: Promise<unknown>): () => void {
+    this.guardStop?.();
+    const stop = this.listenForClose(ready);
+    this.guardStop = stop;
+    return () => {
+      stop();
+      if (this.guardStop === stop) this.guardStop = null;
+    };
+  }
+
+  private listenForClose(ready: Promise<unknown>): () => void {
+    let stopped = false;
+    const beforeClose = async () => {
+      // A restore that hangs must not keep the window from closing.
+      await settleWithin(ready, SAVE_TIMEOUT_MS);
+      await this.flushOnClose?.();
+    };
+    let unlisten: (() => void) | null = null;
     getCurrentWindow()
       .onCloseRequested(async (event) => {
-        if (!stopped && !held) await flush();
+        await beforeClose();
         await this.confirmWindowClose(event);
       })
       .then((fn) => {
@@ -1065,7 +1450,7 @@ export class TabsStore {
       void Promise.resolve(
         ipc.onQuitRequested(() => {
           void (async () => {
-            if (!stopped && !held) await flush();
+            await beforeClose();
             let kept = false;
             await this.confirmWindowClose({ preventDefault: () => (kept = true) });
             if (!kept) await getCurrentWindow().destroy();
@@ -1083,9 +1468,6 @@ export class TabsStore {
     return () => {
       stopped = true;
       unlistenQuit?.();
-      clearTimeout(timer);
-      clearTimeout(maxTimer);
-      stopEffect();
       unlisten?.();
     };
   }
@@ -1100,6 +1482,8 @@ export class TabsStore {
     this.activeGroupId = g.id;
     this.passwordRequests = [];
     this.nameRequest = null;
+    this.unsavedPrompt = null;
+    this.fileConflict = null;
     this.endPrompt();
     this.pending.clear();
     this.wanted.clear();

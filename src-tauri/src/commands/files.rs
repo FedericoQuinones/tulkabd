@@ -46,6 +46,12 @@ pub async fn sql_files_exist(
     tulka_app::sql_files_exist(&state, paths).await
 }
 
+/// Last change of an allowed file, Unix milliseconds.
+#[tauri::command]
+pub async fn sql_file_modified(state: State<'_, AppState>, path: String) -> Result<u64, String> {
+    tulka_app::sql_file_modified(&state, path).await
+}
+
 #[tauri::command]
 pub async fn read_sql_file(state: State<'_, AppState>, path: String) -> Result<OpenedFile, String> {
     tulka_app::read_sql_file(&state, path).await
@@ -58,6 +64,6 @@ pub async fn write_sql_file(
     text: String,
     encoding: FileEncoding,
     line_ending: LineEnding,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     tulka_app::write_sql_file(&state, path, text, encoding, line_ending).await
 }
