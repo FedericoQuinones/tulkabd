@@ -620,7 +620,7 @@ class ExplorerStore {
       if (extra.size > 0) {
         dbs = [
           ...dbs,
-          ...[...extra].map((name) => ({ name, noAccess: false, indexedAt: null, tables: 0, views: 0, procedures: 0, functions: 0, synonyms: 0 })),
+          ...[...extra].map((name) => ({ name, noAccess: false, indexedAt: null, tables: 0, views: 0, procedures: 0, functions: 0, tableFunctions: 0, synonyms: 0 })),
         ];
       }
     }
@@ -653,7 +653,11 @@ class ExplorerStore {
   private groups(ctx: { fs: FilterSets | null; out: Row[] }, c: string, db: CachedDatabase, level: number, inMatch: boolean) {
     const { fs, out } = ctx;
     const parent = keyOf.db(c, db.name);
-    const counts: Record<ObjectKind, number> = { table: db.tables, view: db.views, procedure: db.procedures,
+    const counts: Record<ObjectKind, number> = {
+      table: db.tables,
+      view: db.views,
+      procedure: db.procedures,
+      tableFunction: db.tableFunctions,
       function: db.functions,
       synonym: db.synonyms,
     };

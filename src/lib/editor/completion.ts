@@ -295,6 +295,7 @@ const KIND_TYPE: Record<DbObject["kind"], string> = {
   view: "interface",
   procedure: "function",
   function: "method",
+  tableFunction: "method",
   synonym: "type",
 };
 
@@ -347,7 +348,9 @@ export function completionSource(meta: CompletionMetadata): CompletionSource {
     if (!bracketed) for (const k of KEYWORDS) options.push({ label: k, type: "keyword" });
     for (const s of meta.schemas) options.push(option(s, "namespace", "schema"));
     for (const o of relations) {
-      const apply = o.schema.toLowerCase() === "dbo" ? undefined : `${sqlName(o.schema)}.${name(o.name)}`;
+      // A scalar function must be called with a two-part name, so functions are never inserted bare.
+      const isFunction = o.kind === "function" || o.kind === "tableFunction";
+      const apply = o.schema.toLowerCase() === "dbo" && !isFunction ? undefined : `${sqlName(o.schema)}.${name(o.name)}`;
       options.push(option(o.name, KIND_TYPE[o.kind], o.schema, apply));
     }
     return result(options);

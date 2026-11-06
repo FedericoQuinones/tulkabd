@@ -35,10 +35,10 @@ export const objectTabs = {
   definition: (o: ObjectTarget) => tabs.open({ kind: "definition", ...o }),
 };
 
-export const OBJECT_KINDS: ObjectKind[] = ["table", "view", "procedure", "function", "synonym"];
+export const OBJECT_KINDS: ObjectKind[] = ["table", "view", "procedure", "tableFunction", "function", "synonym"];
 
-/** Kinds whose rows expand into columns: a scalar function simply has none. */
-export const hasColumns = (kind: ObjectKind) => kind === "table" || kind === "view" || kind === "function";
+/** Kinds whose rows expand into columns. */
+export const hasColumns = (kind: ObjectKind) => kind === "table" || kind === "view" || kind === "tableFunction";
 
 /** Kinds that `SELECT TOP 10 *` works on; a function needs arguments and a procedure is run, not read. */
 export const canSelectTop = (kind: ObjectKind) => kind === "table" || kind === "view" || kind === "synonym";

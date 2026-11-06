@@ -15,6 +15,7 @@ const meta: CompletionMetadata = {
     { schema: "we]ird", name: "a]b", kind: "table" },
     { schema: "dbo", name: "CerrarMes", kind: "procedure" },
     { schema: "dbo", name: "fnTotal", kind: "function" },
+    { schema: "dbo", name: "fnRows", kind: "tableFunction" },
     { schema: "ventas", name: "synClientes", kind: "synonym" },
   ],
   columns: {
@@ -100,6 +101,10 @@ test("plain words offer keywords, schemas, tables and views", async () => {
   expect(all).toContain("fnTotal");
   expect(all).toContain("synClientes");
   expect(option(await complete("|", true), "synClientes")?.apply).toBe("ventas.synClientes");
+  // A scalar function needs a two-part name, so even dbo ones are inserted with their schema.
+  expect(option(await complete("|", true), "fnTotal")?.apply).toBe("dbo.fnTotal");
+  expect(option(await complete("|", true), "fnRows")?.apply).toBe("dbo.fnRows");
+  expect(option(await complete("|", true), "Pedidos")?.apply).toBeUndefined();
   expect(labels(await complete("ventas.|"))).toContain("synClientes");
   expect(labels(await complete("dbo.|"))).toContain("fnTotal");
 });

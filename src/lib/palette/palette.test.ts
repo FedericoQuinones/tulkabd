@@ -221,6 +221,7 @@ test("functions and synonyms open their definition, and Select top 10 only suits
   expect(canRun("selectTop", "synonym")).toBe(true);
   expect(canRun("definition", "function")).toBe(true);
   expect(canRun("definition", "synonym")).toBe(true);
+  expect(canRun("selectTop", "tableFunction")).toBe(false);
 });
 
 test("a cancelled password prompt opens nothing", async () => {
