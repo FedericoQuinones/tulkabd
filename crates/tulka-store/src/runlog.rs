@@ -157,7 +157,8 @@ pub struct NewRun {
 }
 
 /// Local history of executed statements in its own SQLite file. It keeps
-/// statement text only, never passwords or result rows. Every call is blocking.
+/// statement text only, never result rows; secret literals such as
+/// `PASSWORD = '...'` are replaced by `***` before storing. Every call is blocking.
 pub struct RunLogStore {
     conn: Mutex<Connection>,
     /// Set while the log lives in memory only because the file could not be
@@ -326,7 +327,9 @@ fn insert_entry(conn: &Connection, e: &RunLogEntry) -> rusqlite::Result<()> {
 
 /// Writes one run, cutting its text and client name to their caps.
 fn insert_run(conn: &Connection, run: &NewRun) -> Result<RunLogEntry, String> {
-    let (sql, sql_truncated) = cap_sql(&run.sql);
+    // Masked before the cap so a cut can never leave the start of a secret.
+    let masked = crate::mask::mask_secrets(&run.sql);
+    let (sql, sql_truncated) = cap_sql(&masked);
     let client: Option<String> = run
         .client
         .as_ref()
@@ -687,6 +690,16 @@ mod tests {
         assert!(!a.sql_truncated);
         assert_eq!(a.connection_name, "prod");
         assert_eq!(a.rows, Some(3));
+    }
+
+    #[test]
+    fn secret_literals_are_masked_in_the_stored_text() {
+        let store = RunLogStore::in_memory();
+        let entry = store
+            .insert(&run("CREATE LOGIN x WITH PASSWORD = 'Secret1'", 1))
+            .unwrap();
+        assert_eq!(entry.sql, "CREATE LOGIN x WITH PASSWORD = '***'");
+        assert_eq!(store.list(None, 1)[0].sql, entry.sql);
     }
 
     #[test]

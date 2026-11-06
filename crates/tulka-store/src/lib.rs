@@ -2,6 +2,7 @@
 //! offline. Tauri-free and blocking: callers use `spawn_blocking`.
 
 mod cache;
+mod mask;
 mod private_file;
 mod runlog;
 mod search;
@@ -10,6 +11,7 @@ mod session;
 pub use cache::{
     CachedDatabase, MetaCache, ObjectMatch, ObjectMatches, ObjectQuery, SCHEMA_VERSION,
 };
+pub use mask::mask_secrets;
 pub use runlog::{
     NewRun, RunLogEntry, RunLogOutcome, RunLogStore, RunSource, SharedRunLog, MAX_LOGGED_SQL_BYTES,
 };
