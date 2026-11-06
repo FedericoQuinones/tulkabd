@@ -8,8 +8,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tulka_app::ai::{
-    describe_table, list_connections, list_databases, run_query, search_objects, QueryRequest,
-    SearchRequest, ToolText,
+    describe_table, describe_table_until, list_connections, list_databases, list_databases_until,
+    run_query, search_objects, search_objects_until, QueryRequest, SearchRequest, ToolText,
 };
 use tulka_app::tulka_store::{RunLogOutcome, RunSource};
 use tulka_core::SecretStore as _;
@@ -761,6 +761,47 @@ async fn output_is_cut_at_the_character_budget_and_the_query_cancelled() {
 }
 
 #[tokio::test]
+async fn names_outside_the_selected_databases_are_refused() {
+    let mut local = connection("Local", Environment::Local, AiAccess::ReadOnly);
+    local.databases = DatabaseScope::Selected {
+        names: vec!["erp".into(), "crm".into()],
+    };
+    let f = Fixture::with(vec![local], Vec::new());
+    for sql in [
+        "SELECT * FROM otherdb.sys.tables",
+        "SELECT * FROM [OtherDb].[sys].[tables]",
+        "SELECT * FROM \"otherdb\"..t",
+        "SELECT * FROM [\u{E9}rp].dbo.t",
+        "SELECT * FROM erp.dbo.t JOIN master.sys.databases d ON 1=1",
+    ] {
+        let out = run(&f, sql).await;
+        assert!(out.is_error, "{sql}");
+        assert!(
+            out.text
+                .starts_with("Not run: the query names the database `"),
+            "{sql}: {}",
+            out.text
+        );
+        assert!(out.text.contains("(erp, crm)"));
+    }
+    assert!(f.driver.script.sqls.lock().unwrap().is_empty());
+    assert!(f.driver.script.connects.lock().unwrap().is_empty());
+    assert!(f
+        .runlog
+        .list(None, 10)
+        .iter()
+        .all(|e| e.outcome == RunLogOutcome::Blocked));
+    // Selected databases, in any letter case, and two-part names pass.
+    for sql in [
+        "SELECT * FROM ERP.dbo.t",
+        "SELECT * FROM [crm]..t",
+        "SELECT * FROM dbo.t",
+    ] {
+        assert!(!run(&f, sql).await.is_error, "{sql}");
+    }
+}
+
+#[tokio::test]
 async fn rejected_sql_never_reaches_the_driver_and_is_logged_blocked() {
     let f = Fixture::standard();
     let cases = [
@@ -911,6 +952,189 @@ async fn the_password_is_nowhere() {
     }
 }
 
+fn timed_out_1s() -> ToolText {
+    ToolText {
+        text: "Timeout (1 s) reached; the query was cancelled.".into(),
+        is_error: true,
+    }
+}
+
+#[tokio::test]
+async fn metadata_tools_stop_at_the_time_limit() {
+    let f = Fixture::standard();
+    f.set_preferences(|p| p.ai_query_timeout_s = 1);
+    f.driver.script.hang_list.store(true, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let (a, b, c) = tokio::join!(
+        list_databases(&f.state, "Local".into()),
+        describe_table(&f.state, "Local".into(), None, "stuck".into()),
+        async {
+            let mut req = search("t");
+            req.connection = Some("Local".into());
+            req.database = Some("stuck".into());
+            search_objects(&f.state, req).await
+        }
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!((a, b, c), (timed_out_1s(), timed_out_1s(), timed_out_1s()));
+    // Nothing keeps a session or a slot.
+    assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
+    f.driver.script.hang_list.store(false, Ordering::SeqCst);
+    assert!(!list_databases(&f.state, "Local".into()).await.is_error);
+}
+
+#[tokio::test]
+async fn metadata_tools_stop_when_the_client_gives_up() {
+    let f = Fixture::standard();
+    let gone = || tokio::time::sleep(Duration::from_millis(100));
+    let cancelled = ToolText {
+        text: "The query was cancelled.".into(),
+        is_error: true,
+    };
+    f.driver.script.hang_list.store(true, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        list_databases_until(&f.state, "Local".into(), gone()).await,
+        cancelled
+    );
+    assert_eq!(
+        describe_table_until(&f.state, "Local".into(), None, "stuck".into(), gone()).await,
+        cancelled
+    );
+    let mut req = search("t");
+    req.connection = Some("Local".into());
+    req.database = Some("stuck".into());
+    assert_eq!(search_objects_until(&f.state, req, gone()).await, cancelled);
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn stuck_metadata_calls_do_not_hold_the_slots_of_run_query() {
+    let f = Fixture::standard();
+    f.set_preferences(|p| p.ai_query_timeout_s = 1);
+    let stuck = || describe_table(&f.state, "Local".into(), None, "stuck".into());
+    let (_, _, _, _, ok) = tokio::join!(stuck(), stuck(), stuck(), stuck(), async {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        run(&f, "SELECT 1").await
+    });
+    assert!(!ok.is_error, "{}", ok.text);
+}
+
+#[tokio::test]
+async fn list_connections_warns_about_an_administrator_login_once() {
+    let f = Fixture::standard();
+    let plain = list_connections(&f.state).await.text;
+    assert!(!plain.contains("Warning"), "{plain}");
+    f.driver.script.admin.store(true, Ordering::SeqCst);
+    // The earlier answer is remembered for a while.
+    assert!(!list_connections(&f.state).await.text.contains("Warning"));
+    assert_eq!(f.driver.script.admin_asked.load(Ordering::SeqCst), 1);
+
+    let f = Fixture::standard();
+    f.driver.script.admin.store(true, Ordering::SeqCst);
+    let text = list_connections(&f.state).await.text;
+    assert!(
+        text.contains("Warning: Local logs in as a sysadmin."),
+        "{text}"
+    );
+    let again = list_connections(&f.state).await.text;
+    assert_eq!(again, text);
+    assert_eq!(f.driver.script.admin_asked.load(Ordering::SeqCst), 1);
+    assert_eq!(f.driver.script.live.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn an_unreachable_server_does_not_slow_list_connections_every_time() {
+    let f = Fixture::standard();
+    *f.driver.script.databases.lock().unwrap() = None;
+    list_connections(&f.state).await;
+    let asked = f.driver.script.connects.lock().unwrap().len();
+    assert_eq!(asked, 1);
+    let text = list_connections(&f.state).await.text;
+    assert!(!text.contains("Warning"));
+    assert_eq!(f.driver.script.connects.lock().unwrap().len(), asked);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_recreated_cache_file_is_read_again() {
+    use tulka_app::ai::AiState;
+    use tulka_app::tulka_store::MetaCache;
+
+    let mut f = Fixture::standard();
+    let id = id_of(&f, "Local");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tulkabd.db");
+    let seed = |cache: &MetaCache, table: &str| {
+        let snapshot = DatabaseSnapshot {
+            objects: vec![DbObject {
+                schema: "dbo".into(),
+                name: table.into(),
+                kind: ObjectKind::Table,
+            }],
+            columns: Vec::new(),
+        };
+        cache.replace_database(&id, "sales", &snapshot, 1).unwrap();
+    };
+    let found = |out: &ToolText, table: &str| out.text.contains(&format!("dbo.{table}"));
+
+    // The cache does not exist yet when the state starts.
+    f.state = AiState::new(
+        f.config.clone(),
+        f.secrets.clone(),
+        vec![f.driver.clone()],
+        None,
+        f.runlog.clone(),
+    )
+    .with_cache_file(path.clone());
+    assert!(!found(
+        &search_objects(&f.state, search("old_t")).await,
+        "old_t"
+    ));
+
+    let app = MetaCache::open(&path);
+    seed(&app, "old_t");
+    assert!(found(
+        &search_objects(&f.state, search("old_t")).await,
+        "old_t"
+    ));
+
+    // The app deletes the file and builds it again.
+    drop(app);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    let app = MetaCache::open(&path);
+    seed(&app, "new_t");
+    assert!(found(
+        &search_objects(&f.state, search("new_t")).await,
+        "new_t"
+    ));
+    assert!(!found(
+        &search_objects(&f.state, search("old_t")).await,
+        "old_t"
+    ));
+
+    // A deleted file leaves nothing to read.
+    drop(app);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    assert!(!found(
+        &search_objects(&f.state, search("new_t")).await,
+        "new_t"
+    ));
+}
+
+#[tokio::test]
+async fn metadata_sessions_wait_at_most_five_seconds_for_a_lock() {
+    let f = Fixture::standard();
+    list_databases(&f.state, "Local".into()).await;
+    describe_table(&f.state, "Local".into(), Some("sales".into()), "t".into()).await;
+    assert_eq!(*f.driver.script.lock_timeouts.lock().unwrap(), [5000, 5000]);
+}
+
 #[tokio::test]
 async fn at_most_four_calls_touch_servers_at_once() {
     let f = Fixture::standard();
@@ -970,11 +1194,13 @@ async fn a_timeout_keeps_the_rows_received_before_it() {
 async fn cancelling_while_waiting_for_a_slot_is_logged_cancelled() {
     let f = Fixture::standard();
     let one = || {
-        run_query(
-            &f.state,
-            query("Local", "SELECT slow"),
-            tokio::time::sleep(Duration::from_millis(300)),
-        )
+        run_query(&f.state, query("Local", "SELECT slow"), async {
+            // Give up once four calls hold the slots, not after a delay.
+            while f.driver.script.connects.lock().unwrap().len() < 4 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        })
     };
     let outs = tokio::join!(one(), one(), one(), one(), one());
     assert!([&outs.0, &outs.1, &outs.2, &outs.3, &outs.4]

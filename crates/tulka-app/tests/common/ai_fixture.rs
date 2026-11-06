@@ -44,6 +44,13 @@ pub struct Script {
     pub peak: AtomicUsize,
     /// Times a running script was cancelled.
     pub cancels: AtomicUsize,
+    /// Every lock timeout a session was given, in milliseconds.
+    pub lock_timeouts: Mutex<Vec<u32>>,
+    /// Whether the login is an administrator, and how many times it was asked.
+    pub admin: AtomicBool,
+    pub admin_asked: AtomicUsize,
+    /// Makes `list_databases` wait forever, as a call blocked on a lock does.
+    pub hang_list: AtomicBool,
 }
 
 pub struct FakeDriver {
@@ -94,6 +101,10 @@ impl Driver for FakeDriver {
     fn read_only_violation(&self, sql: &str) -> Option<ReadOnlyViolation> {
         tulka_mssql::readonly::violation(sql)
     }
+
+    fn referenced_databases(&self, sql: &str) -> Vec<String> {
+        tulka_mssql::readonly::referenced_databases(sql)
+    }
 }
 
 struct FakeSession {
@@ -142,7 +153,20 @@ impl Session for FakeSession {
         })
     }
 
+    async fn is_admin(&mut self) -> Result<bool, DriverError> {
+        self.script.admin_asked.fetch_add(1, Ordering::SeqCst);
+        Ok(self.script.admin.load(Ordering::SeqCst))
+    }
+
+    async fn set_lock_timeout(&mut self, ms: u32) -> Result<(), DriverError> {
+        self.script.lock_timeouts.lock().unwrap().push(ms);
+        Ok(())
+    }
+
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError> {
+        if self.script.hang_list.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         Ok(self
             .script
             .databases
@@ -165,6 +189,9 @@ impl Session for FakeSession {
     }
 
     async fn snapshot(&mut self, database: &str) -> Result<DatabaseSnapshot, DriverError> {
+        if database == "stuck" {
+            std::future::pending::<()>().await;
+        }
         self.script
             .snapshots_asked
             .lock()
@@ -185,6 +212,9 @@ impl Session for FakeSession {
         schema: &str,
         name: &str,
     ) -> Result<TableStructure, DriverError> {
+        if name == "stuck" {
+            std::future::pending::<()>().await;
+        }
         if name == "lost" {
             return Err(DriverError::Disconnected(
                 "socket closed by db.example.com".into(),

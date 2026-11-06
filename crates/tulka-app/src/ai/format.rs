@@ -106,6 +106,29 @@ pub(crate) fn not_run(violation: &ReadOnlyViolation) -> String {
     }
 }
 
+/// A name in the query points at a database the connection does not select.
+pub(crate) fn database_name_not_selected(
+    database: &str,
+    label: &str,
+    selected: &[String],
+) -> String {
+    format!(
+        "Not run: the query names the database `{database}`, which is not among the databases \
+         selected for {label} ({}). Use only those. If `{database}.x.y` is a column written with \
+         its schema and table, use a table alias instead.",
+        selected.join(", ")
+    )
+}
+
+/// Warns that a connection's login can reach more than the read-only check
+/// can fence off.
+pub(crate) fn admin_login(label: &str) -> String {
+    format!(
+        "Warning: {label} logs in as a sysadmin. The read-only check cannot stop everything a \
+         SELECT reaches with that login; the user should switch to a least-privilege login.\n"
+    )
+}
+
 pub(crate) fn timed_out(seconds: u32) -> String {
     format!("Timeout ({seconds} s) reached; the query was cancelled.")
 }

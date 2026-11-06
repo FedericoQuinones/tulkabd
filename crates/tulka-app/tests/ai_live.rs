@@ -263,6 +263,70 @@ async fn live_attempted_writes_change_nothing() {
     );
 }
 
+/// A schema lock held by another session must not hold `describe_table` for
+/// the whole time limit: the metadata session gives up on a lock after 5 s.
+#[tokio::test]
+async fn live_describe_does_not_wait_forever_on_a_schema_lock() {
+    let Some(l) = live().await else { return };
+    let inside = ConnectParams {
+        database: Some(l.database.clone()),
+        ..l.server.clone()
+    };
+    let mut holder = MssqlDriver.connect(&inside).await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    holder
+        .execute(
+            "BEGIN TRAN; ALTER TABLE dbo.clientes ADD extra int NULL",
+            tx,
+        )
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let out = describe_table(
+        &l.state,
+        "Live".into(),
+        Some(l.database.clone()),
+        "clientes".into(),
+    )
+    .await;
+    // The default limit is 30 s: stopping sooner is the lock timeout.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "{:?}: {}",
+        started.elapsed(),
+        out.text
+    );
+    println!("lock wait {:?}: {}", started.elapsed(), out.text);
+    drop(holder);
+}
+
+/// The test login is `sa`: a sysadmin is flagged, and the file and secret
+/// sources are refused before reaching the server.
+#[tokio::test]
+async fn live_admin_login_is_flagged_and_secret_sources_refused() {
+    let Some(l) = live().await else { return };
+    let listed = tulka_app::ai::list_connections(&l.state).await;
+    assert!(
+        listed.text.contains("Warning: Live logs in as a sysadmin."),
+        "{}",
+        listed.text
+    );
+    for sql in [
+        "SELECT name, password_hash FROM sys.sql_logins",
+        "SELECT * FROM sys.dm_os_enumerate_filesystem('/', '*')",
+        "SELECT * FROM sys.dm_exec_requests OPTION (MAXDOP 1)",
+    ] {
+        let out = l.run(sql, None).await;
+        assert!(
+            out.is_error && out.text.starts_with("Not run:"),
+            "{sql}: {}",
+            out.text
+        );
+    }
+}
+
 #[tokio::test]
 async fn live_rowcount_limit() {
     let Some(l) = live().await else { return };
