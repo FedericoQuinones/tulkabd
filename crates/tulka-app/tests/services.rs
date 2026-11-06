@@ -2546,7 +2546,7 @@ async fn save_results_writes_the_visible_rows_to_a_file() {
     let out = save_results(&f.state, "t1".into(), 0, SaveFormat::Csv, path.clone())
         .await
         .unwrap();
-    assert_eq!(out, SaveOutcome { rows: 4 });
+    assert_eq!((out.rows, out.truncated, out.capped), (4, false, false));
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.starts_with('\u{feff}'));
     assert_eq!(

@@ -51,19 +51,27 @@ impl SaveFormat {
 /// - JSON: an array with one object per row, keyed by column name.
 ///
 /// In all of them `NULL` is an empty field (CSV, TSV) or `null` (JSON),
-/// binary is `0x` + hex and dates and times are ISO 8601.
+/// binary is `0x` + hex. Dates and times are ISO 8601 in JSON and in the
+/// server's notation (`2026-10-20 14:03:00`) in CSV and TSV, which Excel parses.
 pub struct TableWriter<W: Write> {
     out: W,
     format: SaveFormat,
-    /// Column names as written to JSON (unique).
-    keys: Vec<String>,
+    /// Each JSON key as written, with its colon (`"name":`), encoded once.
+    keys: Vec<Vec<u8>>,
     rows: usize,
 }
 
 impl<W: Write> TableWriter<W> {
     /// Starts the file: BOM and header for CSV, header for TSV, `[` for JSON.
     pub fn new(mut out: W, format: SaveFormat, columns: &[Column]) -> io::Result<Self> {
-        let keys = unique_names(columns);
+        let keys = unique_names(columns)
+            .iter()
+            .map(|k| {
+                let mut b = serde_json::to_vec(k)?;
+                b.push(b':');
+                Ok(b)
+            })
+            .collect::<io::Result<Vec<_>>>()?;
         match format {
             SaveFormat::Csv => {
                 out.write_all(UTF8_BOM)?;
@@ -93,6 +101,12 @@ impl<W: Write> TableWriter<W> {
         Ok(())
     }
 
+    /// The underlying writer, for a caller that formats into a buffer and
+    /// moves the bytes on between rows.
+    pub fn get_mut(&mut self) -> &mut W {
+        &mut self.out
+    }
+
     /// Ends the file, flushes, and returns the writer and the number of rows
     /// written.
     pub fn finish(mut self) -> io::Result<(W, usize)> {
@@ -113,8 +127,7 @@ impl<W: Write> TableWriter<W> {
             if i > 0 {
                 self.out.write_all(b",")?;
             }
-            json_string(&mut self.out, key)?;
-            self.out.write_all(b":")?;
+            self.out.write_all(key)?;
             write_json_value(&mut self.out, row.get(i).unwrap_or(&Value::Null))?;
         }
         self.out.write_all(b"}")
@@ -192,8 +205,13 @@ fn delimited_cell(v: &Value) -> Cow<'_, str> {
         Value::Decimal(d) => Cow::Borrowed(d),
         Value::Text(t) => text_cell(t),
         Value::Bytes(b) => Cow::Owned(hex(b)),
-        Value::Date(s) | Value::Time(s) | Value::Uuid(s) => Cow::Borrowed(s),
-        Value::DateTime(s) | Value::DateTimeOffset(s) => Cow::Owned(iso_datetime(s)),
+        // The server's own notation, as Copy writes it: Excel parses it.
+        // ISO 8601 is only for JSON.
+        Value::Date(s)
+        | Value::Time(s)
+        | Value::DateTime(s)
+        | Value::DateTimeOffset(s)
+        | Value::Uuid(s) => Cow::Borrowed(s),
     }
 }
 
@@ -345,7 +363,7 @@ mod tests {
         );
         assert_eq!(
             out,
-            "\u{feff}a,b,c,d,e,f,g,h\r\n1,-9223372036854775808,0,12.5,-0.50,0x00AB,2026-10-20T14:03:00.123,2026-10-20T14:03:00-03:00\r\n"
+            "\u{feff}a,b,c,d,e,f,g,h\r\n1,-9223372036854775808,0,12.5,-0.50,0x00AB,2026-10-20 14:03:00.123,2026-10-20 14:03:00 -03:00\r\n"
         );
     }
 

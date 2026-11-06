@@ -103,7 +103,7 @@ pub async fn save_results(
     let dialog = window
         .dialog()
         .file()
-        .add_filter(filter_name, &[ext])
+        .add_filter(filter_name, &[ext, &ext.to_uppercase()])
         .set_file_name(default_name)
         .set_parent(&window);
     // Blocks until the dialog closes: not on an async worker.
@@ -113,11 +113,10 @@ pub async fn save_results(
     let Some(picked) = picked else {
         return Ok(None);
     };
-    let mut path = picked.into_path().map_err(|e| e.to_string())?;
-    // Some systems do not add the extension of the filter.
-    if path.extension().is_none() {
-        path.set_extension(ext);
-    }
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    // Some systems do not add the extension of the filter, but never at
+    // the price of replacing a file the user was not asked about.
+    let path = tulka_app::resolve_save_path(path, ext);
     tulka_app::save_results(&state, tab_id, result_index, format, path)
         .await
         .map(Some)
