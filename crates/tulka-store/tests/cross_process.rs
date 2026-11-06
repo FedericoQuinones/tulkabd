@@ -39,6 +39,15 @@ const OLD_SCHEMA: &str = "
     CREATE INDEX run_at_ms ON run (at_ms);
     PRAGMA user_version = 1;";
 
+/// A short pause between a writer's inserts. Each process records a run per
+/// statement, never back to back; without it, one thread re-takes the write
+/// lock right after each commit while SQLite's busy handler makes the other
+/// sleep for growing intervals, and on a slow disk (Windows CI) that one
+/// starves past its busy timeout.
+fn pace() {
+    thread::sleep(std::time::Duration::from_millis(1));
+}
+
 #[test]
 fn two_writers_lose_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -51,6 +60,7 @@ fn two_writers_lose_nothing() {
             for i in 0..200 {
                 app.insert(&run(format!("app {i}"), RunSource::App))
                     .unwrap();
+                pace();
             }
         })
     };
@@ -59,6 +69,7 @@ fn two_writers_lose_nothing() {
         thread::spawn(move || {
             for i in 0..200 {
                 mcp.insert(&run(format!("ai {i}"), RunSource::Ai)).unwrap();
+                pace();
             }
         })
     };
