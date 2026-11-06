@@ -333,6 +333,8 @@ impl CancelHandle for CancelRef {
 #[derive(Default)]
 struct FakeClipboard {
     texts: Mutex<Vec<String>>,
+    /// The texts that went through `write_secret_text` (also in `texts`).
+    secrets: Mutex<Vec<String>>,
     threads: Mutex<Vec<ThreadId>>,
 }
 
@@ -344,6 +346,11 @@ impl Clipboard for FakeClipboard {
             .unwrap()
             .push(std::thread::current().id());
         Ok(())
+    }
+
+    fn write_secret_text(&self, text: String) -> Result<(), String> {
+        self.secrets.lock().unwrap().push(text.clone());
+        self.write_text(text)
     }
 }
 
@@ -1932,6 +1939,7 @@ async fn copy_connection_string_with_and_without_the_password() {
         .await
         .unwrap();
     assert!(!included);
+    assert!(clipboard.secrets.lock().unwrap().is_empty());
     let text = clipboard.texts.lock().unwrap().last().unwrap().clone();
     assert!(
         text.starts_with("Server=fake-host,1433;Database=Ventas;User ID=sa;"),
@@ -1948,6 +1956,10 @@ async fn copy_connection_string_with_and_without_the_password() {
     assert!(included);
     let text = clipboard.texts.lock().unwrap().last().unwrap().clone();
     assert!(text.contains(&format!("Password={PASSWORD}")), "{text}");
+    assert_eq!(
+        clipboard.secrets.lock().unwrap().as_slice(),
+        std::slice::from_ref(&text)
+    );
     let parsed = tulka_core::parse_connection_string(&text).unwrap();
     assert_eq!(parsed.password.as_deref(), Some(PASSWORD));
 

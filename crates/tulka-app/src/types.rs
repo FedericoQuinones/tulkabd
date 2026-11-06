@@ -340,6 +340,10 @@ pub struct CopyOutcome {
 /// passes the clipboard-manager plugin.
 pub trait Clipboard: Send + Sync {
     fn write_text(&self, text: String) -> Result<(), String>;
+
+    /// Writes text that contains a secret: clipboard managers are asked to
+    /// keep it out of their history, and it is cleared again after a while.
+    fn write_secret_text(&self, text: String) -> Result<(), String>;
 }
 
 #[cfg(test)]

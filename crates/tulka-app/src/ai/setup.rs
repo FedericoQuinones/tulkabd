@@ -88,6 +88,9 @@ mod tests {
         fn write_text(&self, _: String) -> Result<(), String> {
             Ok(())
         }
+        fn write_secret_text(&self, _: String) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[test]
