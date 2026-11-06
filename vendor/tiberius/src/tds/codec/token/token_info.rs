@@ -2,8 +2,8 @@ use super::token_error::decode_error_info_body;
 use crate::SqlReadBytes;
 
 // Fields are decoded from the INFO token and logged at DEBUG on receipt.
-// tulka patch: `QueryStream` surfaces them as `QueryItem::Info`; `server` and
-// `procedure` are still unread.
+// tulka patch: `QueryStream` surfaces them as `QueryItem::Info`; `server` is
+// still unread.
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct TokenInfo {

@@ -392,6 +392,8 @@ pub struct InfoMessage {
     pub message: String,
     /// The line number in the batch or procedure that sent the message.
     pub line: u32,
+    /// The procedure or trigger that sent the message; empty for the batch.
+    pub procedure: String,
 }
 
 impl From<TokenInfo> for InfoMessage {
@@ -402,6 +404,7 @@ impl From<TokenInfo> for InfoMessage {
             class: info.class,
             message: info.message,
             line: info.line,
+            procedure: info.procedure,
         }
     }
 }

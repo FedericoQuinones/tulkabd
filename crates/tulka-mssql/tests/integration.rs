@@ -380,6 +380,209 @@ async fn messages_report_editor_lines() {
 }
 
 #[tokio::test]
+async fn module_errors_name_the_procedure_and_do_not_jump() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    // The error is on line 3 of the procedure, which the batch calls on its
+    // line 7: neither number may be offered as an editor line.
+    let sql = "CREATE PROCEDURE #tulka_fails AS\nBEGIN\n  SELECT 1/0\nEND\nGO\nSELECT 1\nEXEC #tulka_fails";
+    let (result, events) = collect(s.as_mut(), sql).await;
+
+    let error = events
+        .iter()
+        .find_map(|ev| match ev {
+            ExecEvent::Message {
+                kind: MessageKind::Error,
+                text,
+                line,
+            } => Some((text.clone(), *line)),
+            _ => None,
+        })
+        .expect("error message");
+    assert_eq!(error.1, None, "{events:?}");
+    assert!(error.0.contains("Divide by zero"), "{}", error.0);
+    assert!(
+        error.0.contains("Procedure #tulka_fails") && error.0.contains(", line 3"),
+        "{}",
+        error.0
+    );
+    assert!(
+        matches!(result, Err(DriverError::Query { .. })),
+        "{result:?}"
+    );
+}
+
+/// The text and editor line of the first error message of `events`.
+fn first_error(events: &[ExecEvent]) -> (String, Option<u32>) {
+    events
+        .iter()
+        .find_map(|ev| match ev {
+            ExecEvent::Message {
+                kind: MessageKind::Error,
+                text,
+                line,
+            } => Some((text.clone(), *line)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no error message in {events:?}"))
+}
+
+#[tokio::test]
+async fn module_ddl_errors_keep_the_editor_line() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    // The server names the module here, but counts lines from the batch start.
+    let cases = [
+        (
+            "-- leading comment\nCREATE PROCEDURE dbo.tulka_p AS\nBEGIN\n  SELECT 1 FROM\nEND",
+            5,
+        ),
+        (
+            "SELECT 1\nGO\nCREATE OR ALTER PROCEDURE dbo.tulka_p2 AS\nBEGIN\n  SELECT nope FROM sys.objects\nEND",
+            5,
+        ),
+        (
+            "SELECT 1\nGO\n/* c */ create view dbo.tulka_v as\nSELECT nope FROM sys.objects",
+            4,
+        ),
+        (
+            "SELECT 1\nGO\nCREATE TRIGGER dbo.tulka_trg ON dbo.tulka_no_table AFTER INSERT AS\nSELECT 1",
+            3,
+        ),
+    ];
+    for (sql, line) in cases {
+        let (result, events) = collect(s.as_mut(), sql).await;
+        assert!(result.is_err(), "{sql}");
+        let error = first_error(&events);
+        assert_eq!(error.1, Some(line), "{sql}\n{events:?}");
+    }
+}
+
+#[tokio::test]
+async fn module_ddl_errors_survive_unclosed_text_and_a_late_create() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let cases = [
+        // An unclosed string or comment only fails the batch itself.
+        (
+            "CREATE PROCEDURE dbo.tulka_px AS\nBEGIN\n  SELECT 'abc\nEND",
+            3,
+        ),
+        (
+            "CREATE PROCEDURE dbo.tulka_px AS\nBEGIN\n  SELECT 1 /* x\nEND",
+            4,
+        ),
+        // "must be the first statement in a query batch".
+        ("SELECT 1\nCREATE PROCEDURE dbo.tulka_px AS SELECT 1", 2),
+    ];
+    for (sql, line) in cases {
+        let (result, events) = collect(s.as_mut(), sql).await;
+        assert!(result.is_err(), "{sql}");
+        assert_eq!(first_error(&events).1, Some(line), "{sql}\n{events:?}");
+    }
+}
+
+#[tokio::test]
+async fn messages_of_a_ddl_trigger_keep_their_own_module() {
+    let Some(admin) = test_params() else { return };
+    params::with_temp_db(admin, |p| async move {
+        let mut s = connect(&p).await;
+        let trigger = "CREATE TRIGGER tulka_ddl ON DATABASE FOR CREATE_PROCEDURE AS\nBEGIN\n  PRINT 'trigger says'\n  RAISERROR('trigger error', 16, 1)\nEND";
+        let (result, _) = collect(s.as_mut(), trigger).await;
+        result.unwrap();
+
+        // Two lines of comment, so the module's own text starts on line 3.
+        let (_, events) = collect(
+            s.as_mut(),
+            "-- one\n-- two\nCREATE PROCEDURE dbo.tulka_px AS\nSELECT 1",
+        )
+        .await;
+        let print = events.iter().find_map(|ev| match ev {
+            ExecEvent::Message {
+                kind: MessageKind::Info,
+                text,
+                line,
+            } if text == "trigger says" => Some(*line),
+            _ => None,
+        });
+        assert_eq!(print, Some(None), "{events:?}");
+        let (text, line) = first_error(&events);
+        assert_eq!(line, None, "{events:?}");
+        assert!(
+            text.contains("trigger error") && text.contains("Procedure tulka_ddl, line 4"),
+            "{text}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn messages_from_inside_a_module_have_no_editor_line() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let sql = "CREATE PROCEDURE #tulka_talks AS\nBEGIN\n  PRINT 'inside'\n  RAISERROR('low', 10, 1)\nEND\nGO\nPRINT 'outside'\nEXEC #tulka_talks";
+    let (result, events) = collect(s.as_mut(), sql).await;
+    result.unwrap();
+    let info = |wanted: &str| {
+        events.iter().find_map(|ev| match ev {
+            ExecEvent::Message {
+                kind: MessageKind::Info,
+                text,
+                line,
+            } if text == wanted => Some(*line),
+            _ => None,
+        })
+    };
+    assert_eq!(info("outside"), Some(Some(7)), "{events:?}");
+    assert_eq!(info("inside"), Some(None), "{events:?}");
+    assert_eq!(info("low"), Some(None), "{events:?}");
+}
+
+#[tokio::test]
+async fn dynamic_sql_errors_past_the_batch_have_no_editor_line() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let sql = "DECLARE @s nvarchar(max) = N'SELECT 1' + CHAR(10) + CHAR(10) + CHAR(10) + N'SELECT 1/0'; EXEC(@s)";
+    let (result, events) = collect(s.as_mut(), sql).await;
+    assert!(result.is_err());
+    assert_eq!(first_error(&events).1, None, "{events:?}");
+}
+
+#[tokio::test]
+async fn announced_database_uses_the_catalog_spelling() {
+    let Some(mut p) = test_params() else { return };
+    p.database = Some("TEMPDB".into());
+    let mut s = connect(&p).await;
+
+    // As open_session does right after connecting.
+    assert_eq!(s.current_database().await.unwrap(), "tempdb");
+    assert_eq!(s.announced_database().as_deref(), Some("tempdb"));
+
+    let (result, _) = collect(s.as_mut(), "USE master").await;
+    result.unwrap();
+    assert_eq!(s.announced_database().as_deref(), Some("master"));
+}
+
+#[tokio::test]
+async fn use_inside_a_script_is_announced_without_a_query() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let announced = s.announced_database();
+    assert_eq!(announced.as_deref(), Some("master"));
+
+    let (result, _) = collect(s.as_mut(), "USE model\nGO\nSELECT 1\nGO\nUSE tempdb").await;
+    result.unwrap();
+    assert_eq!(s.announced_database().as_deref(), Some("tempdb"));
+    assert_eq!(s.current_database().await.unwrap(), "tempdb");
+}
+
+#[tokio::test]
 async fn error_reports_editor_line() {
     let Some(p) = test_params() else { return };
     let mut s = connect(&p).await;
