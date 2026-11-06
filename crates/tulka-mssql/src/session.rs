@@ -89,6 +89,10 @@ pub struct MssqlSession {
     /// learned on first use.
     single_database: Option<bool>,
 }
+    /// What `DB_NAME()` returned when the client announced the database under
+    /// the spelling in `.0`. The login ENVCHANGE echoes the name as the client
+    /// or the login wrote it (`TEMPDB`), which is not the catalog's spelling.
+    database_spelling: Option<(String, String)>,
 
 /// The default SQL Server port. With a named instance it means "ask SQL
 /// Server Browser for the instance's port".
@@ -167,6 +171,7 @@ pub async fn connect(p: &ConnectParams) -> Result<MssqlSession, DriverError> {
         cancel_requested: Arc::new(AtomicBool::new(false)),
         single_database: None,
     })
+        database_spelling: None,
 }
 
 fn config(p: &ConnectParams, target: &Target, timeout: Option<Duration>) -> Config {
@@ -341,7 +346,7 @@ impl MssqlSession {
     ) -> Result<Vec<Row>, DriverError> {
         let client = self.client.as_mut().ok_or_else(closed)?;
         let result = async { client.query(sql, params).await?.into_first_result().await }.await;
-        result.map_err(|e| self.fail(request_error(e, |_| None)))
+        result.map_err(|e| self.fail(request_error(e, &Site::NONE)))
     }
 
     /// Whether the server hosts a single database (`EngineEdition` 5).
@@ -623,7 +628,14 @@ impl Session for MssqlSession {
     }
 
     async fn current_database(&mut self) -> Result<String, DriverError> {
-        self.query_string("SELECT DB_NAME()").await
+        let name = self.query_string("SELECT DB_NAME()").await?;
+        let announced = self
+            .client
+            .as_ref()
+            .and_then(|c| c.database())
+            .map(str::to_string);
+        self.database_spelling = announced.map(|announced| (announced, name.clone()));
+        Ok(name)
     }
 
     fn announced_database(&self) -> Option<String> {

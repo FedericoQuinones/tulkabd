@@ -414,6 +414,21 @@ async fn module_errors_name_the_procedure_and_do_not_jump() {
 }
 
 #[tokio::test]
+async fn announced_database_uses_the_catalog_spelling() {
+    let Some(mut p) = test_params() else { return };
+    p.database = Some("TEMPDB".into());
+    let mut s = connect(&p).await;
+
+    // As open_session does right after connecting.
+    assert_eq!(s.current_database().await.unwrap(), "tempdb");
+    assert_eq!(s.announced_database().as_deref(), Some("tempdb"));
+
+    let (result, _) = collect(s.as_mut(), "USE master").await;
+    result.unwrap();
+    assert_eq!(s.announced_database().as_deref(), Some("master"));
+}
+
+#[tokio::test]
 async fn use_inside_a_script_is_announced_without_a_query() {
     let Some(p) = test_params() else { return };
     let mut s = connect(&p).await;
