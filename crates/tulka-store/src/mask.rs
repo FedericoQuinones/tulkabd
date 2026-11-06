@@ -250,15 +250,26 @@ fn mask_depth(sql: &str, depth: usize, vars: &HashSet<String>) -> String {
     // The token of a secret value written at sig position `i`: a literal, a
     // double-quoted literal, a hashed `0x...` value or an encrypted literal.
     // Never `NULL` or a variable.
-    let secret_value = |i: usize| -> Option<usize> {
-        let &t = sig.get(i)?;
+    // A chain `'a' + 'b'` gives all its literals.
+    let secret_values = |i: usize| -> Vec<usize> {
+        let Some(&t) = sig.get(i) else {
+            return Vec::new();
+        };
         let tk = &toks[t];
         match tk.kind {
-            Kind::Str => Some(t),
-            Kind::Ident if sql[tk.lo..].starts_with('"') => Some(t),
-            Kind::Word if is_hex(&sql[tk.lo..tk.hi]) => Some(t),
-            Kind::Punct => encrypt_form(i).map(|(lit, _)| lit),
-            _ => None,
+            Kind::Str => {
+                let mut lits = vec![t];
+                let mut q = i + 1;
+                while is_punct(q, '+') && is_str(q + 1) {
+                    lits.push(sig[q + 1]);
+                    q += 2;
+                }
+                lits
+            }
+            Kind::Ident if sql[tk.lo..].starts_with('"') => vec![t],
+            Kind::Word if is_hex(&sql[tk.lo..tk.hi]) => vec![t],
+            Kind::Punct => encrypt_form(i).map(|(lit, _)| lit).into_iter().collect(),
+            _ => Vec::new(),
         }
     };
 
@@ -284,7 +295,7 @@ fn mask_depth(sql: &str, depth: usize, vars: &HashSet<String>) -> String {
                 }
             }
             if is_punct(q, '=') {
-                if let Some(lit) = secret_value(q + 1) {
+                for lit in secret_values(q + 1) {
                     masked[lit] = true;
                 }
             }
@@ -296,7 +307,7 @@ fn mask_depth(sql: &str, depth: usize, vars: &HashSet<String>) -> String {
         // WORD = '...'
         if t.kind == Kind::Word && SECRET_KEYWORDS.contains(&n.as_str()) {
             if is_punct(p + 1, '=') {
-                if let Some(lit) = secret_value(p + 2) {
+                for lit in secret_values(p + 2) {
                     masked[lit] = true;
                 }
             }
@@ -341,12 +352,47 @@ fn mask_depth(sql: &str, depth: usize, vars: &HashSet<String>) -> String {
                     start = true;
                     continue;
                 } else if start && arg == at && toks[sig[q]].kind == Kind::Str {
-                    if is_punct(q + 1, ',') || is_punct(q + 1, ')') {
-                        masked[sig[q]] = true;
+                    let lits = secret_values(q);
+                    let after = q + 2 * lits.len() - 1;
+                    if is_punct(after, ',') || is_punct(after, ')') {
+                        for lit in lits {
+                            masked[lit] = true;
+                        }
                     }
                     break;
                 }
                 start = false;
+            }
+            continue;
+        }
+
+        // sp_executesql @stmt, N'@p sysname', N'value': positional values
+        // belong to the parameters declared in the second argument.
+        if n == "sp_executesql" {
+            let (mut q, mut k) = (p + 1, 0);
+            let mut declared: Vec<String> = Vec::new();
+            while let Some(&a) = sig.get(q) {
+                if toks[a].kind == Kind::Var && is_punct(q + 1, '=') {
+                    break;
+                }
+                if toks[a].kind == Kind::Str {
+                    if k == 1 {
+                        declared = declared_params(&sql[toks[a].start..toks[a].end]);
+                    } else if k >= 2
+                        && declared
+                            .get(k - 2)
+                            .is_some_and(|name| secret_var(name, vars))
+                    {
+                        masked[a] = true;
+                    }
+                }
+                q += 1;
+                if is_punct(q, ',') {
+                    q += 1;
+                    k += 1;
+                } else {
+                    break;
+                }
             }
             continue;
         }
@@ -418,23 +464,60 @@ fn mask_depth(sql: &str, depth: usize, vars: &HashSet<String>) -> String {
                 out.push_str(&sql[t.end..t.hi]);
             }
             Kind::Word if masked[i] => out.push_str(if is_hex(text) { "0x***" } else { MASK }),
-            // An unterminated block comment runs to the end of the text; what
-            // is in it may still be a secret.
-            Kind::Comment
-                if text.starts_with("/*") && !(text.len() >= 4 && text.ends_with("*/")) =>
-            {
-                out.push_str("/*");
-                out.push_str(&mask_depth(&text[2..], depth, vars));
-            }
+            Kind::Comment => out.push_str(&mask_comment(text, depth, vars)),
             _ => out.push_str(text),
         }
     }
     out
 }
 
-/// `0x` followed by at least one more char: a hashed password.
+/// `0x` followed by at least one more char: a hashed password. Compared as
+/// bytes, since the word may start with a multi-byte char.
 fn is_hex(word: &str) -> bool {
-    word.len() > 2 && word[..2].eq_ignore_ascii_case("0x")
+    word.len() > 2
+        && word
+            .as_bytes()
+            .get(..2)
+            .is_some_and(|b| b.eq_ignore_ascii_case(b"0x"))
+}
+
+/// A comment may hold commented-out SQL with a secret in it. Its body is
+/// masked like any other text, one level deeper like dynamic SQL, so nested
+/// comments cannot recurse without bound.
+fn mask_comment(text: &str, depth: usize, vars: &HashSet<String>) -> String {
+    if depth >= MAX_DEPTH {
+        return text.to_string();
+    }
+    if let Some(body) = text.strip_prefix("--") {
+        return format!("--{}", mask_depth(body, depth + 1, vars));
+    }
+    // A block comment may be unterminated, running to the end of the text.
+    let body = &text[2..];
+    match body.strip_suffix("*/") {
+        Some(body) => format!("/*{}*/", mask_depth(body, depth + 1, vars)),
+        None => format!("/*{}", mask_depth(body, depth + 1, vars)),
+    }
+}
+
+/// The parameter names (lowercase, no `@`) of a `sp_executesql` declaration
+/// list such as `@a int, @b nvarchar(10) OUTPUT`.
+fn declared_params(decl: &str) -> Vec<String> {
+    let (mut names, mut level, mut expect) = (Vec::new(), 0, true);
+    for t in lex(decl) {
+        let text = &decl[t.lo..t.hi];
+        match t.kind {
+            Kind::Space | Kind::Comment => {}
+            Kind::Var if expect && level == 0 => {
+                names.push(text[1..].to_ascii_lowercase());
+                expect = false;
+            }
+            Kind::Punct if text == "(" => level += 1,
+            Kind::Punct if text == ")" && level > 0 => level -= 1,
+            Kind::Punct if text == "," && level == 0 => expect = true,
+            _ => expect = false,
+        }
+    }
+    names
 }
 
 /// Masks what a string literal that is not a secret itself may carry: SQL run
@@ -444,15 +527,16 @@ fn mask_literal(content: &str, depth: usize, vars: &HashSet<String>) -> String {
         let inner = content.replace("''", "'");
         let masked = mask_depth(&inner, depth + 1, vars);
         if masked != inner {
-            return mask_conn_string(&masked.replace('\'', "''"));
+            return mask_conn_string(&masked.replace('\'', "''"), true);
         }
     }
-    mask_conn_string(content)
+    mask_conn_string(content, false)
 }
 
 /// Masks the value of `Password=` / `PWD=` keys in a connection string given
-/// as the (still quote-escaped) content of a literal.
-fn mask_conn_string(s: &str) -> String {
+/// as the (still quote-escaped) content of a literal. `is_sql` is set when
+/// the literal is dynamic SQL, where `password = @p` is a variable.
+fn mask_conn_string(s: &str, is_sql: bool) -> String {
     let lower = s.to_ascii_lowercase();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -469,10 +553,10 @@ fn mask_conn_string(s: &str) -> String {
                 let value = &s[value_at..];
                 let lead = value.len() - value.trim_start().len();
                 let v = value_at + lead;
-                // A variable (`password = @p`) is not a value, and a value
-                // that is already masked stays as it is.
-                let probe = s[v..].trim_start_matches(['\'', '"', '{']);
-                if !s[v..].starts_with('@') && !probe.starts_with(MASK) {
+                if !(is_sql && s[v..].starts_with('@'))
+                    && !is_sql_variable(&s[v..], ws > 0 && lead > 0)
+                    && !is_masked(&s[v..])
+                {
                     let end = value_end(&s[v..]) + v;
                     out.push_str(&s[i..v]);
                     out.push_str(MASK);
@@ -486,6 +570,27 @@ fn mask_conn_string(s: &str) -> String {
         i += c.len_utf8();
     }
     out
+}
+
+/// `@name` followed by a space, `)` or `,` (or ending the text, when written
+/// `password = @p`): SQL such as `password = @p AND`,
+/// not a connection string value. `Password=@Secr3t;` is a value.
+fn is_sql_variable(v: &str, spaced: bool) -> bool {
+    let Some(rest) = v.strip_prefix('@') else {
+        return false;
+    };
+    let rest = rest.trim_start_matches(is_word_char);
+    // At the very end only the spaced form `password = @p` reads as SQL.
+    (rest.is_empty() && spaced)
+        || rest.starts_with(|c: char| c.is_whitespace() || c == ')' || c == ',')
+}
+
+/// Exactly `***`, plain or inside the delimiters a value may have.
+fn is_masked(v: &str) -> bool {
+    let probe = v.trim_start_matches(['\'', '"', '{']);
+    probe
+        .strip_prefix(MASK)
+        .is_some_and(|rest| !rest.starts_with(is_word_char))
 }
 
 /// Length of a connection string value at the start of `v`: braced or
@@ -580,7 +685,7 @@ mod tests {
 
     #[test]
     fn commented_out_or_quoted_keyword_is_not_a_secret() {
-        let sql = "-- PASSWORD = 'x'\nSELECT 'PASSWORD' /* PASSWORD = 'y' */, [password]";
+        let sql = "SELECT 'PASSWORD', [password], \"password\"";
         assert_eq!(m(sql), sql);
     }
 
@@ -854,8 +959,10 @@ mod tests {
             m("SELECT 1 /* CREATE LOGIN x WITH PASSWORD = 'p'"),
             "SELECT 1 /* CREATE LOGIN x WITH PASSWORD = '***'"
         );
-        let closed = "SELECT 1 /* PASSWORD = 'p' */";
-        assert_eq!(m(closed), closed);
+        assert_eq!(
+            m("SELECT 1 /* PASSWORD = 'p' */"),
+            "SELECT 1 /* PASSWORD = '***' */"
+        );
     }
 
     #[test]
@@ -870,5 +977,111 @@ mod tests {
             let once = m(sql);
             assert_eq!(m(&once), once, "{sql}");
         }
+    }
+
+    #[test]
+    fn closed_comments_are_masked_too() {
+        assert_eq!(
+            m("-- PASSWORD = 'x'\nSELECT 1 /* old: SECRET = 's' */"),
+            "-- PASSWORD = '***'\nSELECT 1 /* old: SECRET = '***' */"
+        );
+        let plain = "-- just a note\nSELECT 1 /* nothing */";
+        assert_eq!(m(plain), plain);
+    }
+
+    #[test]
+    fn multi_byte_words_do_not_panic() {
+        for sql in [
+            "SELECT @password = 密码 FROM 用户",
+            "UPDATE 用户 SET password = 新密码列",
+            "SELECT 'é' + 'ü', @pwd = é, PASSWORD = ñandú",
+            "DECLARE @pw nvarchar = 中",
+            "SELECT 0é, 0x, 0xé",
+        ] {
+            assert_eq!(m(sql), sql, "{sql}");
+        }
+    }
+
+    #[test]
+    fn deep_nesting_does_not_overflow_a_small_stack() {
+        let inputs = vec![
+            "/*".repeat(50_000),
+            "'".repeat(50_000),
+            "EXEC('".repeat(20_000),
+            "/*'".repeat(30_000) + &"EXEC('".repeat(10_000),
+            format!(
+                "{}PASSWORD = 'x'{}",
+                "/*".repeat(10_000),
+                "*/".repeat(10_000)
+            ),
+            "-- ".repeat(20_000) + "/*" + &"'".repeat(1001),
+            "(".repeat(50_000) + &"ENCRYPTBYPASSPHRASE(".repeat(5_000),
+        ];
+        let handle = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                for sql in &inputs {
+                    mask_secrets(sql);
+                }
+            })
+            .unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn nested_comments_are_masked_down_to_a_bounded_depth() {
+        assert_eq!(
+            m("/* a /* b PASSWORD = 'p' */ c */"),
+            "/* a /* b PASSWORD = '***' */ c */"
+        );
+    }
+
+    #[test]
+    fn connection_string_with_a_variable_like_value_is_masked() {
+        assert_eq!(
+            m("SELECT 'Server=s;User ID=u;Password=@Secr3t;'"),
+            "SELECT 'Server=s;User ID=u;Password=***;'"
+        );
+        assert_eq!(m("SELECT 'Password=@Secr3t'"), "SELECT 'Password=***'");
+    }
+
+    #[test]
+    fn only_an_exact_mask_is_left_alone() {
+        assert_eq!(m("'Password=***real;x=1'"), "'Password=***;x=1'");
+        assert_eq!(m("'Password={***real};x=1'"), "'Password=***;x=1'");
+        let masked = "'Password=***;x=1'";
+        assert_eq!(m(masked), masked);
+    }
+
+    #[test]
+    fn concatenated_literals_in_secret_positions() {
+        assert_eq!(
+            m("SET @pwd = N'a' + N'b' + N'c'"),
+            "SET @pwd = N'***' + N'***' + N'***'"
+        );
+        assert_eq!(
+            m("CREATE LOGIN x WITH PASSWORD = 'a' + 'b', DEFAULT_DATABASE = d"),
+            "CREATE LOGIN x WITH PASSWORD = '***' + '***', DEFAULT_DATABASE = d"
+        );
+        assert_eq!(
+            m("SELECT ENCRYPTBYPASSPHRASE(N'a' + N'b', 'text')"),
+            "SELECT ENCRYPTBYPASSPHRASE(N'***' + N'***', 'text')"
+        );
+        let other = "SET @name = 'a' + 'b'";
+        assert_eq!(m(other), other);
+    }
+
+    #[test]
+    fn positional_sp_executesql_values_follow_the_declared_names() {
+        assert_eq!(
+            m("EXEC sp_executesql N'CREATE LOGIN x WITH PASSWORD = @p', N'@p sysname', N'S3cret!'"),
+            "EXEC sp_executesql N'CREATE LOGIN x WITH PASSWORD = @p', N'@p sysname', N'***'"
+        );
+        assert_eq!(
+            m("EXEC sp_executesql N'SELECT 1', N'@id int, @pass nvarchar(20) OUTPUT', 5, N'S3cret!'"),
+            "EXEC sp_executesql N'SELECT 1', N'@id int, @pass nvarchar(20) OUTPUT', 5, N'***'"
+        );
+        let plain = "EXEC sp_executesql N'SELECT @a', N'@a nvarchar(5)', N'hello'";
+        assert_eq!(m(plain), plain);
     }
 }

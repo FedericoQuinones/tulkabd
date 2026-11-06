@@ -289,6 +289,15 @@ fn checkpoint(conn: &Connection) {
     let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
 }
 
+/// Stored in place of a statement the masker failed on, so a bug in it can
+/// neither lose the entry nor store the text unchecked.
+const NOT_STORED: &str = "-- SQL not stored: it could not be checked for passwords";
+
+/// Runs `mask`; if it panics, returns the placeholder.
+fn masked_or_redacted(mask: impl FnOnce() -> String + std::panic::UnwindSafe) -> String {
+    std::panic::catch_unwind(mask).unwrap_or_else(|_| NOT_STORED.to_string())
+}
+
 /// Cuts `sql` to at most `MAX_LOGGED_SQL_BYTES`, on a char boundary.
 fn cap_sql(sql: &str) -> (&str, bool) {
     if sql.len() <= MAX_LOGGED_SQL_BYTES {
@@ -331,7 +340,7 @@ fn insert_run(conn: &Connection, run: &NewRun) -> Result<RunLogEntry, String> {
     // can never leave the start of a secret. Masking can make the text longer,
     // hence the second cut.
     let (head, cut) = cap_sql(&run.sql);
-    let masked = crate::mask::mask_secrets(head);
+    let masked = masked_or_redacted(|| crate::mask::mask_secrets(head));
     let (sql, cut_again) = cap_sql(&masked);
     let sql_truncated = cut || cut_again;
     let client: Option<String> = run
@@ -728,6 +737,15 @@ mod tests {
         let entry = store.insert(&run(&sql, 1)).unwrap();
         assert!(entry.sql.len() <= MAX_LOGGED_SQL_BYTES);
         assert!(entry.sql_truncated);
+    }
+
+    #[test]
+    fn a_failing_masker_stores_the_placeholder() {
+        assert_eq!(masked_or_redacted(|| "ok".to_string()), "ok");
+        assert_eq!(
+            masked_or_redacted(|| panic!("masker bug")),
+            "-- SQL not stored: it could not be checked for passwords"
+        );
     }
 
     #[test]
