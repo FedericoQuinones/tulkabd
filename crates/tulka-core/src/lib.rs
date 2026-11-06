@@ -28,7 +28,7 @@ pub use driver::{
     AI_APPLICATION_NAME, APPLICATION_NAME,
 };
 pub use error::DriverError;
-pub use export::{estimate_tokens, to_ai, to_excel_tsv};
+pub use export::{estimate_tokens, to_ai, to_excel_tsv, to_excel_value};
 pub use guard::{GuardFinding, GuardKind};
 pub use locale::{decimal_separator_for, system_decimal_separator};
 pub use meta::{

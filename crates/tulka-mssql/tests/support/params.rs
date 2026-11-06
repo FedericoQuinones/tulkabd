@@ -64,6 +64,8 @@ pub async fn collect(
     session: &mut dyn Session,
     sql: &str,
 ) -> (Result<(), DriverError>, Vec<ExecEvent>) {
+    // What the app does before each run.
+    session.reset_cancel();
     collect_with(|tx| session.execute(sql, tx)).await
 }
 

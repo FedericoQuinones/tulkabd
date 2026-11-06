@@ -35,6 +35,12 @@ pub fn to_excel_tsv<R: AsRef<[Value]>>(columns: &[Column], rows: &[R], decimal: 
     out
 }
 
+/// The text of one value for pasting into a single Excel cell: no header and
+/// no line ending. Quoted only if it holds a tab, a line break or a quote.
+pub fn to_excel_value(value: &Value, decimal: char) -> String {
+    excel_cell(value, decimal)
+}
+
 /// Compact text for pasting into an LLM prompt: headers once, `\n` line
 /// endings, numbers with `.` and no trailing zeros.
 pub fn to_ai<R: AsRef<[Value]>>(columns: &[Column], rows: &[R]) -> String {
@@ -196,6 +202,14 @@ fn quote_if(t: &str, needs_quotes: impl Fn(char) -> bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excel_value_is_bare() {
+        assert_eq!(to_excel_value(&Value::Int(42), '.'), "42");
+        assert_eq!(to_excel_value(&Value::Float(1.5), ','), "1,5");
+        assert_eq!(to_excel_value(&Value::Text("a\tb".into()), '.'), "\"a\tb\"");
+        assert_eq!(to_excel_value(&Value::Null, '.'), "");
+    }
 
     fn cols(n: &[&str]) -> Vec<Column> {
         n.iter()

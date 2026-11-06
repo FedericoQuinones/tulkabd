@@ -229,6 +229,12 @@ pub enum UiEvent {
     RowsAffected {
         count: u64,
     },
+    /// `times` consecutive statements affected `count` rows in total (merged
+    /// so a loop of inserts does not send one event each).
+    RowsAffectedMany {
+        count: u64,
+        times: u32,
+    },
     BatchDone {
         batch: u32,
     },
@@ -282,6 +288,10 @@ pub struct RunSummary {
     /// `blocked` or `needsConfirmation`.
     #[serde(default)]
     pub findings: Vec<GuardFinding>,
+    /// The session's database after the run (a `USE` in the script changes
+    /// it); `None` when it could not be read or the run did not execute.
+    #[serde(default)]
+    pub database: Option<String>,
 }
 
 /// Returned by `open_session`.
@@ -302,6 +312,10 @@ pub struct SaveConnectionResult {
     pub connection: ConnectionConfig,
     /// The password could not be stored because there is no usable keychain.
     pub keyring_unavailable: bool,
+    /// A password that no longer applies could not be removed from the
+    /// unavailable keychain (entry `tulkabd` / the connection id).
+    #[serde(default)]
+    pub secret_orphaned: bool,
 }
 
 /// Text format of `copy_results`: `"excel"` or `"ai"`.
@@ -383,6 +397,10 @@ mod tests {
                 json!({"kind": "rowsAffected", "count": 3}),
             ),
             (
+                UiEvent::RowsAffectedMany { count: 9, times: 3 },
+                json!({"kind": "rowsAffectedMany", "count": 9, "times": 3}),
+            ),
+            (
                 UiEvent::BatchDone { batch: 2 },
                 json!({"kind": "batchDone", "batch": 2}),
             ),
@@ -430,10 +448,11 @@ mod tests {
             finished_at: "2026-10-21T14:03:00.123Z".into(),
             outcome: RunOutcome::Cancelled,
             findings: vec![],
+            database: Some("sales".into()),
         };
         assert_eq!(
             to_json(&s),
-            json!({"elapsedMs": 42, "finishedAt": "2026-10-21T14:03:00.123Z", "outcome": "cancelled", "findings": []})
+            json!({"elapsedMs": 42, "finishedAt": "2026-10-21T14:03:00.123Z", "outcome": "cancelled", "findings": [], "database": "sales"})
         );
         for (o, text) in [
             (RunOutcome::Ok, "ok"),
@@ -474,10 +493,11 @@ mod tests {
         let r = SaveConnectionResult {
             connection: c.clone(),
             keyring_unavailable: true,
+            secret_orphaned: false,
         };
         assert_eq!(
             to_json(&r),
-            json!({"connection": to_json(&c), "keyringUnavailable": true})
+            json!({"connection": to_json(&c), "keyringUnavailable": true, "secretOrphaned": false})
         );
         assert_eq!(to_json(&r)["connection"]["passwordSaved"], json!(false));
     }

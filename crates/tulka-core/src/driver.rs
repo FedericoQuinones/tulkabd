@@ -143,6 +143,9 @@ pub trait Session: Send {
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError>;
     async fn use_database(&mut self, name: &str) -> Result<(), DriverError>;
     async fn current_database(&mut self) -> Result<String, DriverError>;
+    /// Forgets a cancel requested earlier, so it does not stop the next
+    /// `execute`. Called before the cancel handle is published for a run.
+    fn reset_cancel(&mut self) {}
     /// Every object of `database` with the columns of its tables and views.
     async fn snapshot(&mut self, database: &str) -> Result<DatabaseSnapshot, DriverError>;
     /// Columns, foreign keys and indexes of one table.

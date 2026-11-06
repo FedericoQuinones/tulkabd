@@ -123,6 +123,11 @@ pub struct TabState {
     pub session: Option<Box<dyn Session>>,
     /// The running query's cancel handle; `Some` only during `run_query`.
     pub cancel: Option<Arc<dyn CancelHandle>>,
+    /// A `run_query` is starting: the pane shows "running" but the cancel
+    /// handle is not published yet. Only then is a Stop remembered.
+    pub starting: bool,
+    /// A Stop arrived while `starting`; the run applies it as it starts.
+    pub stop_pending: bool,
     /// One buffer per result index of the last run.
     pub results: Vec<SharedBuffer>,
     /// The connection was lost; commands fail with `"disconnected"` until

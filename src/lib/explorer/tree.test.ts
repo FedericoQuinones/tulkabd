@@ -453,7 +453,7 @@ test("changing a connection's server or deleting it drops what was read for it",
   expect(Object.keys(explorer.objects)).toContain(group);
 
   seed();
-  vi.mocked(ipc.deleteConnection).mockResolvedValue();
+  vi.mocked(ipc.deleteConnection).mockResolvedValue(false);
   vi.mocked(ipc.listConnections).mockResolvedValue([sales, billing]);
   await connections.remove("c2");
   expect(Object.keys(explorer.objects)).toEqual([other]);
@@ -712,7 +712,7 @@ test("a database known only from search hits is not shown as indexing", async ()
 });
 
 test("deleting a connection unbinds the tabs that used it", async () => {
-  vi.mocked(ipc.deleteConnection).mockResolvedValue();
+  vi.mocked(ipc.deleteConnection).mockResolvedValue(false);
   const spy = vi.spyOn(tabs, "unbindConnection");
   expect(await explorer.deleteConnection(local.id)).toBe(true);
   expect(spy).toHaveBeenCalledWith(local.id);

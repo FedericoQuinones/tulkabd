@@ -28,6 +28,12 @@ test("rowsAffected becomes an info message", () => {
   expect(b.messages).toEqual([{ kind: "info", text: "(3 rows affected)", line: null }]);
 });
 
+test("rowsAffectedMany becomes one info message with the total and the statement count", () => {
+  const b = body();
+  reduceEvent(b, { kind: "rowsAffectedMany", count: 2000, times: 1000 }, 0);
+  expect(b.messages).toEqual([{ kind: "info", text: "(2000 rows affected in total, 1000 statements)", line: null }]);
+});
+
 test("disconnected event flags the pane and adds the lost-connection message once", () => {
   const b = body();
   reduceEvent(b, { kind: "disconnected", reason: "x" }, 0);

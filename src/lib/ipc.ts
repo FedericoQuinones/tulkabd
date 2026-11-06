@@ -66,6 +66,7 @@ export type UiEvent =
   | { kind: "rowCount"; index: number; total: number; truncated: boolean; memoryCut: boolean }
   | { kind: "message"; messageKind: MessageKind; text: string; line: number | null }
   | { kind: "rowsAffected"; count: number }
+  | { kind: "rowsAffectedMany"; count: number; times: number }
   | { kind: "batchDone"; batch: number }
   | { kind: "disconnected"; reason: string };
 
@@ -78,6 +79,8 @@ export interface ServerInfo {
 export interface SaveConnectionResult {
   connection: ConnectionConfig;
   keyringUnavailable: boolean;
+  /** A password that no longer applies could not be removed from the unavailable keychain. */
+  secretOrphaned?: boolean;
 }
 export interface SessionInfo {
   server: ServerInfo;
@@ -100,6 +103,8 @@ export interface RunSummary {
   outcome: "ok" | "error" | "cancelled" | "disconnected" | "blocked" | "needsConfirmation";
   /** The dangerous statements found; empty unless the outcome is `blocked` or `needsConfirmation`. */
   findings: GuardFinding[];
+  /** The session's database after the run (a `USE` in the script changes it); absent when unknown. */
+  database?: string | null;
 }
 export type Selection =
   | { kind: "all" }
@@ -282,7 +287,7 @@ export const listConnections = () => invoke<ConnectionConfig[]>("list_connection
 export const saveConnection = (conn: ConnectionConfig, password?: string) =>
   invoke<SaveConnectionResult>("save_connection", { conn, password: password ?? null });
 
-export const deleteConnection = (id: string) => invoke<void>("delete_connection", { id });
+export const deleteConnection = (id: string) => invoke<boolean>("delete_connection", { id });
 
 export const testConnection = (conn: ConnectionConfig, password?: string) =>
   invoke<ServerInfo>("test_connection", { conn, password: password ?? null });
