@@ -157,3 +157,33 @@ test("an empty filter result shows the notice and no rows", async () => {
   expect(items()).toHaveLength(0);
   expect(document.querySelector(".none")).not.toBeNull();
 });
+
+test("a reveal is not undone when rows change before its scroll event arrives", async () => {
+  await scrollTo(1000 * ROW);
+  explorer.focusKey = "f2500";
+  await tick();
+  await tick();
+  // No scroll event is dispatched: the move came from code.
+  explorer.folders = [...explorer.folders, { id: "zz", name: "ZZZZ", parentId: null }];
+  await settle();
+  expect(tree().scrollTop).toBeGreaterThan(2400 * ROW);
+  expect(indexes()).toContain(2500);
+});
+
+test("a list that shrinks under the scroll position renders its end at once", async () => {
+  await scrollTo(2000 * ROW);
+  explorer.folders = many(50);
+  await tick();
+  flushSync();
+  expect(items().length).toBeGreaterThan(0);
+  expect(indexes()).toContain(49);
+});
+
+test("clicking a row does not scroll it", async () => {
+  await scrollTo(10 * ROW + 10);
+  const top = tree().scrollTop;
+  const edge = items().find((el) => el.dataset.index === "10")!;
+  edge.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await settle();
+  expect(tree().scrollTop).toBe(top);
+});

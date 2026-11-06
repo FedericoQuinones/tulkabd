@@ -66,9 +66,12 @@
   /** The first visible row and how far into it the view starts, to hold still when rows above change. */
   let anchor: { key: string; delta: number } | null = null;
 
-  const geo = $derived<ScrollGeometry>({ total: rows.length, rowH, bodyH: viewportH });
   // An unmeasured tree (not laid out yet) still renders a screenful.
-  const range = $derived(visibleRange(scrollTop, viewportH || UNMEASURED_HEIGHT, rowH, rows.length, OVERSCAN));
+  const bodyH = $derived(viewportH || UNMEASURED_HEIGHT);
+  const geo = $derived<ScrollGeometry>({ total: rows.length, rowH, bodyH });
+  // A list that shrank under the scroll position shows its end at once, without waiting for the
+  // browser's clamp (and its scroll event).
+  const range = $derived(visibleRange(Math.min(scrollTop, maxVirtualTop(geo)), bodyH, rowH, rows.length, OVERSCAN));
   const page = $derived(Math.max(1, Math.floor(viewportH / rowH) - 1));
   const positions = $derived(siblingPositions(rows));
   /**
@@ -98,6 +101,8 @@
     treeEl.scrollTop = real;
     realTop = treeEl.scrollTop;
     scrollTop = isScaled(geo) ? v : realTop;
+    // The scroll event of this move comes later: until then the anchor must already be the new one.
+    takeAnchor();
   }
 
   function takeAnchor() {
@@ -147,7 +152,15 @@
     untrack(() => {
       const held = anchor;
       void tick().then(() => {
-        if (list !== explorer.rows) return;
+        if (list !== explorer.rows || !treeEl) return;
+        // The element's own position is the live one; if it is not what we last saw, the user is
+        // scrolling right now and its scroll event will say where.
+        const live = toVirtualTop(treeEl.scrollTop, geo);
+        if (Math.abs(live - scrollTop) > 1 && programmatic === null) return;
+        if (scrollTop > maxVirtualTop(geo)) {
+          setScroll(scrollTop);
+          return;
+        }
         if (held) {
           const i = list.findIndex((r) => r.key === held.key);
           if (i >= 0 && i * rowH + held.delta !== scrollTop) setScroll(i * rowH + held.delta);
@@ -157,11 +170,18 @@
     });
   });
 
+  /** Set when a pointer press is about to move the focus: a row under the pointer must not scroll away from it. */
+  let focusByPointer = false;
+
   // A row that takes the focus (keyboard, a new connection, a reveal from elsewhere) is scrolled to.
   $effect(() => {
     const key = explorer.focusKey;
     if (key === null) return;
     untrack(() => {
+      if (focusByPointer) {
+        focusByPointer = false;
+        return;
+      }
       void tick().then(() => {
         const i = explorer.rows.findIndex((r) => r.key === key);
         if (i >= 0 && key === explorer.focusKey) reveal(i);
@@ -275,6 +295,7 @@
   }
 
   function onrowclick(row: Row) {
+    focusByPointer = explorer.focusKey !== row.key;
     explorer.focusKey = row.key;
     if (row.expandable) explorer.toggle(row.key);
     else if (row.kind === "savedQuery") void explorer.openSavedQuery(row.connectionId, row.database, row.name);

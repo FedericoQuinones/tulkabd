@@ -125,10 +125,10 @@
       }}
     />
   {:else if row.kind === "folder" || row.kind === "connection"}
-    <span class="lab">{name}</span>
+    <span class="lab" title={name}>{name}</span>
     {#if row.kind === "connection" && row.status === "connecting"}<span class="tail">{t("explorer.connecting")}</span>{/if}
   {:else if row.kind === "database"}
-    <span class="lab">{row.db.name}</span>
+    <span class="lab" title={row.db.name}>{row.db.name}</span>
     {#if row.db.noAccess}
       <span class="tail">{t("explorer.noAccess")}</span>
     {:else if row.failed}
@@ -143,11 +143,11 @@
     <span class="lab">{t("explorer.group.saved")}</span>
     <span class="tail num">{row.count}</span>
   {:else if row.kind === "savedQuery"}
-    <span class="lab">{row.name}</span>
+    <span class="lab" title={row.name}>{row.name}</span>
   {:else if row.kind === "object"}
-    <span class="lab">{row.object.schema}.{row.object.name}</span>
+    <span class="lab" title="{row.object.schema}.{row.object.name}">{row.object.schema}.{row.object.name}</span>
   {:else if row.kind === "column"}
-    <span class="lab">{row.column.name}</span>
+    <span class="lab" title={row.column.name}>{row.column.name}</span>
     {#if row.column.primaryKey}<span class="pk">{t("explorer.pk")}</span>{/if}
     <span class="tail mono">{row.column.typeName}</span>
     <span class="nul mono">{row.column.nullable ? t("explorer.null") : t("explorer.notNull")}</span>

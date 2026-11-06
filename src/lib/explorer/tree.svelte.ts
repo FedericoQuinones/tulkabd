@@ -857,7 +857,6 @@ class ExplorerStore {
       await connections.remove(id);
       void tabs.unbindConnection(id);
       this.expanded.delete(id);
-      this.forgetExpanded(id);
       delete this.conns[id];
     });
   }
