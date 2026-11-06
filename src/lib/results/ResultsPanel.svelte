@@ -4,7 +4,10 @@
   import * as ipc from "../ipc";
   import type { ViewSpec } from "../ipc";
   import type { PaneState } from "../pane/pane.svelte";
+  import ContextMenu from "../explorer/ContextMenu.svelte";
+  import type { MenuItem } from "../explorer/tree";
   import CopyToast from "./CopyToast.svelte";
+  import { defaultSaveName } from "./saveName";
   import MessagesView from "./MessagesView.svelte";
   import RunLogView from "../runlog/RunLogView.svelte";
   import { runLog } from "../runlog/runlog.svelte";
@@ -139,6 +142,64 @@
     flushFilter();
   });
 
+  const SAVE_FORMATS: ipc.SaveFormat[] = ["csv", "tsv", "json"];
+  let saveMenu = $state<{ x: number; y: number; trigger: HTMLElement } | null>(null);
+  const saveItems: MenuItem[] = SAVE_FORMATS.map((f) => ({
+    id: f,
+    label: t(`results.saveAs.${f}`),
+    run: () => save(f),
+  }));
+
+  function openSaveMenu(e: MouseEvent) {
+    const trigger = e.currentTarget as HTMLElement;
+    const r = trigger.getBoundingClientRect();
+    saveMenu = { x: r.left, y: r.bottom + 2, trigger };
+  }
+
+  function closeSaveMenu(refocus: boolean) {
+    const trigger = saveMenu?.trigger;
+    saveMenu = null;
+    if (refocus) trigger?.focus();
+  }
+
+  /** Writes the rows the grid shows (its sort and filter apply, as for Copy) to a file the user picks. */
+  async function save(format: ipc.SaveFormat) {
+    if (index === null || !result || pane.saving || viewPending || !ready) return;
+    const run = pane.runCount;
+    pane.saving = true;
+    let notice: { text: string; error: boolean } | null = null;
+    try {
+      const out = await ipc.saveResults(pane.tabId, index, format, defaultSaveName(format), t(`results.saveFilter.${format}`));
+      // Cancelling the dialog does nothing.
+      if (out !== null) {
+        // A run started meanwhile: the file still holds the earlier result, so the toast says so.
+        const text = savedText(out);
+        notice = { text: run === pane.runCount ? text : `${text} · ${t("results.toast.savedPrevious")}`, error: false };
+      }
+    } catch (e) {
+      const error = String(e) === "busy" ? t("results.saveBusy") : String(e);
+      notice = { text: t("results.saveFailed", { error }), error: true };
+    } finally {
+      pane.saving = false;
+    }
+    // Always through the pane: this panel may be gone by now (another tab was shown, maybe shown
+    // again by a newer panel), and the one panel that is mounted shows it once, in the effect below.
+    if (notice) pane.saveNotice = notice;
+  }
+
+  function savedText(out: ipc.SaveOutcome) {
+    const base = out.rows === 1 ? t("results.toast.savedOne") : t("results.toast.saved", { rows: count(out.rows) });
+    const notes = [out.truncated ? t("results.toast.savedCut") : "", out.capped ? t("results.toast.savedCapped") : ""].filter(Boolean);
+    return notes.length ? `${base} · ${notes.join(" · ")}` : base;
+  }
+
+  $effect(() => {
+    const notice = pane.saveNotice;
+    if (!notice) return;
+    pane.saveNotice = null;
+    untrack(() => show(notice.text, notice.error));
+  });
+
   async function copy(mode: "excel" | "ai") {
     // While a view is on its way, the selection's row indexes may belong to either order.
     if (index === null || !result || copying || viewPending) return;
@@ -211,6 +272,15 @@
     {/if}
     <button type="button" class="ghost" disabled={!result || viewPending} onclick={() => copy("excel")}>{t("results.copy")}</button>
     <button type="button" class="ghost" disabled={!result || viewPending} onclick={() => copy("ai")}>{t("results.copyAi")}</button>
+    <button
+      type="button"
+      class="ghost"
+      aria-haspopup="menu"
+      aria-expanded={saveMenu !== null}
+      disabled={!result || viewPending || !ready || pane.saving}
+      title={ready ? undefined : t("results.saveWhenDone")}
+      onclick={openSaveMenu}>{pane.saving ? t("results.saving") : t("results.save")}</button
+    >
   </div>
   <div class="body">
     {#if active === "runlog"}
@@ -222,10 +292,15 @@
         <ResultGrid bind:this={grid} tabId={pane.tabId} resultIndex={index} {result} {view} {ready}
           final={pane.status !== "running" || pane.results.length > index + 1}
           oncopy={() => copy("excel")}
+          onsave={save}
+          canSave={ready && !viewPending && !pane.saving}
           scroll={pane.gridScroll[index]}
           onscrolled={(top) => (pane.gridScroll[index] = top)}
         />
       {/key}
+    {/if}
+    {#if saveMenu}
+      <ContextMenu items={saveItems} x={saveMenu.x} y={saveMenu.y} label={t("results.saveMenu")} onclose={closeSaveMenu} />
     {/if}
     {#if toast}<CopyToast text={toast.text} error={toast.error} />{/if}
   </div>

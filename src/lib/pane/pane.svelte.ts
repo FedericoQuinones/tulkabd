@@ -82,6 +82,14 @@ export class PaneState {
   /** Shown after "don't ask again" turns the guard off; `undoGuardOff` restores `previous`. */
   guardToast = $state<{ text: string; connectionId: string; previous: GuardLevel } | null>(null);
 
+  /** True while a result is being saved to a file (the dialog and the write). */
+  saving = $state(false);
+  /**
+   * The outcome of a save that ended while the results panel was not shown (it remounts when the
+   * tab changes); the panel shows it when it comes back, so a failure is never lost.
+   */
+  saveNotice = $state<{ text: string; error: boolean } | null>(null);
+
   /** True while a use_database call is in flight (Run and the database select are disabled). */
   switching = $state(false);
 
