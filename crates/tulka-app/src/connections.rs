@@ -451,12 +451,30 @@ pub async fn list_expanded(state: &AppState) -> Vec<String> {
     state.connections.lock().await.expanded.clone()
 }
 
-/// Stores which tree nodes are open. The ids are the UI's; duplicates are
-/// dropped.
+/// Most open tree nodes kept; the UI sends far fewer, this only bounds the file.
+const MAX_EXPANDED: usize = 1000;
+/// Longest id kept, in bytes. Row keys name a database or object, so they stay short.
+const MAX_EXPANDED_LEN: usize = 1024;
+
+/// The ids to store: duplicates and over-long ids dropped, the newest
+/// [`MAX_EXPANDED`] kept (the UI sends the oldest first).
+fn bounded_expanded(ids: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut kept: Vec<String> = ids
+        .into_iter()
+        .filter(|i| i.len() <= MAX_EXPANDED_LEN && seen.insert(i.clone()))
+        .collect();
+    if kept.len() > MAX_EXPANDED {
+        kept.drain(..kept.len() - MAX_EXPANDED);
+    }
+    kept
+}
+
+/// Stores which tree nodes are open. The ids are the UI's; duplicates and
+/// over-long ids are dropped, and the list is capped.
 pub async fn set_expanded(state: &AppState, ids: Vec<String>) -> Result<(), String> {
     mutate(state, |config| {
-        let mut seen = std::collections::HashSet::new();
-        config.expanded = ids.into_iter().filter(|i| seen.insert(i.clone())).collect();
+        config.expanded = bounded_expanded(ids);
         Ok(())
     })
     .await
@@ -623,6 +641,18 @@ mod tests {
         c.encrypt = true;
         c.trust_server_certificate = false;
         c
+    }
+
+    #[test]
+    fn expanded_ids_are_deduplicated_and_bounded() {
+        let ids = vec!["a".to_string(), "b".into(), "a".into(), "x".repeat(2000)];
+        assert_eq!(bounded_expanded(ids), vec!["a", "b"]);
+
+        let many: Vec<String> = (0..MAX_EXPANDED + 5).map(|i| format!("id{i}")).collect();
+        let kept = bounded_expanded(many);
+        assert_eq!(kept.len(), MAX_EXPANDED);
+        assert_eq!(kept[0], "id5");
+        assert_eq!(kept.last().unwrap(), &format!("id{}", MAX_EXPANDED + 4));
     }
 
     #[test]
