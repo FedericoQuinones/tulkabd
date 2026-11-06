@@ -37,7 +37,7 @@ enum Behavior {
 
 #[derive(Default)]
 struct Inner {
-    databases: Vec<String>,
+    databases: Mutex<Vec<String>>,
     single_database: bool,
     behaviors: Mutex<HashMap<String, Behavior>>,
     /// Databases passed to `snapshot`, in call order.
@@ -59,12 +59,17 @@ struct Inner {
     connect_release: Notify,
     /// When set as a `connect` starts, that connect fails (after the gate).
     fail_connect: AtomicBool,
+    /// When set, `structure` signals `structure_entered` and waits for
+    /// `structure_release`.
+    gate_structure: AtomicBool,
+    structure_entered: Notify,
+    structure_release: Notify,
 }
 
 impl Inner {
     fn new(databases: &[&str]) -> Self {
         Inner {
-            databases: databases.iter().map(|d| d.to_string()).collect(),
+            databases: Mutex::new(databases.iter().map(|d| d.to_string()).collect()),
             ..Inner::default()
         }
     }
@@ -174,7 +179,7 @@ impl Session for MetaSession {
     }
 
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError> {
-        Ok(self.inner.databases.clone())
+        Ok(self.inner.databases.lock().unwrap().clone())
     }
 
     async fn use_database(&mut self, name: &str) -> Result<(), DriverError> {
@@ -223,6 +228,10 @@ impl Session for MetaSession {
         _name: &str,
     ) -> Result<TableStructure, DriverError> {
         self.check_bound(database);
+        if self.inner.gate_structure.load(Ordering::SeqCst) {
+            self.inner.structure_entered.notify_one();
+            self.inner.structure_release.notified().await;
+        }
         Ok(TableStructure {
             columns: vec![column("id", true)],
             foreign_keys: vec![],
@@ -1291,4 +1300,149 @@ async fn clearing_the_metadata_cache_forgets_disconnected_connections_and_reinde
     .expect("the cache was not cleared");
     assert_eq!(after.hits.len(), 1);
     assert!(explorer_databases(&f.state, "c2".into()).await.is_empty());
+}
+
+#[tokio::test]
+async fn disconnect_does_not_wait_for_a_stuck_live_call() {
+    let f = fx(Inner::new(&["a"]));
+    save(&f, conn("c1", "Main", None)).await;
+    connect_explorer(&f.state, "c1".into(), None).await.unwrap();
+    f.events.wait_idle("c1").await;
+    f.driver.gate_structure.store(true, Ordering::SeqCst);
+    let state = f.state.clone();
+    let call = tokio::spawn(async move {
+        table_structure(
+            &state,
+            "c1".into(),
+            "a".into(),
+            "dbo".into(),
+            "Pedidos".into(),
+        )
+        .await
+    });
+    tokio::time::timeout(TIMEOUT, f.driver.structure_entered.notified())
+        .await
+        .unwrap();
+
+    tokio::time::timeout(TIMEOUT, disconnect_explorer(&f.state, "c1".into()))
+        .await
+        .expect("disconnect waited for the live call")
+        .unwrap();
+    // The session closes once the call lets go of it.
+    assert_eq!(f.driver.open.load(Ordering::SeqCst), 1);
+    f.driver.structure_release.notify_one();
+    let _ = call.await;
+    tokio::time::timeout(TIMEOUT, async {
+        while f.driver.open.load(Ordering::SeqCst) != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the session was never closed");
+}
+
+#[tokio::test]
+async fn a_full_refresh_lists_the_databases_again() {
+    let f = fx(Inner::new(&["a", "b"]));
+    save(&f, conn("c1", "Main", None)).await;
+    connect_explorer(&f.state, "c1".into(), None).await.unwrap();
+    f.events.wait_idle("c1").await;
+    assert_eq!(search(&f, "V_b").await.hits.len(), 1);
+
+    // `b` is dropped and `c` created on the server.
+    *f.driver.databases.lock().unwrap() = vec!["a".into(), "c".into()];
+    refresh_metadata(&f.state, "c1".into(), None).await.unwrap();
+    let hit = search_settled(&f, "V_c", 1).await;
+    assert_eq!(hit.hits.len(), 1);
+    f.events.wait_idle("c1").await;
+
+    let names: Vec<String> = explorer_databases(&f.state, "c1".into())
+        .await
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert_eq!(names, ["a", "c"]);
+    assert!(search(&f, "V_b").await.hits.is_empty());
+    // A database that is not exposed any more cannot be refreshed.
+    assert_eq!(
+        refresh_metadata(&f.state, "c1".into(), Some("b".into()))
+            .await
+            .unwrap_err(),
+        NOT_FOUND
+    );
+
+    *f.driver.databases.lock().unwrap() = vec!["a".into()];
+    clear_metadata_cache(&f.state).await;
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            let names: Vec<String> = explorer_databases(&f.state, "c1".into())
+                .await
+                .into_iter()
+                .map(|d| d.name)
+                .collect();
+            if names == ["a"] {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the vanished database stayed");
+}
+
+#[tokio::test]
+async fn moving_an_offline_connection_forgets_its_cached_metadata() {
+    let f = indexed(Inner::new(&["a", "b"])).await;
+    disconnect_explorer(&f.state, "c1".into()).await.unwrap();
+    assert_eq!(explorer_databases(&f.state, "c1".into()).await.len(), 2);
+
+    // Renaming keeps the cache: the server is the same.
+    let mut c = conn("c1", "Renamed", None);
+    save(&f, c.clone()).await;
+    assert_eq!(explorer_databases(&f.state, "c1".into()).await.len(), 2);
+    assert_eq!(search(&f, "V_a").await.hits.len(), 1);
+
+    // Another host: the old server's databases must not linger.
+    c.server = "other-host".into();
+    save(&f, c.clone()).await;
+    assert!(explorer_databases(&f.state, "c1".into()).await.is_empty());
+    assert!(search(&f, "V_a").await.hits.is_empty());
+}
+
+#[tokio::test]
+async fn editing_a_connected_connections_server_resets_it() {
+    let f = indexed(Inner::new(&["a"])).await;
+    // A rename changes nothing about the server.
+    save(&f, conn("c1", "Renamed", None)).await;
+    assert_eq!(f.driver.open.load(Ordering::SeqCst), 1);
+    assert_eq!(explorer_databases(&f.state, "c1".into()).await.len(), 1);
+
+    let mut c = conn("c1", "Renamed", None);
+    c.port = 1444;
+    save(&f, c).await;
+    assert_eq!(f.driver.open.load(Ordering::SeqCst), 0);
+    assert!(explorer_databases(&f.state, "c1".into()).await.is_empty());
+    assert!(search(&f, "V_a").await.hits.is_empty());
+    assert_eq!(
+        refresh_metadata(&f.state, "c1".into(), None)
+            .await
+            .unwrap_err(),
+        NOT_CONNECTED
+    );
+    assert_eq!(
+        status_events(&f, "c1").last().unwrap(),
+        &(ConnectionStatus::Disconnected, None)
+    );
+
+    // The new server is unreachable: nothing of the old one comes back.
+    f.driver.fail_connect.store(true, Ordering::SeqCst);
+    assert!(connect_explorer(&f.state, "c1".into(), None).await.is_err());
+    assert!(explorer_databases(&f.state, "c1".into()).await.is_empty());
+    assert!(search(&f, "V_a").await.hits.is_empty());
+
+    // When it answers, the cache fills from it.
+    f.driver.fail_connect.store(false, Ordering::SeqCst);
+    connect_explorer(&f.state, "c1".into(), None).await.unwrap();
+    f.events.wait_idle("c1").await;
+    assert_eq!(explorer_databases(&f.state, "c1".into()).await.len(), 1);
 }

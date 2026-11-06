@@ -122,7 +122,15 @@ pub async fn save_connection(
         }
         None => {}
     }
-
+    // Cached databases and objects belong to a server: once the connection
+    // points elsewhere, drop its Explorer and forget them.
+    if let Some(old) = existing.map(|i| &previous.connections[i]) {
+        let moved =
+            old.server != conn.server || old.port != conn.port || old.databases != conn.databases;
+        if moved {
+            crate::explorer::reset_for_new_server(state, &conn.id).await;
+        }
+    }
     if guard_changed {
         crate::guard::set_guard_off_for_session(state, &conn.id, false);
     }

@@ -90,7 +90,18 @@ pub struct MssqlSession {
     /// Whether the server hosts a single database (Azure SQL Database),
     /// learned on first use.
     single_database: Option<bool>,
+    /// The metadata settings ([`META_SETUP`]) were applied to this session.
+    metadata_ready: bool,
 }
+
+/// Run once on a session that reads the catalog: dirty reads, so a
+/// transaction that has created or altered an object does not block the
+/// scan, and a lock timeout as a backstop for any other blocking.
+///
+/// Dirty catalog reads can catch DDL in flight: an object that is then rolled
+/// back shows as a ghost until the next index of that database, and a read
+/// torn by the DDL (error 601) fails only that database's snapshot.
+const META_SETUP: &str = "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; SET LOCK_TIMEOUT 10000";
 
 /// The default SQL Server port. With a named instance it means "ask SQL
 /// Server Browser for the instance's port".
@@ -168,6 +179,7 @@ pub async fn connect(p: &ConnectParams) -> Result<MssqlSession, DriverError> {
         cancel,
         cancel_requested: Arc::new(AtomicBool::new(false)),
         single_database: None,
+        metadata_ready: false,
     })
 }
 
@@ -341,6 +353,10 @@ impl MssqlSession {
     /// catalog views. On a single-database server the current database is
     /// the only one, and `database` is ignored.
     async fn catalog(&mut self, database: &str) -> Result<(String, String), DriverError> {
+        if !self.metadata_ready {
+            self.query_rows(META_SETUP).await?;
+            self.metadata_ready = true;
+        }
         let single = self.is_single_database().await?;
         let database = if single {
             self.query_string("SELECT DB_NAME()").await?

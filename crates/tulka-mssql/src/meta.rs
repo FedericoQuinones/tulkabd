@@ -82,18 +82,18 @@ pub fn columns_sql(prefix: &str, one: bool) -> String {
         "SELECT s.name, o.name, c.name, t.name, CAST(t.is_user_defined AS bit), \
            CAST(c.max_length AS int), CAST(c.precision AS int), CAST(c.scale AS int), \
            c.is_nullable, \
-           CAST(CASE WHEN EXISTS (SELECT 1 \
-               FROM {prefix}sys.index_columns ic \
-               JOIN {prefix}sys.indexes i \
-                 ON i.object_id = ic.object_id AND i.index_id = ic.index_id \
-               WHERE i.is_primary_key = 1 \
-                 AND ic.object_id = c.object_id AND ic.column_id = c.column_id) \
-             THEN 1 ELSE 0 END AS bit), \
+           CAST(CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END AS bit), \
            dc.definition \
          FROM {prefix}sys.objects o \
          JOIN {prefix}sys.schemas s ON s.schema_id = o.schema_id \
          JOIN {prefix}sys.columns c ON c.object_id = o.object_id \
          JOIN {prefix}sys.types t ON t.user_type_id = c.user_type_id \
+         LEFT JOIN (SELECT ic.object_id, ic.column_id \
+                    FROM {prefix}sys.index_columns ic \
+                    JOIN {prefix}sys.indexes i \
+                      ON i.object_id = ic.object_id AND i.index_id = ic.index_id \
+                    WHERE i.is_primary_key = 1) pk \
+           ON pk.object_id = c.object_id AND pk.column_id = c.column_id \
          LEFT JOIN {prefix}sys.default_constraints dc \
            ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id \
          WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0 {filter} \

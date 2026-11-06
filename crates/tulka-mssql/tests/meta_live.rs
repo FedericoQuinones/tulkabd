@@ -271,3 +271,49 @@ async fn login_without_access_is_no_access() {
     }
     assert!(matches!(definition, Err(DriverError::NoAccess(_))));
 }
+
+#[tokio::test]
+async fn snapshot_is_not_blocked_by_an_open_transaction() {
+    let Some(p) = test_params() else { return };
+    let mut admin = connect(&p).await;
+    run(
+        admin.as_mut(),
+        "IF DB_ID('tulka_meta_lock') IS NOT NULL
+         BEGIN
+           ALTER DATABASE tulka_meta_lock SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+           DROP DATABASE tulka_meta_lock;
+         END
+         GO
+         CREATE DATABASE tulka_meta_lock",
+    )
+    .await;
+    // A transaction that created a table and has not committed yet.
+    let mut writer = connect(&p).await;
+    run(
+        writer.as_mut(),
+        "USE tulka_meta_lock
+         GO
+         BEGIN TRANSACTION
+         CREATE TABLE dbo.Pending(Id int)",
+    )
+    .await;
+
+    let mut s = connect(&p).await;
+    let snap = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        s.snapshot("tulka_meta_lock"),
+    )
+    .await
+    .expect("the catalog scan was blocked by an open transaction");
+    snap.unwrap();
+
+    run(writer.as_mut(), "ROLLBACK").await;
+    drop(writer);
+    drop(s);
+    run(
+        admin.as_mut(),
+        "ALTER DATABASE tulka_meta_lock SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+         DROP DATABASE tulka_meta_lock",
+    )
+    .await;
+}
