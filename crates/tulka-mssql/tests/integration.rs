@@ -461,6 +461,65 @@ async fn module_ddl_errors_keep_the_editor_line() {
 }
 
 #[tokio::test]
+async fn module_ddl_errors_survive_unclosed_text_and_a_late_create() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let cases = [
+        // An unclosed string or comment only fails the batch itself.
+        (
+            "CREATE PROCEDURE dbo.tulka_px AS\nBEGIN\n  SELECT 'abc\nEND",
+            3,
+        ),
+        (
+            "CREATE PROCEDURE dbo.tulka_px AS\nBEGIN\n  SELECT 1 /* x\nEND",
+            4,
+        ),
+        // "must be the first statement in a query batch".
+        ("SELECT 1\nCREATE PROCEDURE dbo.tulka_px AS SELECT 1", 2),
+    ];
+    for (sql, line) in cases {
+        let (result, events) = collect(s.as_mut(), sql).await;
+        assert!(result.is_err(), "{sql}");
+        assert_eq!(first_error(&events).1, Some(line), "{sql}\n{events:?}");
+    }
+}
+
+#[tokio::test]
+async fn messages_of_a_ddl_trigger_keep_their_own_module() {
+    let Some(admin) = test_params() else { return };
+    params::with_temp_db(admin, |p| async move {
+        let mut s = connect(&p).await;
+        let trigger = "CREATE TRIGGER tulka_ddl ON DATABASE FOR CREATE_PROCEDURE AS\nBEGIN\n  PRINT 'trigger says'\n  RAISERROR('trigger error', 16, 1)\nEND";
+        let (result, _) = collect(s.as_mut(), trigger).await;
+        result.unwrap();
+
+        // Two lines of comment, so the module's own text starts on line 3.
+        let (_, events) = collect(
+            s.as_mut(),
+            "-- one\n-- two\nCREATE PROCEDURE dbo.tulka_px AS\nSELECT 1",
+        )
+        .await;
+        let print = events.iter().find_map(|ev| match ev {
+            ExecEvent::Message {
+                kind: MessageKind::Info,
+                text,
+                line,
+            } if text == "trigger says" => Some(*line),
+            _ => None,
+        });
+        assert_eq!(print, Some(None), "{events:?}");
+        let (text, line) = first_error(&events);
+        assert_eq!(line, None, "{events:?}");
+        assert!(
+            text.contains("trigger error") && text.contains("Procedure tulka_ddl, line 4"),
+            "{text}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn messages_from_inside_a_module_have_no_editor_line() {
     let Some(p) = test_params() else { return };
     let mut s = connect(&p).await;

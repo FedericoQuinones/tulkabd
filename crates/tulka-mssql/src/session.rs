@@ -294,9 +294,9 @@ struct Site {
     start_line: u32,
     /// How many lines the batch has.
     lines: u32,
-    /// Whether the batch is `CREATE`/`ALTER` of a module: the server then
-    /// names the module in its errors, but counts lines from the batch start.
-    module_ddl: bool,
+    /// The (lowercase) name of the module the batch creates or alters: the
+    /// server names it in its errors, but counts lines from the batch start.
+    module: Option<String>,
 }
 
 impl Site {
@@ -304,14 +304,14 @@ impl Site {
     const NONE: Site = Site {
         start_line: 0,
         lines: 0,
-        module_ddl: false,
+        module: None,
     };
 
     fn of(batch: &Batch) -> Site {
         Site {
             start_line: batch.start_line,
             lines: batch.text.split('\n').count() as u32,
-            module_ddl: is_module_ddl(&batch.text),
+            module: module_name(&batch.text),
         }
     }
 
@@ -322,35 +322,93 @@ impl Site {
     /// lines. A number past the end of the batch comes from other text
     /// (dynamic SQL).
     fn message_line(&self, procedure: &str, line: u32) -> Option<u32> {
-        let own = procedure.is_empty() || self.module_ddl;
-        (own && line > 0 && line <= self.lines).then(|| self.start_line + line - 1)
+        (self.owns(procedure) && line > 0 && line <= self.lines).then(|| self.start_line + line - 1)
+    }
+
+    /// Whether a message from `procedure` counts lines of this batch: the
+    /// batch itself (empty name) or the module it creates. Another module,
+    /// such as a DDL trigger fired by the `CREATE`, counts its own lines.
+    fn owns(&self, procedure: &str) -> bool {
+        if procedure.is_empty() {
+            return true;
+        }
+        let Some(module) = &self.module else {
+            return false;
+        };
+        let reported = procedure.rsplit('.').next().unwrap_or(procedure);
+        let reported = unquote(reported).to_lowercase();
+        // The server pads the name of a local temporary procedure.
+        reported == *module || (module.starts_with('#') && reported.starts_with(module.as_str()))
     }
 }
 
-/// Whether the batch starts, after comments, with `CREATE`, `CREATE OR ALTER`
-/// or `ALTER` followed by `PROC`, `PROCEDURE`, `FUNCTION`, `TRIGGER` or `VIEW`.
-fn is_module_ddl(text: &str) -> bool {
-    let Ok(tokens) = lex(text) else { return false };
+/// `name` without the brackets or double quotes around it.
+fn unquote(name: &str) -> String {
+    for (open, close) in [('[', ']'), ('"', '"')] {
+        if let Some(inner) = name
+            .strip_prefix(open)
+            .and_then(|rest| rest.strip_suffix(close))
+        {
+            return inner.replace(&format!("{close}{close}"), &close.to_string());
+        }
+    }
+    name.to_string()
+}
+
+/// The lowercase name (last part, unquoted) of the module that `CREATE`,
+/// `CREATE OR ALTER` or `ALTER` + `PROC`, `PROCEDURE`, `FUNCTION`, `TRIGGER` or
+/// `VIEW` defines anywhere in the batch (a `CREATE` must be the first
+/// statement, but a batch that breaks that rule still gets the server's
+/// error). Text after an unclosed string or comment is ignored.
+fn module_name(text: &str) -> Option<String> {
+    let tokens = match lex(text) {
+        Ok(tokens) => tokens,
+        Err(at) => lex(&text[..at]).ok()?,
+    };
     let word = |i: usize| {
         tokens
             .get(i)
             .filter(|t| t.kind == Kind::Word)
             .map(|t| text[t.start..t.end].to_ascii_uppercase())
     };
-    let mut at = 1;
-    match word(0).as_deref() {
-        Some("CREATE") => {
-            if word(1).as_deref() == Some("OR") && word(2).as_deref() == Some("ALTER") {
-                at = 3;
+    let is_dot = |i: usize| {
+        tokens
+            .get(i)
+            .is_some_and(|t| t.kind == Kind::Punct && &text[t.start..t.end] == ".")
+    };
+    for i in 0..tokens.len() {
+        let mut at = i + 1;
+        match word(i).as_deref() {
+            Some("CREATE") => {
+                if word(at).as_deref() == Some("OR") && word(at + 1).as_deref() == Some("ALTER") {
+                    at += 2;
+                }
             }
+            Some("ALTER") => {}
+            _ => continue,
         }
-        Some("ALTER") => {}
-        _ => return false,
+        if !matches!(
+            word(at).as_deref(),
+            Some("PROC" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "VIEW")
+        ) {
+            continue;
+        }
+        // The name: parts joined by dots; the last one is the object's.
+        at += 1;
+        let mut last = None;
+        while let Some(t) = tokens.get(at) {
+            if !matches!(t.kind, Kind::Word | Kind::Quoted | Kind::Temp) {
+                break;
+            }
+            last = Some(unquote(&text[t.start..t.end]).to_lowercase());
+            if !is_dot(at + 1) {
+                break;
+            }
+            at += 2;
+        }
+        return last;
     }
-    matches!(
-        word(at).as_deref(),
-        Some("PROC" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "VIEW")
-    )
+    None
 }
 
 /// Maps an error of a running request; `site` turns a server line number into
@@ -375,11 +433,11 @@ fn request_error(e: TdsError, site: &Site) -> DriverError {
 /// counted from its own start (functions carry no name), so the line says
 /// nothing about the editor: it goes into the text and gets no jump. Errors
 /// of the batch itself have an empty procedure name, and compile errors of a
-/// module's own `CREATE`/`ALTER` batch name the module but count batch lines,
+/// module's own `CREATE`/`ALTER` batch name that module but count batch lines,
 /// so both keep their jump.
 fn error_site(error: &TokenError, site: &Site) -> (String, Option<u32>) {
     let procedure = error.procedure();
-    if procedure.is_empty() || site.module_ddl {
+    if site.owns(procedure) {
         return (
             error.message().to_string(),
             site.message_line(procedure, error.line()),
@@ -979,6 +1037,102 @@ mod params;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn module(sql: &str) -> Option<String> {
+        module_name(sql)
+    }
+
+    #[test]
+    fn module_name_finds_the_created_module() {
+        assert_eq!(
+            module("CREATE PROCEDURE dbo.p AS SELECT 1").as_deref(),
+            Some("p")
+        );
+        assert_eq!(module("create proc p as select 1").as_deref(), Some("p"));
+        assert_eq!(
+            module("CREATE OR ALTER FUNCTION f() RETURNS int AS BEGIN RETURN 1 END").as_deref(),
+            Some("f")
+        );
+        assert_eq!(module("ALTER VIEW v AS SELECT 1 a").as_deref(), Some("v"));
+        assert_eq!(
+            module("CREATE TRIGGER trg ON t AFTER INSERT AS SELECT 1").as_deref(),
+            Some("trg")
+        );
+    }
+
+    #[test]
+    fn module_name_skips_comments_and_unquotes_names() {
+        assert_eq!(
+            module("/* c */ -- x\nCREATE PROCEDURE [dbo].[My Proc] AS SELECT 1").as_deref(),
+            Some("my proc")
+        );
+        assert_eq!(
+            module("CREATE PROCEDURE \"db\".\"dbo\".\"P\"\"q\" AS SELECT 1").as_deref(),
+            Some("p\"q")
+        );
+        assert_eq!(
+            module("CREATE PROCEDURE srv.db.dbo.Three AS SELECT 1").as_deref(),
+            Some("three")
+        );
+        assert_eq!(
+            module("CREATE PROCEDURE #Temp AS SELECT 1").as_deref(),
+            Some("#temp")
+        );
+    }
+
+    #[test]
+    fn module_name_ignores_other_statements() {
+        assert_eq!(module("CREATE TABLE t(a int)"), None);
+        assert_eq!(module("ALTER TABLE t ADD b int"), None);
+        assert_eq!(module("ALTER DATABASE d SET RECOVERY SIMPLE"), None);
+        assert_eq!(module("SELECT 'CREATE PROCEDURE p'"), None);
+        assert_eq!(module("-- CREATE PROCEDURE p\nSELECT 1"), None);
+    }
+
+    #[test]
+    fn module_name_accepts_a_create_that_is_not_first() {
+        assert_eq!(
+            module("SELECT 1\nCREATE PROCEDURE dbo.px AS SELECT 1").as_deref(),
+            Some("px")
+        );
+    }
+
+    #[test]
+    fn module_name_survives_an_unclosed_string_or_comment() {
+        assert_eq!(
+            module("CREATE PROCEDURE dbo.px AS\nBEGIN\n  SELECT 'abc\nEND").as_deref(),
+            Some("px")
+        );
+        assert_eq!(
+            module("CREATE PROCEDURE dbo.px AS\nSELECT 1 /* x\nEND").as_deref(),
+            Some("px")
+        );
+        assert_eq!(module("SELECT 'abc"), None);
+    }
+
+    #[test]
+    fn a_site_owns_the_batch_and_the_module_it_creates() {
+        let site = Site {
+            start_line: 1,
+            lines: 5,
+            module: module("CREATE PROCEDURE dbo.px AS SELECT 1"),
+        };
+        assert!(site.owns(""));
+        assert!(site.owns("px"));
+        assert!(site.owns("dbo.PX"));
+        assert!(site.owns("[dbo].[px]"));
+        assert!(!site.owns("trg_audit"));
+        let temp = Site {
+            start_line: 1,
+            lines: 1,
+            module: module("CREATE PROCEDURE #t AS SELECT 1"),
+        };
+        assert!(temp.owns("#t_____________________000000000001"));
+        assert!(!Site::NONE.owns("px"));
+        assert_eq!(site.message_line("px", 3), Some(3));
+        assert_eq!(site.message_line("px", 6), None);
+        assert_eq!(site.message_line("other", 3), None);
+    }
 
     #[test]
     fn a_reset_browser_lookup_gets_the_browser_hint() {
