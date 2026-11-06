@@ -208,7 +208,9 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             // The clipboard plugin is torn down on `Exit`, so the secret copy
-            // is cleared as soon as the app starts to quit.
+            // is cleared as soon as the app starts to quit (not on Linux, see
+            // `clear_secret_copy_on_quit`).
+            #[cfg(not(target_os = "linux"))]
             match &event {
                 RunEvent::ExitRequested { .. } => commands::clear_secret_copy_on_quit(app, false),
                 RunEvent::Exit => commands::clear_secret_copy_on_quit(app, true),

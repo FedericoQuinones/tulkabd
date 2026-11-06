@@ -44,12 +44,16 @@ fn clear_secret_copy(app: &AppHandle) {
 }
 
 /// How long quitting waits for the clipboard before it carries on.
+#[cfg(not(target_os = "linux"))]
 const QUIT_CLEAR_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Called when the app is asked to quit, and again when it exits. The
-/// clipboard is read on a helper thread: on Linux the read can block while
-/// the main thread (which owns the WebView's clipboard) is waiting here, so
-/// quitting waits a moment and then goes on regardless.
+/// clipboard is read on a helper thread, so quitting waits a moment and then
+/// goes on regardless.
+///
+/// Not built on Linux: there the app itself serves the clipboard and the text
+/// goes away with it, while reading it during quit can block the main thread.
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn clear_secret_copy_on_quit(app: &AppHandle, exiting: bool) {
     if exiting {
         EXITING.store(true, Ordering::SeqCst);
