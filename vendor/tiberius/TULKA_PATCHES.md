@@ -36,8 +36,8 @@ publish. Run only the targets above.
 To move to a newer upstream release, copy the new crates.io source over this
 directory and re-apply the patches below (or drop the ones upstream now
 covers). The integration tests in `tests/tulka_patches.rs` describe the
-required behaviour and must keep passing. If upstream covers all three
-features, delete `vendor/tiberius` and point `crates/tulka-mssql` back at the
+required behaviour and must keep passing. If upstream covers all the
+patches, delete `vendor/tiberius` and point `crates/tulka-mssql` back at the
 crates.io release.
 
 ---
@@ -55,6 +55,7 @@ pub struct InfoMessage {
     pub class: u8,    // the server sends severity 10 as class 0
     pub message: String,
     pub line: u32,
+    pub procedure: String, // empty for the batch itself
 }
 ```
 
@@ -335,9 +336,16 @@ test.
 
 **What.** `Client::database(&self) -> Option<&str>` returns the database named
 by the last ENVCHANGE (type 1, Database) token the client has read: the one
-chosen at login, then every `USE` (also inside a script or a procedure). It
-is updated as the tokens are read, so it is right after a cancelled or failed
-request as well.
+chosen at login, then every `USE` the server answers (also inside a script).
+It is updated as the tokens are read, so it is right after a cancelled or
+failed request as well. A `USE` inside `EXEC('...')` or `sp_executesql` sends
+no ENVCHANGE and does not change the database either, so the value stays
+right. The name is spelled as the server sends it at login, which is how the
+client or the login wrote it, not necessarily the catalog's spelling.
+
+**Not covered.** A stream dropped mid-response discards the packets it has not
+parsed (`flush_stream`), which can lose a trailing ENVCHANGE. tulka only drops
+a stream on a mid-stream decode error.
 
 **Why.** Upstream decodes the token and drops it. A client that wants the
 current database after a `USE` would otherwise need a `SELECT DB_NAME()` round

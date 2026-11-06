@@ -112,6 +112,7 @@ async fn print_yields_info_item() {
     assert_eq!(infos[0].number, 0);
     assert_eq!(infos[0].class, 0);
     assert_eq!(infos[0].line, 1);
+    assert_eq!(infos[0].procedure, "");
 
     // RAISERROR with severity <= 10 is an informational message as well, and
     // carries its number, state and class.
