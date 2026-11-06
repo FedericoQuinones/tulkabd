@@ -476,6 +476,21 @@ test("the button shows Saving… and is disabled until the save ends", async () 
   expect(document.body.textContent).toContain("Saved · 1 row");
 });
 
+test("a save that ends after a new run still says it was saved, from the previous run", async () => {
+  let done!: (v: ipc.SaveOutcome) => void;
+  vi.mocked(ipc.saveResults).mockImplementation(() => new Promise((r) => (done = r)));
+  open();
+  await settle();
+  saveButton().click();
+  flushSync();
+  menuItem("CSV").click();
+  await settle();
+  pane.runCount++;
+  done({ rows: 1, truncated: false, capped: false });
+  await settle();
+  expect(document.body.textContent).toContain("Saved · 1 row · from the previous run");
+});
+
 test("a save that ends after the panel was closed shows its outcome when it comes back", async () => {
   let fail!: (e: unknown) => void;
   vi.mocked(ipc.saveResults).mockImplementation(() => new Promise((_, r) => (fail = r)));

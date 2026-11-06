@@ -171,7 +171,11 @@
     try {
       const out = await ipc.saveResults(pane.tabId, index, format, defaultSaveName(format), t(`results.saveFilter.${format}`));
       // Cancelling the dialog does nothing.
-      if (out !== null) notice = { text: savedText(out), error: false };
+      if (out !== null) {
+        // A run started meanwhile: the file still holds the earlier result, so the toast says so.
+        const text = savedText(out);
+        notice = { text: run === pane.runCount ? text : `${text} · ${t("results.toast.savedPrevious")}`, error: false };
+      }
     } catch (e) {
       const error = String(e) === "busy" ? t("results.saveBusy") : String(e);
       notice = { text: t("results.saveFailed", { error }), error: true };
@@ -180,7 +184,7 @@
     }
     // Always through the pane: this panel may be gone by now (another tab was shown, maybe shown
     // again by a newer panel), and the one panel that is mounted shows it once, in the effect below.
-    if (notice && (notice.error || run === pane.runCount)) pane.saveNotice = notice;
+    if (notice) pane.saveNotice = notice;
   }
 
   function savedText(out: ipc.SaveOutcome) {

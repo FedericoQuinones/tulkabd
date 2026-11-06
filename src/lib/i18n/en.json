@@ -278,6 +278,7 @@
   "results.saveWhenDone": "Saving is available when the run ends",
   "results.saveMenu": "Save format",
   "results.toast.saved": "Saved · {rows} rows",
+  "results.toast.savedPrevious": "from the previous run",
   "results.toast.savedCut": "the result was cut at its row or memory limit",
   "results.toast.savedCapped": "values over 1 MB were shortened",
   "results.saving": "Saving…",
