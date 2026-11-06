@@ -626,6 +626,10 @@ impl Session for MssqlSession {
 
     async fn transaction_count(&mut self) -> Result<u32, DriverError> {
         let rows = self.query_rows("SELECT @@TRANCOUNT").await?;
+    fn announced_database(&self) -> Option<String> {
+        self.client.as_ref()?.database().map(str::to_string)
+    }
+
         // No answer is not "no transaction": report it rather than let a close go ahead.
         let count = rows
             .first()

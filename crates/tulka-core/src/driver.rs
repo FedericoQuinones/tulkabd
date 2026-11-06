@@ -143,6 +143,11 @@ pub trait Session: Send {
     async fn list_databases(&mut self) -> Result<Vec<String>, DriverError>;
     async fn use_database(&mut self, name: &str) -> Result<(), DriverError>;
     async fn current_database(&mut self) -> Result<String, DriverError>;
+    /// The current database as the server last announced it on the wire, with
+    /// no round trip. `None` when the driver does not track it.
+    fn announced_database(&self) -> Option<String> {
+        None
+    }
     /// Forgets a cancel requested earlier, so it does not stop the next
     /// `execute`. Called before the cancel handle is published for a run.
     fn reset_cancel(&mut self) {}

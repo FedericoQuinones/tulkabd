@@ -380,6 +380,20 @@ async fn messages_report_editor_lines() {
 }
 
 #[tokio::test]
+async fn use_inside_a_script_is_announced_without_a_query() {
+    let Some(p) = test_params() else { return };
+    let mut s = connect(&p).await;
+
+    let announced = s.announced_database();
+    assert_eq!(announced.as_deref(), Some("master"));
+
+    let (result, _) = collect(s.as_mut(), "USE model\nGO\nSELECT 1\nGO\nUSE tempdb").await;
+    result.unwrap();
+    assert_eq!(s.announced_database().as_deref(), Some("tempdb"));
+    assert_eq!(s.current_database().await.unwrap(), "tempdb");
+}
+
+#[tokio::test]
 async fn error_reports_editor_line() {
     let Some(p) = test_params() else { return };
     let mut s = connect(&p).await;
