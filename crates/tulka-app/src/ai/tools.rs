@@ -190,6 +190,8 @@ fn kind_name(kind: ObjectKind) -> &'static str {
         ObjectKind::Table => "table",
         ObjectKind::View => "view",
         ObjectKind::Procedure => "procedure",
+        ObjectKind::Function => "function",
+        ObjectKind::Synonym => "synonym",
     }
 }
 
@@ -208,7 +210,7 @@ pub async fn search_objects_until(
     search_objects_text(s, req, cancelled).await.within_budget()
 }
 
-/// Finds tables, views and procedures (or columns) whose name contains every
+/// Finds tables, views, procedures, functions and synonyms (or columns) whose name contains every
 /// word of the query, among the connections shared with the AI. It reads the
 /// cache the app keeps, except for one named database that is not in it,
 /// which is read from the server.

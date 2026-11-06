@@ -4,16 +4,20 @@ use serde::{Deserialize, Serialize};
 
 /// Kind of a database object listed in the explorer.
 ///
-/// Serialized as a plain string: `"table"`, `"view"`, `"procedure"`.
+/// Serialized as a plain string: `"table"`, `"view"`, `"procedure"`,
+/// `"function"`, `"synonym"`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ObjectKind {
     Table,
     View,
     Procedure,
+    /// Scalar, inline table-valued, multi-statement table-valued or CLR.
+    Function,
+    Synonym,
 }
 
-/// A table, view or procedure.
+/// A table, view, procedure, function or synonym.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DbObject {

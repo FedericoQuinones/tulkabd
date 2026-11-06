@@ -955,7 +955,8 @@ pub async fn table_structure(
     state.explorer.live_result(&connection_id, epoch, result)
 }
 
-/// The source text of a view or procedure, read live; errors as
+/// The source text of a view, procedure or function (a synonym yields the
+/// statement that names its base object), read live; errors as
 /// [`table_structure`].
 pub async fn object_definition(
     state: &AppState,
@@ -990,7 +991,13 @@ pub async fn completion_metadata(
         .explorer
         .with_cache(move |cache| {
             let mut objects = Vec::new();
-            for kind in [ObjectKind::Table, ObjectKind::View, ObjectKind::Procedure] {
+            for kind in [
+                ObjectKind::Table,
+                ObjectKind::View,
+                ObjectKind::Procedure,
+                ObjectKind::Function,
+                ObjectKind::Synonym,
+            ] {
                 objects.extend(cache.objects(&connection_id, &database, kind));
             }
             let mut schemas: Vec<String> = objects.iter().map(|o| o.schema.clone()).collect();

@@ -165,7 +165,8 @@ pub trait Session: Send {
         schema: &str,
         name: &str,
     ) -> Result<TableStructure, DriverError>;
-    /// The source text of a view or procedure.
+    /// The source text of a view, procedure or function. For a synonym, the
+    /// `CREATE SYNONYM` statement, which names its base object.
     async fn definition(
         &mut self,
         database: &str,

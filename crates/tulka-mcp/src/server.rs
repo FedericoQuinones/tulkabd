@@ -25,6 +25,8 @@ enum KindParam {
     Table,
     View,
     Procedure,
+    Function,
+    Synonym,
 }
 
 impl From<KindParam> for ObjectKind {
@@ -33,6 +35,8 @@ impl From<KindParam> for ObjectKind {
             KindParam::Table => ObjectKind::Table,
             KindParam::View => ObjectKind::View,
             KindParam::Procedure => ObjectKind::Procedure,
+            KindParam::Function => ObjectKind::Function,
+            KindParam::Synonym => ObjectKind::Synonym,
         }
     }
 }
@@ -53,7 +57,7 @@ struct SearchObjectsParams {
     /// shared with you that tulkabd has indexed (a connection that selects
     /// databases is searched in those alone).
     database: Option<String>,
-    /// Only objects of this kind. Default: tables, views and procedures.
+    /// Only objects of this kind. Default: every kind (tables, views, procedures, functions and synonyms).
     kind: Option<KindParam>,
     /// Look in column names instead of object names.
     in_columns: Option<bool>,
@@ -187,7 +191,7 @@ impl TulkaServer {
     }
 
     #[tool(
-        description = "Find tables, views and procedures whose schema.name contains every word of the query (or, with in_columns, columns whose name does), from tulkabd's metadata cache."
+        description = "Find tables, views, procedures, functions and synonyms whose schema.name contains every word of the query (or, with in_columns, columns whose name does), from tulkabd's metadata cache."
     )]
     async fn search_objects(
         &self,

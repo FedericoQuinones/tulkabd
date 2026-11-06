@@ -11,7 +11,7 @@ use crate::private_file;
 
 /// Bump when the table layout changes; a mismatching file is discarded and
 /// rebuilt (it is only a cache).
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE databases (
@@ -52,7 +52,8 @@ const READ_BUSY_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_FOUND: usize = 5000;
 
 /// A database of a connection as cached. Serialized camelCase:
-/// `{"name", "noAccess", "indexedAt", "tables", "views", "procedures"}`.
+/// `{"name", "noAccess", "indexedAt", "tables", "views", "procedures", "functions",
+/// "synonyms"}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CachedDatabase {
@@ -64,6 +65,8 @@ pub struct CachedDatabase {
     pub tables: u32,
     pub views: u32,
     pub procedures: u32,
+    pub functions: u32,
+    pub synonyms: u32,
 }
 
 /// Metadata cache backed by SQLite. Every call is blocking: async callers
@@ -80,6 +83,8 @@ fn kind_str(k: ObjectKind) -> &'static str {
         ObjectKind::Table => "table",
         ObjectKind::View => "view",
         ObjectKind::Procedure => "procedure",
+        ObjectKind::Function => "function",
+        ObjectKind::Synonym => "synonym",
     }
 }
 
@@ -87,6 +92,8 @@ fn kind_from(s: &str) -> ObjectKind {
     match s {
         "view" => ObjectKind::View,
         "procedure" => ObjectKind::Procedure,
+        "function" => ObjectKind::Function,
+        "synonym" => ObjectKind::Synonym,
         _ => ObjectKind::Table,
     }
 }
@@ -424,7 +431,9 @@ impl MetaCache {
                 "SELECT d.name, d.no_access, d.indexed_at,
                     (SELECT count(*) FROM objects o WHERE o.connection_id = d.connection_id AND o.database = d.name AND o.kind = 'table'),
                     (SELECT count(*) FROM objects o WHERE o.connection_id = d.connection_id AND o.database = d.name AND o.kind = 'view'),
-                    (SELECT count(*) FROM objects o WHERE o.connection_id = d.connection_id AND o.database = d.name AND o.kind = 'procedure')
+                    (SELECT count(*) FROM objects o WHERE o.connection_id = d.connection_id AND o.database = d.name AND o.kind = 'procedure'),
+                    (SELECT count(*) FROM objects o WHERE o.connection_id = d.connection_id AND o.database = d.name AND o.kind = 'function'),
+                    (SELECT count(*) FROM objects o WHERE o.connection_id = d.connection_id AND o.database = d.name AND o.kind = 'synonym')
                  FROM databases d WHERE d.connection_id = ?1 ORDER BY d.name",
             )?;
             let rows = st.query_map([connection_id], |r| {
@@ -435,6 +444,8 @@ impl MetaCache {
                     tables: r.get(3)?,
                     views: r.get(4)?,
                     procedures: r.get(5)?,
+                    functions: r.get(6)?,
+                    synonyms: r.get(7)?,
                 })
             })?;
             rows.collect()
@@ -881,6 +892,32 @@ mod tests {
     }
 
     #[test]
+    fn a_cache_from_before_functions_is_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.db");
+        {
+            let raw = rusqlite::Connection::open(&p).unwrap();
+            raw.execute_batch("CREATE TABLE objects (id INTEGER PRIMARY KEY);")
+                .unwrap();
+            raw.pragma_update(None, "user_version", 1).unwrap();
+        }
+        let c = MetaCache::open(&p);
+        assert!(c.all_objects().is_empty());
+        let snapshot = DatabaseSnapshot {
+            objects: vec![
+                obj("dbo", "fn_Total", ObjectKind::Function),
+                obj("dbo", "Alias", ObjectKind::Synonym),
+            ],
+            columns: vec![],
+        };
+        c.replace_database("c1", "db", &snapshot, 1).unwrap();
+        assert_eq!(c.objects("c1", "db", ObjectKind::Function).len(), 1);
+        assert_eq!(c.objects("c1", "db", ObjectKind::Synonym).len(), 1);
+        let d = &c.databases("c1")[0];
+        assert_eq!((d.functions, d.synonyms), (1, 1));
+    }
+
+    #[test]
     fn forget_connection_only_that_one() {
         let c = MetaCache::in_memory();
         c.replace_database("c1", "db", &snap(), 1).unwrap();
@@ -926,10 +963,12 @@ mod tests {
             tables: 1,
             views: 2,
             procedures: 3,
+            functions: 4,
+            synonyms: 5,
         };
         assert_eq!(
             serde_json::to_value(&d).unwrap(),
-            serde_json::json!({"name": "db", "noAccess": true, "indexedAt": null, "tables": 1, "views": 2, "procedures": 3})
+            serde_json::json!({"name": "db", "noAccess": true, "indexedAt": null, "tables": 1, "views": 2, "procedures": 3, "functions": 4, "synonyms": 5})
         );
     }
 

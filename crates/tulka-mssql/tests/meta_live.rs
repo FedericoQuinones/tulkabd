@@ -57,6 +57,16 @@ GO
 CREATE VIEW dbo.vPedidos AS SELECT Id, Cliente FROM dbo.Pedidos
 GO
 CREATE PROCEDURE dbo.pTotal AS SELECT SUM(Total) FROM dbo.Pedidos
+GO
+CREATE FUNCTION dbo.fnDoble(@n int) RETURNS int AS BEGIN RETURN @n * 2 END
+GO
+CREATE FUNCTION dbo.fnDeCliente(@c nvarchar(50)) RETURNS TABLE
+AS RETURN SELECT Id, Total FROM dbo.Pedidos WHERE Cliente = @c
+GO
+CREATE FUNCTION dbo.fnLista() RETURNS @t TABLE(Id int, Cliente nvarchar(50), Total decimal(18,2))
+AS BEGIN INSERT @t SELECT Id, Cliente, Total FROM dbo.Pedidos; RETURN END
+GO
+CREATE SYNONYM dbo.synPedidos FOR dbo.Pedidos
 ";
 
 /// Creates the `tulka_meta` database once per test process.
@@ -87,7 +97,11 @@ async fn snapshot_lists_objects_and_columns() {
         vec![
             ("dbo".into(), "Order Details".into(), ObjectKind::Table),
             ("dbo".into(), "Pedidos".into(), ObjectKind::Table),
+            ("dbo".into(), "fnDeCliente".into(), ObjectKind::Function),
+            ("dbo".into(), "fnDoble".into(), ObjectKind::Function),
+            ("dbo".into(), "fnLista".into(), ObjectKind::Function),
             ("dbo".into(), "pTotal".into(), ObjectKind::Procedure),
+            ("dbo".into(), "synPedidos".into(), ObjectKind::Synonym),
             ("dbo".into(), "vPedidos".into(), ObjectKind::View),
             ("ventas".into(), "Pedidos_Año".into(), ObjectKind::Table),
         ]
@@ -116,6 +130,16 @@ async fn snapshot_lists_objects_and_columns() {
     // Views have columns too; procedures have none.
     assert_eq!(cols_of("vPedidos").len(), 2);
     assert!(snap.columns.iter().all(|(k, _)| *k != index_of("pTotal")));
+
+    // Table-valued functions expose their result columns; scalar functions
+    // and synonyms have none.
+    let names =
+        |name: &str| -> Vec<String> { cols_of(name).iter().map(|c| c.name.clone()).collect() };
+    assert_eq!(names("fnDeCliente"), ["Id", "Total"]);
+    assert_eq!(names("fnLista"), ["Id", "Cliente", "Total"]);
+    for none in ["fnDoble", "synPedidos"] {
+        assert!(snap.columns.iter().all(|(k, _)| *k != index_of(none)));
+    }
 }
 
 #[tokio::test]
@@ -162,7 +186,7 @@ async fn structure_reports_foreign_keys_and_indexes() {
 }
 
 #[tokio::test]
-async fn definition_reads_views_and_procedures() {
+async fn definition_reads_views_procedures_functions_and_synonyms() {
     let Some(p) = test_params() else { return };
     setup(&p).await;
     let mut s = connect(&p).await;
@@ -171,6 +195,19 @@ async fn definition_reads_views_and_procedures() {
     assert!(view.starts_with("CREATE VIEW"), "{view}");
     let proc = s.definition("tulka_meta", "dbo", "pTotal").await.unwrap();
     assert!(proc.starts_with("CREATE PROCEDURE"), "{proc}");
+    for name in ["fnDoble", "fnDeCliente", "fnLista"] {
+        let text = s.definition("tulka_meta", "dbo", name).await.unwrap();
+        assert!(text.starts_with("CREATE FUNCTION"), "{text}");
+    }
+    // A synonym has no source: it yields the statement naming its base object.
+    let synonym = s
+        .definition("tulka_meta", "dbo", "synPedidos")
+        .await
+        .unwrap();
+    assert_eq!(
+        synonym,
+        "CREATE SYNONYM [dbo].[synPedidos] FOR [dbo].[Pedidos]"
+    );
     // A table has no definition.
     assert!(s.definition("tulka_meta", "dbo", "Pedidos").await.is_err());
 }
