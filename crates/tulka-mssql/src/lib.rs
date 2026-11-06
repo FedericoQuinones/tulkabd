@@ -37,4 +37,8 @@ impl Driver for MssqlDriver {
     fn read_only_violation(&self, sql: &str) -> Option<ReadOnlyViolation> {
         readonly::violation(sql)
     }
+
+    fn referenced_databases(&self, sql: &str) -> Vec<String> {
+        readonly::referenced_databases(sql)
+    }
 }

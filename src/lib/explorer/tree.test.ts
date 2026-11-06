@@ -43,7 +43,7 @@ import {
   type MenuActions,
   type Row,
 } from "./tree";
-import { explorer } from "./tree.svelte";
+import { explorer, OBJECT_PAGE } from "./tree.svelte";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -312,6 +312,30 @@ test("indexProgress marks indexing and refreshes the counters", async () => {
   expect(counts).toEqual([12, 3, 4]);
 });
 
+test("a reindex during an object read triggers a second read", async () => {
+  explorer.expanded.add("c2");
+  explorer.expanded.add(keyOf.db("c2", "Ventas"));
+  const group = keyOf.group("c2", "Ventas", "table");
+  explorer.expanded.add(group);
+  const st = explorer.state("c2");
+  st.status = "connected";
+  st.databases = [db("Ventas")];
+  const o = (name: string) => ({ schema: "dbo", name, kind: "table" as const });
+  let finish!: () => void;
+  vi.mocked(ipc.explorerObjects)
+    .mockImplementationOnce(() => new Promise((r) => (finish = () => r([o("old")]))))
+    .mockResolvedValue([o("old"), o("new")]);
+  const first = explorer.loadObjects("c2", "Ventas", "table");
+  await flush();
+  // The reindex wrote the cache after the first read began.
+  explorer.handleEvent({ kind: "indexProgress", connectionId: "c2", database: "Ventas", done: true, noAccess: false });
+  finish();
+  await first;
+  await flush();
+  expect(ipc.explorerObjects).toHaveBeenCalledTimes(2);
+  expect(explorer.objects[group]).toEqual([o("old"), o("new")]);
+});
+
 test("a database whose snapshot failed shows an error, not indexing", async () => {
   explorer.expanded.add("c2");
   const st = explorer.state("c2");
@@ -385,6 +409,76 @@ test("tables load lazily and expand into columns", async () => {
   await explorer.expand(keyOf.object("c2", "Ventas", obj));
   expect(ipc.explorerColumns).toHaveBeenCalledWith("c2", "Ventas", "dbo", "Pedidos");
   expect(labels().slice(-5)).toEqual(["dbo.Pedidos", "col:Id", "col:Nota", "group:view", "group:procedure"]);
+});
+
+test("a group of thousands of objects shows a page at a time", async () => {
+  explorer.expanded.add("c2");
+  explorer.state("c2").databases = [db("Ventas", { tables: 1200 })];
+  const all = Array.from({ length: 1200 }, (_, i) => ({ schema: "dbo", name: `t${i}`, kind: "table" as const }));
+  vi.mocked(ipc.explorerObjects).mockResolvedValue(all);
+  await explorer.expand(keyOf.db("c2", "Ventas"));
+  await explorer.expand(keyOf.group("c2", "Ventas", "table"));
+  const objectRows = () => explorer.rows.filter((r) => r.kind === "object").length;
+  expect(objectRows()).toBe(OBJECT_PAGE);
+  const more = () => explorer.rows.find((r) => r.kind === "notice" && r.action?.label === `Show ${Math.min(OBJECT_PAGE, 1200 - objectRows())} more`);
+  expect(more()).toBeDefined();
+  // The "more" row is a notice with an action, so the keyboard reaches and runs it.
+  const first = more();
+  expect(navigate(explorer.rows, first!.key, "Enter")).toEqual({ activate: first!.key });
+  if (first?.kind === "notice") first.action!.run();
+  expect(objectRows()).toBe(OBJECT_PAGE * 2);
+  const last = more();
+  if (last?.kind === "notice") last.action!.run();
+  expect(objectRows()).toBe(1200);
+  expect(more()).toBeUndefined();
+});
+
+test("changing a connection's server or deleting it drops what was read for it", async () => {
+  const group = keyOf.group("c2", "Ventas", "table");
+  const other = keyOf.group("c1", "Ventas", "table");
+  const seed = () => {
+    explorer.objects = { [group]: [{ schema: "dbo", name: "t", kind: "table" }], [other]: [] };
+    explorer.state("c2").databases = [db("Ventas")];
+  };
+  seed();
+  const edited = { ...local, server: "elsewhere" } as ConnectionConfig;
+  vi.mocked(ipc.saveConnection).mockResolvedValue({ connection: edited, keyringUnavailable: false });
+  await connections.save({ ...edited });
+  expect(Object.keys(explorer.objects)).toEqual([other]);
+  expect(explorer.state("c2").databases).toEqual([]);
+
+  // Same server: nothing is dropped.
+  seed();
+  await connections.save({ ...local, name: "Renamed" });
+  expect(Object.keys(explorer.objects)).toContain(group);
+
+  seed();
+  vi.mocked(ipc.deleteConnection).mockResolvedValue(false);
+  vi.mocked(ipc.listConnections).mockResolvedValue([sales, billing]);
+  await connections.remove("c2");
+  expect(Object.keys(explorer.objects)).toEqual([other]);
+});
+
+test("a live connection reconnects after a save even when its stop event arrives first", async () => {
+  explorer.state("c2").status = "connected";
+  const wasLive = explorer.isLive("c2");
+  const edited = { ...local, port: 1444 } as ConnectionConfig;
+  // The backend stops the Explorer during the save: the event beats the reply.
+  vi.mocked(ipc.saveConnection).mockImplementation(async () => {
+    explorer.handleEvent({ kind: "explorerStatus", connectionId: "c2", status: "disconnected", message: null });
+    return { connection: edited, keyringUnavailable: false };
+  });
+  vi.mocked(ipc.connectExplorer).mockResolvedValue({ server: { version: "", user: "", singleDatabase: false }, databases: [] } as never);
+  await connections.save(edited, "pw");
+  expect(explorer.state("c2").status).toBe("offline");
+  explorer.reconnectIfLive("c2", wasLive, "pw");
+  await flush();
+  expect(ipc.connectExplorer).toHaveBeenCalledWith("c2", "pw");
+  expect(explorer.state("c2").status).toBe("connected");
+  // Not live before the save: nothing reconnects.
+  vi.mocked(ipc.connectExplorer).mockClear();
+  explorer.reconnectIfLive("c2", false);
+  expect(ipc.connectExplorer).not.toHaveBeenCalled();
 });
 
 test("moving a folder into its own child does not call moveFolder", async () => {

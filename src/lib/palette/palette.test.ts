@@ -17,7 +17,7 @@ import * as ipc from "../ipc";
 import { connections } from "../connections/store.svelte";
 import { explorer } from "../explorer/tree.svelte";
 import { tabs } from "../tabs/tabs.svelte";
-import { groupHits, highlight, paletteKey } from "./hits";
+import { groupHits, highlight, MAX_HITS_PER_GROUP, paletteKey } from "./hits";
 import { palette } from "./paletteState.svelte";
 import Palette from "./Palette.svelte";
 
@@ -107,6 +107,23 @@ test("groups hits by folder › connection › database, keeping the ranking ord
   expect(groups.map((g) => g.path.join(" › "))).toEqual(["Cliente A › Proyecto X › Sales › Ventas", "Local › master"]);
   expect(groups[0].hits).toEqual([a, c]);
   expect(groups[1].connected).toBe(false);
+});
+
+test("a group with many hits is capped so the next group's best hit stays near the top", () => {
+  const many = Array.from({ length: 30 }, (_, i) => hit({ name: `Sales${i}` }));
+  const other = hit({ name: "Sales", connectionId: "c2", connectionName: "Local", database: "master" });
+  const groups = groupHits([...many, other]);
+  expect(groups.map((g) => g.hits.length)).toEqual([MAX_HITS_PER_GROUP, 1]);
+  expect(groups[0].hidden).toBe(30 - MAX_HITS_PER_GROUP);
+  expect(groups[1].hidden).toBe(0);
+  // A single database keeps every hit.
+  const alone = groupHits(many);
+  expect(alone).toHaveLength(1);
+  expect(alone[0].hits).toHaveLength(30);
+  expect(alone[0].hidden).toBe(0);
+  // Groups stay ordered by their best hit.
+  const first = hit({ name: "Pedidos", connectionId: "c2", connectionName: "Local", database: "master" });
+  expect(groupHits([first, ...many]).map((g) => g.path.at(-1))).toEqual(["master", "Ventas"]);
 });
 
 test("highlight marks code points, not UTF-16 units", () => {

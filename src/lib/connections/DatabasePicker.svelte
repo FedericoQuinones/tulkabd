@@ -104,6 +104,7 @@
         {/each}
       </div>
     {/if}
+    <div class="hint">{t("connection.databases.limitHint")}</div>
     {#if loadError}<div class="err" role="alert">{loadError}</div>{/if}
   {/if}
   {#if error}<div class="err">{t(error)}</div>{/if}

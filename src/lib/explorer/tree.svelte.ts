@@ -40,7 +40,16 @@ export interface ConnRuntime {
   failed: string[];
 }
 
+/** A load in flight; `again` asks for one more read after it. */
+interface Load {
+  again: boolean;
+  done: Promise<void>;
+}
+
 type Loaded<T> = T[] | { error: string };
+
+/** Children rendered per object group until the user asks for more; 10k tables must not mean 10k rows. */
+export const OBJECT_PAGE = 500;
 
 /** Hears the end of a connect: `null` when connected, else the error. */
 export type ConnectThen = (error: string | null) => void;
@@ -62,6 +71,8 @@ class ExplorerStore {
   objects = $state.raw<Record<string, Loaded<DbObject>>>({});
   /** Columns by object key. */
   columns = $state.raw<Record<string, Loaded<ColumnInfo>>>({});
+  /** How many objects of a group are shown, by group key (default `OBJECT_PAGE`). */
+  private limits = $state.raw<Record<string, number>>({});
   filter = $state("");
   hits = $state.raw<PaletteHit[]>([]);
   /** The query `hits` answer. */
@@ -83,8 +94,8 @@ class ExplorerStore {
   /** Connections the user disconnected, until they connect again: a late error there is stale. */
   private userOffline = new Set<string>();
   private dbLoads = new Map<string, { again: boolean; done: Promise<void> }>();
-  private objLoads = new Map<string, Promise<void>>();
-  private colLoads = new Map<string, Promise<void>>();
+  private objLoads = new Map<string, Load>();
+  private colLoads = new Map<string, Load>();
   private persistTimer: ReturnType<typeof setTimeout> | undefined;
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
   private subscribed = false;
@@ -262,10 +273,15 @@ class ExplorerStore {
     }
   }
 
-  /** After an edit is saved: a live session still reads the old server and database list, so reconnect it. */
-  reconnectIfLive(id: string, password?: string): void {
+  /** Whether the Explorer of `id` is connected or connecting. Read before a save: its stop event may arrive before the save's reply. */
+  isLive(id: string): boolean {
     const status = this.state(id).status;
-    if (status === "connected" || status === "connecting") void this.connect(id, password);
+    return status === "connected" || status === "connecting";
+  }
+
+  /** After an edit is saved while live: the backend stopped the session that read the old server, so connect again. */
+  reconnectIfLive(id: string, wasLive: boolean, password?: string): void {
+    if (wasLive) void this.connect(id, password);
   }
 
   async submitPassword(password: string): Promise<void> {
@@ -370,12 +386,47 @@ class ExplorerStore {
     });
   }
 
-  private once(map: Map<string, Promise<void>>, key: string, run: (gen: number) => Promise<void>): Promise<void> {
+  /**
+   * Runs `run` unless a load of `key` is in flight, whose promise is shared.
+   * Setting `again` on the entry (`invalidate`: the data changed since the
+   * load began) makes it read once more; the promise settles after that.
+   */
+  private once(map: Map<string, Load>, key: string, run: (gen: number) => Promise<void>): Promise<void> {
     const running = map.get(key);
-    if (running) return running;
-    const p = run(this.gen).finally(() => map.delete(key));
-    map.set(key, p);
-    return p;
+    if (running) {
+      return running.done;
+    }
+    const entry: Load = { again: false, done: Promise.resolve() };
+    map.set(key, entry);
+    const gen = this.gen;
+    entry.done = (async () => {
+      try {
+        do {
+          entry.again = false;
+          await run(gen);
+        } while (entry.again && gen === this.gen);
+      } finally {
+        if (map.get(key) === entry) map.delete(key);
+      }
+    })();
+    return entry.done;
+  }
+
+  /** Drops what was read for a connection: its databases, objects and columns (they may belong to another server now). */
+  forgetCached(id: string): void {
+    const own = (key: string) => {
+      const k = parseKey(key);
+      return (k?.[0] === "g" || k?.[0] === "o") && k[1] === id;
+    };
+    const keep = <T,>(m: Record<string, T>) => Object.fromEntries(Object.entries(m).filter(([key]) => !own(key)));
+    this.objects = keep(this.objects);
+    this.columns = keep(this.columns);
+    this.limits = keep(this.limits);
+    const st = this.conns[id];
+    if (st) {
+      st.databases = null;
+      if (connections.list.some((c) => c.id === id)) void this.loadDatabases(id);
+    }
   }
 
   /** A database was re-indexed: reload what is open below it and drop the rest. */
@@ -385,6 +436,10 @@ class ExplorerStore {
       if (k?.[0] === "g" || k?.[0] === "o") return k[1] === c && k[2] === d;
       return false;
     };
+    // A read already under way may have started before the cache write.
+    for (const loads of [this.objLoads, this.colLoads]) {
+      for (const [key, load] of loads) if (sameDb(key)) load.again = true;
+    }
     const objects = { ...this.objects };
     for (const key of Object.keys(objects)) {
       if (!sameDb(key)) continue;
@@ -636,7 +691,18 @@ class ExplorerStore {
       } else {
         objects = fs?.hits.get(key) ?? [];
       }
-      for (const o of objects) this.objectRow(out, c, db.name, o, level + 1, key);
+      const limit = this.limits[key] ?? OBJECT_PAGE;
+      const shown = objects.length > limit ? objects.slice(0, limit) : objects;
+      for (const o of shown) this.objectRow(out, c, db.name, o, level + 1, key);
+      if (objects.length > limit) {
+        const more = Math.min(OBJECT_PAGE, objects.length - limit);
+        out.push(
+          this.notice(key, "more", level + 1, "muted", t("explorer.showing", { shown: limit, total: objects.length }), {
+            label: t("explorer.showMore", { n: more }),
+            run: () => (this.limits = { ...this.limits, [key]: (this.limits[key] ?? OBJECT_PAGE) + OBJECT_PAGE }),
+          }),
+        );
+      }
     }
   }
 
@@ -878,6 +944,7 @@ class ExplorerStore {
     this.conns = {};
     this.objects = {};
     this.columns = {};
+    this.limits = {};
     this.filter = "";
     this.hits = [];
     this.hitsQuery = "";
@@ -894,6 +961,7 @@ class ExplorerStore {
 }
 
 export const explorer = new ExplorerStore();
+connections.onForget = (id) => explorer.forgetCached(id);
 
 /** The context menu of a row, wired to the explorer store. */
 export const menuFor = (row: Row, ui: MenuActions): MenuItem[] => buildMenu(row, ui, explorer);
