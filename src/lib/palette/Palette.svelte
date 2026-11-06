@@ -118,6 +118,9 @@
             </span>
           </div>
         {/each}
+        {#if group.hidden > 0}
+          <div class="more" role="presentation">{t("palette.moreHits", { n: group.hidden })}</div>
+        {/if}
       {/each}
       {#each palette.queryGroups as group (group.key)}
         <div class="group" role="presentation">
@@ -213,6 +216,12 @@
     font-size: 11px;
   }
   .state {
+    font-style: italic;
+  }
+  .more {
+    padding: 2px 16px 4px;
+    color: var(--muted);
+    font-size: 11px;
     font-style: italic;
   }
   .row {

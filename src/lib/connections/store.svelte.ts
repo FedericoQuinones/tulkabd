@@ -13,6 +13,8 @@ class ConnectionStore {
 
   /** Set when a saved password could not be removed from the system keychain. */
   warning = $state<string | null>(null);
+  /** Called with a connection id when what was cached for it no longer applies (its server or scope changed, or it was deleted). */
+  onForget: ((id: string) => void) | null = null;
 
   /** Set when the connections file could not be read at startup. */
   startupError = $state<string | null>(null);
@@ -46,7 +48,14 @@ class ConnectionStore {
 
   /** Saves a connection; the password goes to the backend only and is not retained here. */
   async save(conn: ConnectionConfig, password?: string): Promise<SaveConnectionResult> {
+    const old = this.list.find((c) => c.id === conn.id);
     const result = await ipc.saveConnection(conn, password);
+    if (
+      old &&
+      (old.server !== conn.server || old.port !== conn.port || JSON.stringify(old.databases) !== JSON.stringify(conn.databases))
+    ) {
+      this.onForget?.(conn.id);
+    }
     if (result.secretOrphaned) this.warning = t("connection.secretOrphaned", { id: conn.id });
     forgetStructures(conn.id);
     // Saving with another guard level ends the until-restart override, so both lists are re-read.
@@ -76,6 +85,7 @@ class ConnectionStore {
     if (orphaned) this.warning = t("connection.secretOrphaned", { id });
     forgetStructures(id);
     await this.refresh();
+    this.onForget?.(id);
   }
 }
 

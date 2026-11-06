@@ -183,7 +183,7 @@ impl TulkaServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let _running = self.begin(&context);
-        reply(ai::list_databases(&self.state, p.connection).await)
+        reply(ai::list_databases_until(&self.state, p.connection, context.ct.cancelled()).await)
     }
 
     #[tool(
@@ -203,7 +203,7 @@ impl TulkaServer {
             in_columns: p.in_columns.unwrap_or(false),
             limit: p.limit,
         };
-        reply(ai::search_objects(&self.state, request).await)
+        reply(ai::search_objects_until(&self.state, request, context.ct.cancelled()).await)
     }
 
     #[tool(
@@ -215,7 +215,16 @@ impl TulkaServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let _running = self.begin(&context);
-        reply(ai::describe_table(&self.state, p.connection, p.database, p.table).await)
+        reply(
+            ai::describe_table_until(
+                &self.state,
+                p.connection,
+                p.database,
+                p.table,
+                context.ct.cancelled(),
+            )
+            .await,
+        )
     }
 
     #[tool(

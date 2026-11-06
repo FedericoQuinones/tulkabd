@@ -49,7 +49,9 @@
 //! together with another one, nor with the tabs or connections locks.
 //!
 //! Stopping a connection's Explorer drops its entry (whose `stop` sender
-//! wakes the task), waits for the task to end, then closes the slot. The task
+//! wakes the task), waits for the task to end, then closes the slot (in the
+//! background if a live call still holds it, so a stop never waits for the
+//! server). The task
 //! can only be interrupted while talking to the server; a cache and index
 //! write in progress always finishes, so the two stay consistent.
 
@@ -96,6 +98,10 @@ struct Conn {
     /// Databases the connection exposes.
     databases: Vec<String>,
     queue: VecDeque<String>,
+    /// Which databases the connection exposes (from its config at connect).
+    scope: DatabaseScope,
+    /// A full refresh asked the task to list the databases again.
+    relist: bool,
     /// The database being indexed.
     current: Option<String>,
     /// An indexing task is draining `queue`.
@@ -345,7 +351,19 @@ impl Explorer {
         if let Some(task) = task {
             let _ = task.await;
         }
-        slot.lock().await.close();
+        // A live call (structure, definition) may still hold the slot while
+        // the server is slow; do not make a disconnect wait for it. The
+        // session closes as soon as that call lets go.
+        let closed = match slot.try_lock() {
+            Ok(mut guard) => {
+                guard.close();
+                true
+            }
+            Err(_) => false,
+        };
+        if !closed {
+            tokio::spawn(async move { slot.lock().await.close() });
+        }
     }
 
     /// The connection was lost (seen with `epoch`): forgets the Explorer and
@@ -381,17 +399,20 @@ impl Explorer {
 
     /// Adds `order` to the queue of a connected Explorer (skipping what is
     /// queued already; `front` moves them to the front) and starts the
-    /// indexing task if none is running.
+    /// indexing task if none is running. `relist` also asks the task to list
+    /// the server's databases again before its next one.
     fn enqueue(
         self: &Arc<Self>,
         connection_id: &str,
         order: Vec<String>,
         front: bool,
+        relist: bool,
     ) -> Result<(), String> {
         let mut conns = self.conns();
         let conn = conns
             .get_mut(connection_id)
             .ok_or_else(|| NOT_CONNECTED.to_string())?;
+        conn.relist |= relist;
         if front {
             conn.queue.retain(|d| !order.contains(d));
             for db in order.into_iter().rev() {
@@ -414,6 +435,82 @@ impl Explorer {
                 conn.stop.subscribe(),
             ));
             conn.task = Some(task);
+        }
+        Ok(())
+    }
+
+    /// Takes the "list the databases again" request of the entry of `epoch`;
+    /// returns the scope to apply when there was one.
+    fn take_relist(&self, connection_id: &str, epoch: u64) -> Option<DatabaseScope> {
+        let mut conns = self.conns();
+        let conn = conns.get_mut(connection_id).filter(|c| c.epoch == epoch)?;
+        std::mem::take(&mut conn.relist).then(|| conn.scope.clone())
+    }
+
+    /// Lists the databases of the server again and brings the entry, its
+    /// queue, the cache and the search index in line with the answer, as
+    /// `connect_explorer` does. A single-database server or a failed query
+    /// changes nothing; a lost connection is reported and returned.
+    async fn relist(
+        self: &Arc<Self>,
+        connection_id: &str,
+        epoch: u64,
+        slot: &AsyncMutex<Slot>,
+        scope: &DatabaseScope,
+    ) -> Result<(), ()> {
+        let listed = {
+            let mut slot = slot.lock().await;
+            if slot.closed || slot.rebind.is_some() {
+                return Ok(());
+            }
+            let result = match slot.session.as_mut() {
+                Some(session) => session.list_databases().await.map_err(LiveError::Driver),
+                None => Err(LiveError::Closed),
+            };
+            slot.check(result)
+        };
+        let mut databases = match listed {
+            Ok(databases) => databases,
+            Err(LiveError::Driver(e @ DriverError::Disconnected(_))) => {
+                self.lost(connection_id, epoch, &e);
+                return Err(());
+            }
+            Err(_) => return Ok(()),
+        };
+        retain_in_scope(&mut databases, scope);
+        {
+            let mut conns = self.conns();
+            let Some(conn) = conns.get_mut(connection_id).filter(|c| c.epoch == epoch) else {
+                return Err(());
+            };
+            conn.queue.retain(|d| databases.contains(d));
+            for db in &databases {
+                if !conn.databases.contains(db) && !conn.queue.contains(db) {
+                    conn.queue.push_back(db.clone());
+                }
+            }
+            conn.databases.clone_from(&databases);
+        }
+        let (id, names) = (connection_id.to_string(), databases);
+        let vanished: Vec<String> = self
+            .with_cache(move |cache| {
+                let before = cache.databases(&id);
+                cache.set_databases(&id, &names);
+                before
+                    .into_iter()
+                    .map(|d| d.name)
+                    .filter(|d| !names.contains(d))
+                    .collect()
+            })
+            .await;
+        if !vanished.is_empty() {
+            let id = connection_id.to_string();
+            self.update_index(move |index| {
+                for db in &vanished {
+                    index.replace_database(&id, db, &[]);
+                }
+            })
+            .await;
         }
         Ok(())
     }
@@ -483,6 +580,16 @@ async fn index_task(
     mut stop: watch::Receiver<bool>,
 ) {
     loop {
+        if let Some(scope) = explorer.take_relist(&connection_id, epoch) {
+            let listed = tokio::select! {
+                biased;
+                _ = stop.wait_for(|stopped| *stopped) => return,
+                r = explorer.relist(&connection_id, epoch, &slot, &scope) => r,
+            };
+            if listed.is_err() {
+                return;
+            }
+        }
         let database = match explorer.next_database(&connection_id, epoch) {
             Next::Index(db) => db,
             Next::Idle => {
@@ -528,6 +635,14 @@ async fn snapshot(slot: &AsyncMutex<Slot>, database: &str) -> Result<DatabaseSna
         Err(e) => Err(e),
     };
     slot.check(result)
+}
+
+/// Keeps the databases a connection's scope exposes. Names match without
+/// regard to case, as SQL Server database names do on the usual collations.
+fn retain_in_scope(databases: &mut Vec<String>, scope: &DatabaseScope) {
+    if let DatabaseScope::Selected { names } = scope {
+        databases.retain(|d| names.iter().any(|n| n.eq_ignore_ascii_case(d)));
+    }
 }
 
 /// The databases of `connection_id` selected in its query tabs.
@@ -606,9 +721,7 @@ pub async fn connect_explorer(
         let mut session = driver.connect(&params).await?;
         let server = session.server_info().await?;
         let mut databases = session.list_databases().await?;
-        if let DatabaseScope::Selected { names } = &conn.databases {
-            databases.retain(|d| names.contains(d));
-        }
+        retain_in_scope(&mut databases, &conn.databases);
         let bound = match server.single_database {
             true => Some(session.current_database().await?),
             false => None,
@@ -645,6 +758,8 @@ pub async fn connect_explorer(
         slot: Arc::new(AsyncMutex::new(slot)),
         databases: databases.clone(),
         queue: VecDeque::new(),
+        scope: conn.databases.clone(),
+        relist: false,
         current: None,
         running: false,
         task: None,
@@ -711,7 +826,7 @@ pub async fn connect_explorer(
     }
     let order = index_order(state, &connection_id, &databases);
     // Fails only if a disconnect came in meanwhile, which is fine.
-    let _ = explorer.enqueue(&connection_id, order, false);
+    let _ = explorer.enqueue(&connection_id, order, false, false);
     Ok(ExplorerInfo { server, databases })
 }
 
@@ -745,10 +860,14 @@ pub async fn refresh_metadata(
         .ok_or_else(|| NOT_CONNECTED.to_string())?;
     match database {
         Some(db) if !databases.contains(&db) => Err(NOT_FOUND.into()),
-        Some(db) => state.explorer.enqueue(&connection_id, vec![db], true),
+        Some(db) => state
+            .explorer
+            .enqueue(&connection_id, vec![db], true, false),
         None => {
             let order = index_order(state, &connection_id, &databases);
-            state.explorer.enqueue(&connection_id, order, false)
+            // The databases may have changed on the server: the indexing
+            // task lists them again before its next database.
+            state.explorer.enqueue(&connection_id, order, false, true)
         }
     }
 }
@@ -771,7 +890,7 @@ pub async fn clear_metadata_cache(state: &AppState) {
     for (id, databases) in connected {
         let order = index_order(state, &id, &databases);
         // Fails only if a disconnect came in meanwhile, which is fine.
-        let _ = state.explorer.enqueue(&id, order, false);
+        let _ = state.explorer.enqueue(&id, order, false, true);
     }
 }
 
@@ -1056,6 +1175,14 @@ pub(crate) async fn forget_connection(state: &AppState, connection_id: &str) {
     if let Some(conn) = explorer.take(connection_id, None) {
         Explorer::stop(conn).await;
     }
+    forget_cached_metadata(state, connection_id).await;
+}
+
+/// Drops the cached metadata and the search entries of a connection, leaving
+/// its Explorer alone. Used when the connection now points at another server,
+/// whose databases the old rows say nothing about.
+pub(crate) async fn forget_cached_metadata(state: &AppState, connection_id: &str) {
+    let explorer = &state.explorer;
     let id = connection_id.to_string();
     explorer
         .with_cache(move |cache| cache.forget_connection(&id))
@@ -1064,6 +1191,19 @@ pub(crate) async fn forget_connection(state: &AppState, connection_id: &str) {
     explorer
         .update_index(move |index| index.remove_connection(&id))
         .await;
+}
+
+/// The connection now points at another server or scope: stops its Explorer
+/// (reporting "disconnected" if it was connected, so the UI connects again)
+/// and forgets everything cached for it.
+pub(crate) async fn reset_for_new_server(state: &AppState, connection_id: &str) {
+    let was_connected = state.explorer.conns().contains_key(connection_id);
+    forget_connection(state, connection_id).await;
+    if was_connected {
+        state
+            .explorer
+            .status(connection_id, ConnectionStatus::Disconnected, None);
+    }
 }
 
 #[cfg(test)]
@@ -1105,5 +1245,25 @@ mod tests {
         let (text, ids) = folder_scope(" a /x", &tree, &config).unwrap();
         assert_eq!(text, "x");
         assert!(ids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn selected_scope_matches_names_without_regard_to_case() {
+        let mut dbs = vec!["Sales".to_string(), "hr".into(), "Other".into()];
+        retain_in_scope(
+            &mut dbs,
+            &DatabaseScope::Selected {
+                names: vec!["sales".into(), "HR".into()],
+            },
+        );
+        assert_eq!(dbs, ["Sales", "hr"]);
+        let mut all = vec!["A".to_string()];
+        retain_in_scope(&mut all, &DatabaseScope::All);
+        assert_eq!(all, ["A"]);
     }
 }

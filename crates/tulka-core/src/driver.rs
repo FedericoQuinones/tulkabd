@@ -148,6 +148,16 @@ pub trait Session: Send {
     fn announced_database(&self) -> Option<String> {
         None
     }
+    /// Whether the login is a server administrator. A driver without roles
+    /// says no.
+    async fn is_admin(&mut self) -> Result<bool, DriverError> {
+        Ok(false)
+    }
+    /// Limits how long a statement of this session waits for a lock, in
+    /// milliseconds. A driver without locks does nothing.
+    async fn set_lock_timeout(&mut self, _ms: u32) -> Result<(), DriverError> {
+        Ok(())
+    }
     /// Forgets a cancel requested earlier, so it does not stop the next
     /// `execute`. Called before the cancel handle is published for a run.
     fn reset_cancel(&mut self) {}
@@ -223,5 +233,11 @@ pub trait Driver: Send + Sync {
             word: None,
             line: 0,
         })
+    }
+
+    /// The databases that multi-part names in `sql` point at, in lower case.
+    /// Used to keep a query within the databases a connection selects.
+    fn referenced_databases(&self, _sql: &str) -> Vec<String> {
+        Vec::new()
     }
 }

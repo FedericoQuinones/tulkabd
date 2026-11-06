@@ -341,7 +341,7 @@
     <section data-section="ai">
       {@render head(t("settings.ai"), "ai")}
       {@render num("aiMaxRows", "set-ai-rows", t("settings.aiMaxRows"), 1, 10_000)}
-      {@render num("aiQueryTimeoutS", "set-ai-timeout", t("settings.aiTimeout"), 1, 3_600)}
+      {@render num("aiQueryTimeoutS", "set-ai-timeout", t("settings.aiTimeout"), 1, 300)}
       <div class="row place">
         <div class="where">
           <span class="lbl" id="ai-claude">{t("settings.aiSetup")} · {t("settings.aiClaude")}</span>

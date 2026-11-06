@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
-use tulka_core::{Column, DriverError, ExecEvent, MessageKind, Value};
+use tulka_core::{Column, DatabaseScope, DriverError, ExecEvent, MessageKind, Value};
 use tulka_store::{NewRun, RunLogOutcome, RunSource};
 
 use super::tools::environment_name;
@@ -388,6 +388,20 @@ pub async fn run_query(
         s.log_run(v, &log_db, sql, Logged::not_run(RunLogOutcome::Blocked))
             .await;
         return ToolText::error(format::not_run(&violation));
+    }
+
+    if let DatabaseScope::Selected { names } = &v.conn.databases {
+        let outside = driver
+            .referenced_databases(sql)
+            .into_iter()
+            .find(|d| !names.iter().any(|n| n.to_lowercase() == *d));
+        if let Some(outside) = outside {
+            s.log_run(v, &log_db, sql, Logged::not_run(RunLogOutcome::Blocked))
+                .await;
+            return ToolText::error(format::database_name_not_selected(
+                &outside, &v.label, names,
+            ));
+        }
     }
 
     let (driver, params) = match s.prepare(v, database.clone()).await {

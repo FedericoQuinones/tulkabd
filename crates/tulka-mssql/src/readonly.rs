@@ -8,6 +8,19 @@
 //!
 //! - A user function or CLR routine called from a query can have external
 //!   effects; a name is not enough to tell.
+//! - Server files, secrets and other sessions' SQL are reachable through a
+//!   few functions and views (see `DENIED_NAMES`); they are refused by name,
+//!   with or without the `sys.` prefix, wherever the name appears as a word
+//!   or a bracketed name, so a column or alias with that name is refused too.
+//!   Other functions and views that read files or secrets may exist; a
+//!   login without those permissions is the real limit.
+//! - The query hints `MAXDOP`, `MIN_GRANT_PERCENT`, `MAX_GRANT_PERCENT` and
+//!   `QUERYTRACEON` are refused inside an `OPTION (...)` clause (a column
+//!   named like them is fine elsewhere). `USE HINT` is refused because `USE`
+//!   is a forbidden word.
+//! - A three-part name (`db.schema.object`) names a database; see
+//!   [`referenced_databases`]. A column written with its schema and table
+//!   (`dbo.t.col`) looks the same and is taken as database `dbo`.
 //! - A synonym or view may point at a linked server; only four-part names
 //!   written in the text are caught.
 //! - Unbracketed columns named like non-reserved forbidden words (`Send`,
@@ -21,6 +34,13 @@
 //! - Anything the check cannot read with certainty is refused as unparsed:
 //!   control characters, a bare `\r`, symbols outside T-SQL's operator set,
 //!   Unicode spaces and non-ASCII letters outside bracketed names.
+//! - A bracketed or quoted name may only hold printable ASCII, Latin-1
+//!   letters and Latin Extended-A letters (without `×`, `÷`, `ſ`), because a
+//!   collation can treat ligatures, superscripts, zero-width characters,
+//!   circled letters and the like as equal to ASCII ones. Names with other
+//!   characters (Cyrillic, Greek, CJK, ...) cannot be used through the AI
+//!   tools. Accents and letter case are folded when comparing names with the
+//!   denied lists.
 //! - A word or literal written right after a number with no space is
 //!   refused, because SQL Server splits `1eDELETE` into `1e` and `DELETE`.
 //!   This also refuses valid queries such as `1.e5`, `1AND`, `1DESC`,
@@ -136,6 +156,132 @@ const FORBIDDEN: &[&str] = &[
     "XLOCK",
 ];
 
+/// Functions and views refused by name, in lower case and sorted: they read
+/// files of the server (a UNC path makes a Windows service account
+/// authenticate over SMB, and that survives a rollback), password hashes, the
+/// log, or the SQL text of other sessions.
+const DENIED_NAMES: &[&str] = &[
+    "dm_exec_input_buffer",
+    "dm_exec_query_plan",
+    "dm_exec_query_plan_stats",
+    "dm_exec_sql_text",
+    "dm_exec_text_query_plan",
+    "dm_os_enumerate_filesystem",
+    "dm_os_file_exists",
+    "fn_dblog",
+    "fn_dblog_xtp",
+    "fn_dump_dblog",
+    "fn_full_dblog",
+    "fn_get_audit_file",
+    "fn_get_sql",
+    "fn_msxe_read_event_stream",
+    "fn_trace_gettable",
+    "fn_xe_file_target_read_file",
+    "loginproperty",
+    "query_store_plan",
+    "query_store_query_text",
+    "sql_logins",
+];
+
+/// Query hints that can starve the server, refused inside `OPTION (...)`.
+/// In lower case and sorted.
+const DENIED_HINTS: &[&str] = &[
+    "max_grant_percent",
+    "maxdop",
+    "min_grant_percent",
+    "querytraceon",
+];
+
+/// The text of a word or quoted name as written, without its brackets or
+/// quotes.
+fn unquoted(text: &str, t: &Token) -> String {
+    let raw = lexer::src(text, t);
+    match (t.kind, raw.chars().next()) {
+        (Kind::Quoted, Some('[')) => raw[1..raw.len() - 1].replace("]]", "]"),
+        (Kind::Quoted, Some(q)) => {
+            raw[1..raw.len() - 1].replace(&format!("{q}{q}"), &q.to_string())
+        }
+        _ => raw.to_string(),
+    }
+}
+
+/// A database name for comparing with the selection: lower case and without
+/// trailing spaces, but accents kept, because on an accent-sensitive server
+/// `Tulkä` and `Tulka` are different databases.
+fn database_name_of(text: &str, t: &Token) -> String {
+    unquoted(text, t).trim_end().to_lowercase()
+}
+
+/// The text of a word or quoted name, lower case, without its brackets or
+/// quotes.
+fn name_of(text: &str, t: &Token) -> String {
+    let inner = unquoted(text, t);
+    // SQL Server ignores trailing spaces in an identifier: `[x ]` is `x`.
+    // The ideographic space counts as one after folding.
+    fold_name(&inner).trim_end().to_string()
+}
+
+/// Folds a name the way an accent- and width-insensitive collation compares
+/// it: full-width forms to ASCII, accents removed from Latin letters, lower
+/// case. Names with characters from other lookalike ranges are refused
+/// before this matters (see [`has_unlisted_chars`]).
+fn fold_name(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            '\u{3000}' => ' ',
+            c => c,
+        })
+        .map(base_letter)
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// A Latin-1 Supplement or Latin Extended-A letter without its accent;
+/// other characters unchanged.
+fn base_letter(c: char) -> char {
+    match c {
+        '\u{C0}'..='\u{C5}' | '\u{E0}'..='\u{E5}' | '\u{100}'..='\u{105}' => 'a',
+        '\u{C6}' | '\u{E6}' => 'a',
+        '\u{C7}' | '\u{E7}' | '\u{106}'..='\u{10D}' => 'c',
+        '\u{D0}' | '\u{F0}' | '\u{10E}'..='\u{111}' => 'd',
+        '\u{C8}'..='\u{CB}' | '\u{E8}'..='\u{EB}' | '\u{112}'..='\u{11B}' => 'e',
+        '\u{11C}'..='\u{123}' => 'g',
+        '\u{124}'..='\u{127}' => 'h',
+        '\u{CC}'..='\u{CF}' | '\u{EC}'..='\u{EF}' | '\u{128}'..='\u{133}' => 'i',
+        '\u{134}'..='\u{135}' => 'j',
+        '\u{136}'..='\u{138}' => 'k',
+        '\u{139}'..='\u{142}' => 'l',
+        '\u{D1}' | '\u{F1}' | '\u{143}'..='\u{14B}' => 'n',
+        '\u{D2}'..='\u{D6}' | '\u{D8}' | '\u{F2}'..='\u{F6}' | '\u{F8}' => 'o',
+        '\u{14C}'..='\u{153}' => 'o',
+        '\u{154}'..='\u{159}' => 'r',
+        '\u{DF}' | '\u{15A}'..='\u{161}' | '\u{17F}' => 's',
+        '\u{162}'..='\u{167}' => 't',
+        '\u{D9}'..='\u{DC}' | '\u{F9}'..='\u{FC}' | '\u{168}'..='\u{173}' => 'u',
+        '\u{174}'..='\u{175}' => 'w',
+        '\u{DD}' | '\u{FD}' | '\u{FF}' | '\u{176}'..='\u{178}' => 'y',
+        '\u{179}'..='\u{17E}' => 'z',
+        c => c,
+    }
+}
+
+/// Whether a quoted name has a character outside the allowed set: printable
+/// ASCII, Latin-1 letters and Latin Extended-A letters (without `×`, `÷` and
+/// `ſ`). A collation may treat other characters (ligatures, superscripts,
+/// zero-width and joiner characters, circled letters, other scripts) as equal
+/// to ASCII ones, so a name with any of them cannot be told from a denied
+/// one and is refused.
+fn has_unlisted_chars(quoted: &str) -> bool {
+    let inner = quoted
+        .get(1..quoted.len().saturating_sub(1))
+        .unwrap_or_default();
+    inner.chars().any(|c| {
+        !matches!(c as u32,
+            0x20..=0x7E | 0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0xFF | 0x100..=0x17E)
+    })
+}
+
 /// Longest entry of `FORBIDDEN`; longer words cannot match.
 const MAX_FORBIDDEN_LEN: usize = 14;
 
@@ -145,6 +291,48 @@ const LINKED_SERVER_DOTS: u32 = 3;
 
 /// Longest offending word kept in a violation.
 const MAX_WORD_CHARS: usize = 40;
+
+/// The databases that three-part names in `sql` point at (`db.schema.obj`,
+/// `db..obj`), in lower case, without brackets or quotes, each once. Run
+/// after [`violation`] passed: text that does not lex gives nothing here
+/// because it was already refused.
+pub fn referenced_databases(sql: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for batch in split_batches(sql) {
+        let text = &batch.text;
+        let Ok(tokens) = lexer::lex(text) else {
+            continue;
+        };
+        let is_name = |t: &Token| matches!(t.kind, Kind::Word | Kind::Quoted);
+        let mut i = 0;
+        while i < tokens.len() {
+            if !is_name(&tokens[i]) {
+                i += 1;
+                continue;
+            }
+            // A dotted name: parts separated by dots, a part may be empty.
+            let mut parts = vec![database_name_of(text, &tokens[i])];
+            i += 1;
+            while i < tokens.len() && is_punct(text, &tokens[i], ".") {
+                i += 1;
+                match tokens.get(i) {
+                    Some(t) if is_name(t) => {
+                        parts.push(database_name_of(text, t));
+                        i += 1;
+                    }
+                    _ => parts.push(String::new()),
+                }
+            }
+            if parts.len() >= 3 {
+                let db = &parts[parts.len() - 3];
+                if !db.is_empty() && !out.contains(db) {
+                    out.push(db.clone());
+                }
+            }
+        }
+    }
+    out
+}
 
 /// Tells why `sql` is not a plain read-only query, or `None` when it is.
 /// Batches separated by `GO` are checked one by one; the first problem wins.
@@ -344,6 +532,8 @@ fn check_batch(
     // Dots in the dotted name being read, and whether the last token was one.
     let mut dots = 0u32;
     let mut after_dot = false;
+    // Depth inside the parentheses of an `OPTION (...)` clause.
+    let mut option_depth: Option<u32> = None;
 
     for (i, t) in tokens.iter().enumerate() {
         if limit.is_some_and(|l| t.start >= l) {
@@ -383,11 +573,31 @@ fn check_batch(
             continue;
         }
 
+        if t.kind == Kind::Quoted && has_unlisted_chars(lexer::src(text, t)) {
+            return Some(found(ReadOnlyReason::Unparsed, None, line));
+        }
+        if matches!(t.kind, Kind::Word | Kind::Quoted) {
+            let name = name_of(text, t);
+            if DENIED_NAMES.binary_search(&name.as_str()).is_ok()
+                || (option_depth.is_some() && DENIED_HINTS.binary_search(&name.as_str()).is_ok())
+            {
+                return Some(found(ReadOnlyReason::Forbidden, word_of(text, t), line));
+            }
+        }
+
         match t.kind {
-            Kind::Punct if is_punct(text, t, "(") => depth += 1,
+            Kind::Punct if is_punct(text, t, "(") => {
+                depth += 1;
+                if option_depth.is_none() && i > 0 && is_keyword(text, &tokens[i - 1], "OPTION") {
+                    option_depth = Some(depth);
+                }
+            }
             Kind::Punct if is_punct(text, t, ")") => {
                 if depth == 0 {
                     return Some(found(ReadOnlyReason::Unparsed, word_of(text, t), line));
+                }
+                if option_depth == Some(depth) {
+                    option_depth = None;
                 }
                 depth -= 1;
             }
@@ -508,12 +718,167 @@ mod tests {
             "SELECT 1\nGO\nSELECT 2",
             "SELECT OBJECT_DEFINITION(OBJECT_ID('dbo.v'))",
             "WITH XMLNAMESPACES ('urn:x' AS x) SELECT 1",
-            "SELECT * FROM sys.dm_exec_sessions OPTION (MAXDOP 1)",
+            "SELECT * FROM sys.dm_exec_sessions OPTION (RECOMPILE, HASH JOIN)",
+            "SELECT maxdop, [min_grant_percent] FROM t OPTION (RECOMPILE)",
+            "SELECT 'sys.sql_logins', 'fn_dblog' AS s",
+            "SELECT name FROM sys.sql_modules",
             ";WITH c AS (SELECT 1 x) SELECT * FROM c",
             "SELECT 1;;\n;SELECT 2",
         ] {
             check(sql, None);
         }
+    }
+
+    #[test]
+    fn finds_the_databases_of_three_part_names() {
+        let dbs = |sql: &str| referenced_databases(sql);
+        assert_eq!(dbs("SELECT 1"), Vec::<String>::new());
+        assert_eq!(
+            dbs("SELECT * FROM dbo.t JOIN sys.tables x ON 1=1"),
+            Vec::<String>::new()
+        );
+        assert_eq!(dbs("SELECT * FROM Other.sys.tables"), ["other"]);
+        assert_eq!(dbs("SELECT * FROM [Other DB].[dbo].[t]"), ["other db"]);
+        assert_eq!(dbs("SELECT * FROM \"Other\".dbo.t"), ["other"]);
+        assert_eq!(dbs("SELECT * FROM [a]]b].dbo.t"), ["a]b"]);
+        assert_eq!(dbs("SELECT * FROM [Other ].dbo.t"), ["other"]);
+        assert_eq!(dbs("SELECT * FROM \"Other  \"..t"), ["other"]);
+        assert_eq!(dbs("SELECT * FROM Other..t"), ["other"]);
+        assert_eq!(
+            dbs("SELECT * FROM a . dbo . t, A.dbo.u, b.dbo.v"),
+            ["a", "b"]
+        );
+        assert_eq!(
+            dbs("SELECT 1; SELECT * FROM x.dbo.t\nGO\nSELECT * FROM y.dbo.t"),
+            ["x", "y"]
+        );
+        // A schema-qualified column looks the same.
+        assert_eq!(dbs("SELECT dbo.t.id FROM dbo.t"), ["dbo"]);
+        // Text in strings and comments is not a name.
+        assert_eq!(dbs("SELECT 'a.b.c' -- d.e.f"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn denied_names_have_no_letter_pair_a_collation_expands_to() {
+        // On the server, Æ Þ ß Ĳ Œ compare equal to ae th ss ij oe.
+        for name in DENIED_NAMES.iter().chain(DENIED_HINTS) {
+            for pair in ["ae", "th", "ss", "ij", "oe"] {
+                assert!(!name.contains(pair), "{name} contains {pair}");
+            }
+        }
+    }
+
+    #[test]
+    fn denied_lists_are_sorted_and_lower_case() {
+        for list in [DENIED_NAMES, DENIED_HINTS] {
+            assert!(list.windows(2).all(|w| w[0] < w[1]));
+            assert!(list.iter().all(|w| *w == w.to_lowercase()));
+        }
+    }
+
+    #[test]
+    fn refuses_file_secret_and_sql_text_sources() {
+        for sql in [
+            r"SELECT * FROM sys.fn_xe_file_target_read_file('\\h\s\x.xel', NULL, NULL, NULL)",
+            "SELECT * FROM fn_xe_file_target_read_file('a', NULL, NULL, NULL)",
+            "SELECT * FROM [sys].[fn_get_audit_file]('a', DEFAULT, DEFAULT)",
+            "SELECT * FROM sys.\"FN_TRACE_GETTABLE\"('a', 1)",
+            "SELECT * FROM fn_dump_dblog(NULL)",
+            "SELECT * FROM sys.fn_dblog(NULL, NULL)",
+            "SELECT * FROM sys.dm_os_enumerate_filesystem('/', '*')",
+            "SELECT * FROM sys.dm_os_file_exists('/etc/passwd')",
+            "SELECT * FROM sys.fn_get_sql(NULL)",
+            "SELECT name, password_hash FROM sys.sql_logins",
+            "SELECT name, password_hash FROM master.sys.[SQL_Logins]",
+            "SELECT t.text FROM sys.dm_exec_requests r CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t",
+            "SELECT * FROM sys.dm_exec_input_buffer(52, NULL)",
+            "SELECT * FROM sys . dm_exec_sql_text(NULL)",
+            "SELECT * FROM sys.[sql_logins ]",
+            "SELECT * FROM sys.[sql_lógins]",
+            "SELECT * FROM sys.[ŠQL_loġins]",
+            "SELECT * FROM [sys].[fn_get_audit_file  ]('a', DEFAULT, DEFAULT)",
+            "SELECT * FROM sys.\"sql_logins \"",
+            "SELECT LOGINPROPERTY('sa', 'PasswordHash')",
+            "SELECT * FROM sys.dm_exec_query_plan(0x)",
+            "SELECT * FROM sys.dm_exec_text_query_plan(0x, 0, -1)",
+            "SELECT * FROM sys.dm_exec_query_plan_stats(0x)",
+            "SELECT * FROM sys.query_store_query_text",
+            "SELECT * FROM sys.query_store_plan",
+            "SELECT * FROM fn_full_dblog(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+            "SELECT * FROM sys.fn_MSxe_read_event_stream('s', 0, 0)",
+        ] {
+            let v = violation(sql).unwrap_or_else(|| panic!("accepted: {sql}"));
+            assert_eq!(v.reason, Forbidden, "{sql}");
+        }
+    }
+
+    #[test]
+    fn only_listed_characters_are_allowed_in_quoted_names() {
+        for sql in [
+            "SELECT * FROM sys.[fn_get_audit_\u{FB01}le]('a', DEFAULT, DEFAULT)",
+            "SELECT * FROM sys.[fn_xe_\u{FB01}le_target_read_file]('a', NULL, NULL, NULL)",
+            "SELECT * FROM sys.[f\u{207F}_get_audit_file]('a', DEFAULT, DEFAULT)",
+            "SELECT * FROM sys.[sql_lo\u{200D}gins]",
+            "SELECT * FROM sys.[sql_lo\u{FEFF}gins]",
+            "SELECT * FROM sys.[sql_lo\u{2060}gins]",
+            "SELECT * FROM sys.[sql_l\u{BA}gins]",
+            "SELECT * FROM sys.[sql_l\u{AA}gins]",
+            "SELECT * FROM sys.[\u{24E2}ql_logins]",
+            "SELECT * FROM sys.[\u{FF33}QL_logins]",
+            "SELECT * FROM [t\u{0301}]",
+            "SELECT * FROM [\u{1D41A}b]",
+            "SELECT * FROM [a\u{2102}]",
+            "SELECT * FROM [a\u{FE0F}]",
+            "SELECT * FROM [a\u{17F}]",
+            "SELECT * FROM [a\u{D7}]",
+            "SELECT * FROM [a\u{F7}]",
+            "SELECT * FROM [\u{416}]",
+            "SELECT \"x\u{4E2D}\" FROM t",
+        ] {
+            let v = violation(sql).unwrap_or_else(|| panic!("accepted: {sql}"));
+            assert_eq!(v.reason, Unparsed, "{sql}");
+        }
+        for sql in [
+            "SELECT * FROM [Clientes_A\u{F1}o]",
+            "SELECT [\u{D1}and\u{FA}], [M\u{FC}ller], [\u{10A}] FROM [Pedidos_\u{DC}nicos]",
+            "SELECT * FROM [Mi tabla]",
+        ] {
+            assert!(violation(sql).is_none(), "{sql}");
+        }
+        // Accents are kept: another database may differ only by them.
+        assert_eq!(
+            referenced_databases("SELECT * FROM [\u{D3}tro].dbo.t"),
+            ["\u{F3}tro"]
+        );
+        assert_eq!(
+            referenced_databases("SELECT * FROM [Tulk\u{E4}_mcp ].dbo.t"),
+            ["tulk\u{E4}_mcp"]
+        );
+    }
+
+    #[test]
+    fn refuses_starving_hints_only_inside_option() {
+        for sql in [
+            "SELECT * FROM t OPTION (MAXDOP 1)",
+            "SELECT * FROM t option(maxdop 0)",
+            "SELECT * FROM t OPTION (RECOMPILE, MIN_GRANT_PERCENT = 100)",
+            "SELECT * FROM t OPTION (MAX_GRANT_PERCENT = 100)",
+            "SELECT * FROM t OPTION (QUERYTRACEON 9481)",
+            "SELECT * FROM t OPTION (HASH JOIN, [MAXDOP] 1)",
+            "SELECT * FROM (SELECT 1 a) x OPTION ((MAXDOP 1))",
+        ] {
+            let v = violation(sql).unwrap_or_else(|| panic!("accepted: {sql}"));
+            assert_eq!(v.reason, Forbidden, "{sql}");
+        }
+        check(
+            "SELECT * FROM t OPTION (USE HINT ('X'))",
+            Some((Forbidden, Some("USE"))),
+        );
+        check("SELECT maxdop FROM t OPTION (RECOMPILE) ", None);
+        check(
+            "SELECT * FROM t OPTION (RECOMPILE); SELECT maxdop FROM t",
+            None,
+        );
     }
 
     #[test]
