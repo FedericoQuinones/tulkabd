@@ -16,7 +16,16 @@ const run = (cmd, args) =>
 
 const rust = run('cargo', ['about', 'generate', 'about.hbs']);
 
-const bySpdx = JSON.parse(run('pnpm', ['licenses', 'list', '--prod', '--json']));
+// devDependencies whose code is compiled into the shipped frontend bundle (the Svelte runtime).
+const bundledDev = new Set(['svelte', 'clsx', 'esm-env']);
+const bySpdx = {};
+for (const [spdx, pkgs] of Object.entries(JSON.parse(run('pnpm', ['licenses', 'list', '--json'])))) {
+  const keep = pkgs.filter((p) => bundledDev.has(p.name));
+  if (keep.length) bySpdx[spdx] = keep;
+}
+for (const [spdx, pkgs] of Object.entries(JSON.parse(run('pnpm', ['licenses', 'list', '--prod', '--json'])))) {
+  bySpdx[spdx] = [...(bySpdx[spdx] ?? []), ...pkgs.filter((p) => !bundledDev.has(p.name))];
+}
 let npm = '\n\nThird-party notices for the npm dependencies of tulkabd.\n\n';
 for (const [spdx, pkgs] of Object.entries(bySpdx)) {
   for (const pkg of pkgs) {
