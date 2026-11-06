@@ -191,8 +191,8 @@ fn kind_name(kind: ObjectKind) -> &'static str {
         ObjectKind::Table => "table",
         ObjectKind::View => "view",
         ObjectKind::Procedure => "procedure",
-        ObjectKind::Function => "scalar function",
-        ObjectKind::TableFunction => "table function",
+        ObjectKind::Function => "scalarFunction",
+        ObjectKind::TableFunction => "tableFunction",
         ObjectKind::Synonym => "synonym",
     }
 }
