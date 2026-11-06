@@ -43,7 +43,7 @@ import {
   type MenuActions,
   type Row,
 } from "./tree";
-import { explorer, OBJECT_PAGE } from "./tree.svelte";
+import { explorer, OBJECT_PAGE, REMEMBERED_PATHS } from "./tree.svelte";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -717,4 +717,78 @@ test("deleting a connection unbinds the tabs that used it", async () => {
   expect(await explorer.deleteConnection(local.id)).toBe(true);
   expect(spy).toHaveBeenCalledWith(local.id);
   spy.mockRestore();
+});
+
+// ---- remembering what is open ----
+
+const lastPersisted = () => vi.mocked(ipc.setExpanded).mock.calls.at(-1)?.[0];
+
+test("databases and groups open under a connection are persisted, opened tables are not", async () => {
+  const dbKey = keyOf.db("c2", "Ventas");
+  const groupKey = keyOf.group("c2", "Ventas", "table");
+  const tableKey = keyOf.object("c2", "Ventas", { schema: "dbo", name: "T", kind: "table" });
+  explorer.expanded.add("c2");
+  explorer.expanded.add(dbKey);
+  explorer.expanded.add(groupKey);
+  explorer.expanded.add(tableKey);
+  await explorer.expand(keyOf.saved("c2", "Ventas"));
+  await flush();
+  expect(lastPersisted()).toEqual(["c2", dbKey, groupKey, keyOf.saved("c2", "Ventas")]);
+});
+
+test("init restores open databases and groups without connecting", async () => {
+  const dbKey = keyOf.db("c2", "Ventas");
+  const groupKey = keyOf.group("c2", "Ventas", "table");
+  const tableKey = keyOf.object("c2", "Ventas", { schema: "dbo", name: "T", kind: "table" });
+  vi.mocked(ipc.listExpanded).mockResolvedValue(["c2", dbKey, groupKey, tableKey]);
+  vi.mocked(ipc.explorerDatabases).mockResolvedValue([db("Ventas", { tables: 1 })]);
+  vi.mocked(ipc.explorerObjects).mockResolvedValue([{ schema: "dbo", name: "T", kind: "table" }]);
+  await explorer.init();
+  await flush();
+  await flush();
+  expect(ipc.connectExplorer).not.toHaveBeenCalled();
+  expect(explorer.expanded.has(tableKey)).toBe(false);
+  const rows = labels();
+  expect(rows).toContain("db:Ventas");
+  expect(rows).toContain("notice:Loading…");
+  await flush();
+  expect(labels()).toContain("dbo.T");
+  expect(explorer.state("c2").status).toBe("offline");
+});
+
+test("what is open survives a disconnect and a reconnect", async () => {
+  const dbKey = keyOf.db("c2", "Ventas");
+  vi.mocked(ipc.explorerDatabases).mockResolvedValue([db("Ventas")]);
+  vi.mocked(ipc.disconnectExplorer).mockResolvedValue();
+  vi.mocked(ipc.connectExplorer).mockResolvedValue({ server: { version: "16", user: "sa", singleDatabase: false }, databases: ["Ventas"] });
+  await explorer.expand("c2");
+  await explorer.expand(dbKey);
+  await explorer.disconnect("c2");
+  await explorer.connect("c2");
+  await flush();
+  expect(explorer.rows.find((r) => r.key === dbKey)?.expanded).toBe(true);
+  expect(labels()).toContain("saved:0");
+});
+
+test("only the newest remembered paths are kept", async () => {
+  explorer.expanded.add("c2");
+  for (let i = 0; i < REMEMBERED_PATHS + 20; i++) explorer.expanded.add(keyOf.db("c2", `d${i}`));
+  await explorer.expand(keyOf.db("c2", "last"));
+  await flush();
+  const saved = lastPersisted()!;
+  expect(saved).toHaveLength(1 + REMEMBERED_PATHS);
+  expect(saved[0]).toBe("c2");
+  expect(saved.at(-1)).toBe(keyOf.db("c2", "last"));
+  expect(saved).not.toContain(keyOf.db("c2", "d0"));
+});
+
+test("paths of a deleted connection are forgotten", async () => {
+  const dbKey = keyOf.db("c2", "Ventas");
+  explorer.expanded.add("c2");
+  explorer.expanded.add(dbKey);
+  explorer.expanded.add(keyOf.db("c3", "Other"));
+  connections.onForget?.("c2");
+  await flush();
+  expect(explorer.expanded.has(dbKey)).toBe(false);
+  expect(lastPersisted()).toEqual(["c2", keyOf.db("c3", "Other")]);
 });
