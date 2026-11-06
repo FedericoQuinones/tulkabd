@@ -11,13 +11,20 @@
     env: string | null;
     renaming: boolean;
     dropTarget: boolean;
+    /** Position in the flattened tree, for finding the element again. */
+    index: number;
+    /** Offset from the top of the scrolling content, in px: the tree only renders the rows in view. */
+    top: number;
+    /** Size of the row's sibling set and its place in it: the DOM does not hold the other rows. */
+    setsize: number;
+    posinset: number;
     onclick: (row: Row) => void;
     onmenu: (row: Row, x: number, y: number) => void;
     onrename: (row: Row, name: string | null) => void;
     /** A press on a folder or connection row that is not being renamed: it may become a drag. */
     ondragpress: (row: Row, e: PointerEvent) => void;
   }
-  let { row, focused, env, renaming, dropTarget, onclick, onmenu, onrename, ondragpress }: Props = $props();
+  let { row, focused, env, renaming, dropTarget, index, top, setsize, posinset, onclick, onmenu, onrename, ondragpress }: Props = $props();
 
   // 16x16 icons drawn with the 1.5px stroke of svg.i (theme.css).
   const icons = {
@@ -64,6 +71,8 @@
 <div
   role="treeitem"
   aria-level={row.level}
+  aria-setsize={setsize}
+  aria-posinset={posinset}
   aria-expanded={row.expandable ? row.expanded : undefined}
   aria-selected={focused}
   tabindex={focused ? 0 : -1}
@@ -71,9 +80,11 @@
   class:dimmed
   class:focused
   class:drop={dropTarget}
+  style:top="{top}px"
   style:padding-left="{6 + (row.level - 1) * 14}px"
   style:--env={env ?? "var(--accent)"}
   data-drop="tree:{row.key}"
+  data-index={index}
   onclick={() => onclick(row)}
   oncontextmenu={(e) => {
     e.preventDefault();
@@ -159,7 +170,11 @@
 
 <style>
   .t {
-    height: 28px;
+    position: absolute;
+    left: 0;
+    right: 0;
+    box-sizing: border-box;
+    height: var(--row-h, 28px);
     display: flex;
     align-items: center;
     gap: 7px;

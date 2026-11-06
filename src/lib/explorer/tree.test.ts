@@ -39,6 +39,7 @@ import {
   keyOf,
   navigate,
   quoteName,
+  siblingPositions,
   selectTop10,
   type MenuActions,
   type Row,
@@ -791,4 +792,47 @@ test("paths of a deleted connection are forgotten", async () => {
   await flush();
   expect(explorer.expanded.has(dbKey)).toBe(false);
   expect(lastPersisted()).toEqual(["c2", keyOf.db("c3", "Other")]);
+});
+
+test("PageDown and PageUp move by a page and stop at the ends", () => {
+  explorer.expanded.add("fa");
+  const rows = explorer.rows; // Cliente A, Proyecto X, Otros, billing, Local
+  expect(navigate(rows, "fa", "PageDown", 2)).toEqual({ focus: "fo" });
+  expect(navigate(rows, "fa", "PageDown", 50)).toEqual({ focus: "c2" });
+  expect(navigate(rows, "c2", "PageUp", 3)).toEqual({ focus: "fx" });
+  expect(navigate(rows, "fx", "PageUp", 50)).toEqual({ focus: "fa" });
+  expect(navigate(rows, null, "PageDown")).toEqual({ focus: "fa" });
+});
+
+test("siblingPositions counts the rows that share a parent, wherever they sit in the list", () => {
+  explorer.expanded.add("fa");
+  explorer.expanded.add("fx");
+  const rows = explorer.rows;
+  const at = (key: string) => siblingPositions(rows)[rows.findIndex((r) => r.key === key)];
+  expect(at("fa")).toEqual({ setsize: 4, posinset: 1 });
+  expect(at("fx")).toEqual({ setsize: 1, posinset: 1 });
+  expect(at("c1")).toEqual({ setsize: 1, posinset: 1 });
+  expect(at("fo")).toEqual({ setsize: 4, posinset: 2 });
+  expect(at("c2")).toEqual({ setsize: 4, posinset: 4 });
+});
+
+test("a database with thousands of objects flattens to one page of rows and a show-more row", async () => {
+  explorer.expanded.add("c2");
+  explorer.expanded.add(keyOf.db("c2", "Big"));
+  const group = keyOf.group("c2", "Big", "table");
+  explorer.expanded.add(group);
+  const st = explorer.state("c2");
+  st.status = "connected";
+  st.databases = [db("Big", { tables: 10_000 })];
+  vi.mocked(ipc.explorerObjects).mockResolvedValue(
+    Array.from({ length: 10_000 }, (_, i) => ({ schema: "dbo", name: `T${i}`, kind: "table" as const })),
+  );
+  void explorer.rows;
+  await flush();
+  const rows = explorer.rows;
+  const first = rows.findIndex((r) => r.kind === "object");
+  expect(rows.slice(first, first + OBJECT_PAGE).every((r) => r.kind === "object" && r.parent === group)).toBe(true);
+  const more = rows[first + OBJECT_PAGE];
+  expect(more.kind === "notice" && more.action !== null).toBe(true);
+  expect(siblingPositions(rows)[first + OBJECT_PAGE]).toEqual({ setsize: OBJECT_PAGE + 1, posinset: OBJECT_PAGE + 1 });
 });

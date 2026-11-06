@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
   import { t } from "../i18n/t";
   import type { ConnectionConfig, Folder, ParsedConnection } from "../ipc";
   import { parsePasted } from "../connections/connstr";
@@ -8,10 +8,18 @@
   import ContextMenu from "./ContextMenu.svelte";
   import FolderDialog, { type FolderDialogMode } from "./FolderDialog.svelte";
   import TreeNode from "./TreeNode.svelte";
-  import { canMoveFolder, keyOf, navigate, type DragItem, type MenuActions, type MenuItem, type Row } from "./tree";
+  import { revealRowTop, spacerHeight, isScaled, maxVirtualTop, toRealTop, toVirtualTop, visibleRange, type ScrollGeometry } from "../results/virtual";
+  import { canMoveFolder, keyOf, navigate, siblingPositions, type DragItem, type MenuActions, type MenuItem, type Row } from "./tree";
   import { explorer, menuFor } from "./tree.svelte";
   import { queryError } from "../queries/queries.svelte";
   import { tabs } from "../tabs/tabs.svelte";
+
+  /** Fallback row height in px; the stylesheet's `--row-h` is what counts. */
+  const ROW_HEIGHT = 28;
+  /** Rows kept rendered above and below the view, so a fast scroll does not show blanks. */
+  const OVERSCAN = 8;
+  /** Height assumed before the tree is measured, in px. */
+  const UNMEASURED_HEIGHT = 600;
 
   interface Props {
     onnewconnection: (folderId?: string | null) => void;
@@ -44,11 +52,132 @@
     return null;
   }
 
+  // ---- virtual scrolling ----
+  // Only the rows in view (plus a few) are in the DOM; a spacer gives the scrollbar the full height.
+  // `scrollTop` is the position in row space, `realTop` the element's own; they differ only when the
+  // rows are taller than the capped spacer (see results/virtual.ts, shared with the result grid).
+
+  let scrollTop = $state(0);
+  let realTop = $state(0);
+  /** The scrollTop last set from code: the scroll event it causes must not re-derive `scrollTop`. */
+  let programmatic: number | null = null;
+  let viewportH = $state(0);
+  let rowH = $state(ROW_HEIGHT);
+  /** The first visible row and how far into it the view starts, to hold still when rows above change. */
+  let anchor: { key: string; delta: number } | null = null;
+
+  const geo = $derived<ScrollGeometry>({ total: rows.length, rowH, bodyH: viewportH });
+  // An unmeasured tree (not laid out yet) still renders a screenful.
+  const range = $derived(visibleRange(scrollTop, viewportH || UNMEASURED_HEIGHT, rowH, rows.length, OVERSCAN));
+  const page = $derived(Math.max(1, Math.floor(viewportH / rowH) - 1));
+  const positions = $derived(siblingPositions(rows));
+  /**
+   * Indexes to render, in tree order: the window, plus the focused and the renamed row wherever they
+   * are, so the roving tab stop and a rename in progress survive being scrolled out of view.
+   */
+  const indexes = $derived.by(() => {
+    const out: number[] = [];
+    const pinned = new Set<number>();
+    for (const k of [tabKey, renaming]) {
+      const i = k === null ? -1 : rows.findIndex((r) => r.key === k);
+      if (i >= 0 && (i < range.start || i >= range.end)) pinned.add(i);
+    }
+    const before = [...pinned].filter((i) => i < range.start).sort((a, b) => a - b);
+    const after = [...pinned].filter((i) => i >= range.end).sort((a, b) => a - b);
+    out.push(...before);
+    for (let i = range.start; i < range.end; i++) out.push(i);
+    out.push(...after);
+    return out;
+  });
+
+  function setScroll(v: number) {
+    if (!treeEl) return;
+    v = Math.min(Math.max(v, 0), maxVirtualTop(geo));
+    const real = toRealTop(v, geo);
+    programmatic = real;
+    treeEl.scrollTop = real;
+    realTop = treeEl.scrollTop;
+    scrollTop = isScaled(geo) ? v : realTop;
+  }
+
+  function takeAnchor() {
+    const i = Math.floor(scrollTop / rowH);
+    anchor = scrollTop > 0 && rows[i] ? { key: rows[i].key, delta: scrollTop - i * rowH } : null;
+  }
+
+  function onscroll(e: Event & { currentTarget: HTMLDivElement }) {
+    const top = e.currentTarget.scrollTop;
+    realTop = top;
+    if (programmatic !== null && Math.abs(top - programmatic) <= 1) {
+      programmatic = null;
+      if (!isScaled(geo)) scrollTop = top;
+    } else {
+      programmatic = null;
+      scrollTop = toVirtualTop(top, geo);
+    }
+    takeAnchor();
+  }
+
+  /** Scrolls the minimum that shows row `i` whole. */
+  function reveal(i: number) {
+    const next = revealRowTop(i, scrollTop, geo);
+    if (next !== scrollTop) setScroll(next);
+  }
+
+  // The viewport height and the row height (a CSS variable, so the stylesheet owns it).
+  $effect(() => {
+    const el = treeEl;
+    if (!el) return;
+    const measure = () => {
+      viewportH = el.clientHeight;
+      const h = parseFloat(getComputedStyle(el).getPropertyValue("--row-h"));
+      rowH = h > 0 ? h : ROW_HEIGHT;
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+
+  // Rows appearing or going away above the view (a refresh, a load finishing) must not move what
+  // the user is looking at: the first visible row stays where it was.
+  $effect(() => {
+    const list = rows;
+    untrack(() => {
+      const held = anchor;
+      void tick().then(() => {
+        if (list !== explorer.rows) return;
+        if (held) {
+          const i = list.findIndex((r) => r.key === held.key);
+          if (i >= 0 && i * rowH + held.delta !== scrollTop) setScroll(i * rowH + held.delta);
+        }
+        takeAnchor();
+      });
+    });
+  });
+
+  // A row that takes the focus (keyboard, a new connection, a reveal from elsewhere) is scrolled to.
+  $effect(() => {
+    const key = explorer.focusKey;
+    if (key === null) return;
+    untrack(() => {
+      void tick().then(() => {
+        const i = explorer.rows.findIndex((r) => r.key === key);
+        if (i >= 0 && key === explorer.focusKey) reveal(i);
+      });
+    });
+  });
+
   async function focusRow(key: string) {
     explorer.focusKey = key;
     await tick();
     const i = explorer.rows.findIndex((r) => r.key === key);
-    treeEl?.querySelectorAll<HTMLElement>('[role="treeitem"]')[i]?.focus();
+    if (i < 0) return;
+    reveal(i);
+    await tick();
+    // The scroll is ours: the browser must not also scroll the element into view.
+    treeEl?.querySelector<HTMLElement>(`[data-index="${i}"]`)?.focus({ preventScroll: true });
   }
 
   const ui: MenuActions = {
@@ -120,7 +249,7 @@
     explorer.focusKey = row.key;
     const items = menuFor(row, ui);
     if (items.length === 0) return;
-    const returnTo = treeEl?.querySelectorAll<HTMLElement>('[role="treeitem"]')[rows.findIndex((r) => r.key === row.key)] ?? null;
+    const returnTo = treeEl?.querySelector<HTMLElement>(`[data-index="${rows.findIndex((r) => r.key === row.key)}"]`) ?? null;
     menu = { items, x, y, label: t("explorer.menu.label", { name: rowName(row) }), returnTo };
   }
 
@@ -183,7 +312,7 @@
       renaming = row.key;
       return;
     }
-    const nav = navigate(rows, tabKey, e.key);
+    const nav = navigate(rows, tabKey, e.key, page);
     if (!nav) return;
     e.preventDefault();
     if ("focus" in nav) void focusRow(nav.focus);
@@ -352,21 +481,29 @@
       bind:this={treeEl}
       {onkeydown}
       {onpaste}
+      {onscroll}
       data-drop="tree"
     >
-      {#each rows as row (row.key)}
-        <TreeNode
-          {row}
-          focused={row.key === tabKey}
-          env={envOf(row)}
-          renaming={renaming === row.key}
-          dropTarget={dropKey === row.key}
-          onclick={onrowclick}
-          onmenu={openMenu}
-          {onrename}
-          {ondragpress}
-        />
-      {/each}
+      <div class="inner" style:height="{spacerHeight(geo)}px">
+        {#each indexes as i (rows[i].key)}
+          {@const row = rows[i]}
+          <TreeNode
+            {row}
+            focused={row.key === tabKey}
+            env={envOf(row)}
+            renaming={renaming === row.key}
+            dropTarget={dropKey === row.key}
+            index={i}
+            top={realTop + (i * rowH - scrollTop)}
+            setsize={positions[i].setsize}
+            posinset={positions[i].posinset}
+            onclick={onrowclick}
+            onmenu={openMenu}
+            {onrename}
+            {ondragpress}
+          />
+        {/each}
+      </div>
       {#if rows.length === 0 && explorer.filter !== ""}
         <p class="none">{t("explorer.filter.none")}</p>
       {/if}
@@ -482,11 +619,17 @@
     box-shadow: 0 0 0 1px var(--accent);
   }
   .tree {
+    --row-h: 28px;
     flex: 1;
     min-height: 0;
     overflow: auto;
     padding: 0 6px 10px;
     outline: none;
+  }
+  /* The rows are absolutely placed in a box as tall as the whole tree; clipping keeps a pinned row far from the view from stretching it. */
+  .inner {
+    position: relative;
+    overflow: clip;
   }
   .error {
     display: flex;
