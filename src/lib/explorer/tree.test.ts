@@ -554,7 +554,7 @@ test("Copy connection string says whether the password was included", async () =
   vi.mocked(ipc.copyConnectionString).mockResolvedValue(true);
   await explorer.copyConnectionString("c2", true);
   expect(ipc.copyConnectionString).toHaveBeenLastCalledWith("c2", true);
-  expect(explorer.toast).toBe("Copied — includes the password");
+  expect(explorer.toast).toBe("Copied with the password; the clipboard clears in 45 seconds");
 
   vi.mocked(ipc.copyConnectionString).mockResolvedValue(false);
   await explorer.copyConnectionString("c2", true);
