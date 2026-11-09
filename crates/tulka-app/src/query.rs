@@ -290,9 +290,13 @@ where
         _ => {}
     }
 
-    // A `USE` in the script changes the session's database: read it back.
+    // A `USE` in the script changes the session's database. The server
+    // announces every change in the response, so no query is needed; one is
+    // kept as the fallback for a driver that does not track it.
     let database = if outcome == RunOutcome::Disconnected {
         None
+    } else if let Some(name) = session.announced_database() {
+        Some(name)
     } else {
         session.current_database().await.ok()
     };

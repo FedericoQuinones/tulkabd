@@ -28,6 +28,9 @@ pub(crate) struct Context {
     /// [`Config::lossy_utf16_decoding`](crate::Config::lossy_utf16_decoding) at
     /// connect time. Defaults to `false` (strict decoding).
     lossy_utf16: bool,
+    /// tulka patch: the database the server last reported through an
+    /// ENVCHANGE (login and every `USE`).
+    database: Option<String>,
 }
 
 impl Context {
@@ -50,6 +53,7 @@ impl Context {
             spn: None,
             command_timeout: None,
             lossy_utf16: false,
+            database: None,
         }
     }
 
@@ -131,6 +135,14 @@ impl Context {
 
     pub fn version(&self) -> FeatureLevel {
         self.version
+    }
+
+    pub(crate) fn database(&self) -> Option<&str> {
+        self.database.as_deref()
+    }
+
+    pub(crate) fn set_database(&mut self, name: String) {
+        self.database = Some(name);
     }
 
     pub fn set_spn(&mut self, host: impl AsRef<str>, port: u16) {

@@ -112,6 +112,7 @@ async fn print_yields_info_item() {
     assert_eq!(infos[0].number, 0);
     assert_eq!(infos[0].class, 0);
     assert_eq!(infos[0].line, 1);
+    assert_eq!(infos[0].procedure, "");
 
     // RAISERROR with severity <= 10 is an informational message as well, and
     // carries its number, state and class.
@@ -472,6 +473,31 @@ async fn read_rows(stream: &mut tiberius::QueryStream<'_>, n: usize) {
             rows += 1;
         }
     }
+}
+
+#[tokio::test]
+async fn database_follows_use_statements() {
+    let Some(mut client) = connect("database_follows_use_statements").await else {
+        return;
+    };
+
+    // The login ENVCHANGE names the default database.
+    assert_eq!(client.database(), Some("master"));
+
+    collect(&mut client, "USE tempdb").await.unwrap();
+    assert_eq!(client.database(), Some("tempdb"));
+
+    // Several `USE` in one batch: the last one wins.
+    collect(&mut client, "USE master; USE model; USE tempdb; USE master")
+        .await
+        .unwrap();
+    assert_eq!(client.database(), Some("master"));
+
+    // A failed `USE` leaves it alone.
+    assert!(collect(&mut client, "USE tulka_no_such_database")
+        .await
+        .is_err());
+    assert_eq!(client.database(), Some("master"));
 }
 
 async fn assert_usable_quickly(client: &mut TestClient) {
