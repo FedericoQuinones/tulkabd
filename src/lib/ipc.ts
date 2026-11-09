@@ -388,7 +388,7 @@ export const moveFolder = (id: string, parentId: string | null) =>
   invoke<void>("move_folder", { id, parentId });
 /** Ids of the tree nodes left open (folders and connections). */
 export const listExpanded = () => invoke<string[]>("list_expanded");
-/** Replaces the set of expanded folder and connection ids. */
+/** Replaces the set of open tree nodes: folder and connection ids, and the row keys of the databases and groups below them. */
 export const setExpanded = (ids: string[]) => invoke<void>("set_expanded", { ids });
 /** How "Copy" writes numbers: with the system's decimal separator or always with a dot. */
 export type NumberFormat = "system" | "invariant";
