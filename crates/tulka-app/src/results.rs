@@ -101,6 +101,8 @@ pub struct ResultBuffer {
     pub truncated: bool,
     /// Set when rows were dropped because the run's memory budget ran out.
     pub memory_cut: bool,
+    /// Set when a text or binary cell was shortened to [`MAX_CELL_BYTES`].
+    pub capped: bool,
     /// Indexes into `rows` of the visible rows, in display order, set by
     /// [`ResultBuffer::set_view`]; `None` shows every row in arrival order.
     view: Option<Vec<u32>>,
@@ -208,6 +210,7 @@ impl ResultBuffer {
             cap,
             truncated: false,
             memory_cut: false,
+            capped: false,
             view: None,
         }
     }
@@ -289,6 +292,21 @@ impl ResultBuffer {
         }
     }
 
+    /// Indexes into `rows` of the visible rows, in display order. Rows never
+    /// change once a run ended (only the view does), so these stay valid for
+    /// [`ResultBuffer::row`] even if the view is changed meanwhile.
+    pub fn visible_indexes(&self) -> Vec<u32> {
+        match &self.view {
+            Some(v) => v.clone(),
+            None => (0..self.rows.len() as u32).collect(),
+        }
+    }
+
+    /// The stored row at `index` (see [`ResultBuffer::visible_indexes`]).
+    pub fn row(&self, index: u32) -> &[Value] {
+        &self.rows[index as usize]
+    }
+
     /// The visible rows in the inclusive range `from..=to`, clamped.
     fn visible_between(&self, from: usize, to: usize) -> Vec<&[Value]> {
         let end = to.saturating_add(1).min(self.visible_len());
@@ -323,6 +341,7 @@ impl ResultBuffer {
             keep += 1;
         }
         rows.truncate(keep);
+        self.capped |= out.capped;
         self.rows.append(&mut rows);
         out
     }

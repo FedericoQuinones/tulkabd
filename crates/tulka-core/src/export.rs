@@ -64,7 +64,7 @@ pub fn to_ai<R: AsRef<[Value]>>(columns: &[Column], rows: &[R]) -> String {
 
 /// Header text for a column; a column without a name (`SELECT 1`) would
 /// otherwise leave an empty header cell.
-fn header_name(c: &Column) -> &str {
+pub(crate) fn header_name(c: &Column) -> &str {
     if c.name.is_empty() {
         "(no name)"
     } else {
@@ -138,7 +138,7 @@ fn bool_digit(b: bool) -> String {
 }
 
 /// `0x` followed by upper-case hex.
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(2 + bytes.len() * 2);
     s.push_str("0x");
     for b in bytes {

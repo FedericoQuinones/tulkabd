@@ -598,11 +598,15 @@ async fn cancel_running(tab: Option<TabState>) {
 }
 
 /// The buffer of a result, shared so it is read without the tabs lock.
-fn result_of(state: &AppState, tab_id: &str, index: u32) -> Result<SharedBuffer, String> {
+pub(crate) fn result_of(
+    state: &AppState,
+    tab_id: &str,
+    index: u32,
+) -> Result<SharedBuffer, String> {
     result_in(state.tabs().open.get(tab_id).ok_or_else(no_session)?, index)
 }
 
-fn result_in(tab: &TabState, index: u32) -> Result<SharedBuffer, String> {
+pub(crate) fn result_in(tab: &TabState, index: u32) -> Result<SharedBuffer, String> {
     tab.results
         .get(index as usize)
         .cloned()
