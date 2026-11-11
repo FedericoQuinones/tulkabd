@@ -13,10 +13,10 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 uuid = { version = "1", features = ["v4"] }
 sys-locale = "0.3"
+keyring-core = "1"
 
 # OS keychain backends. Linux uses the pure-Rust Secret Service client (zbus),
 # so no libdbus/openssl development packages are needed to build.
-keyring-core = "1"
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "1", features = ["rt-async-io-crypto-rust"] }
 [target.'cfg(target_os = "macos")'.dependencies]
