@@ -45,28 +45,21 @@ impl KeyringStore {
         Self
     }
 
+    /// Builds the entry on a platform store created for this call. A store
+    /// keeps one Secret Service session for its lifetime, so sharing one would
+    /// leave every later call failing after the daemon restarts. The entry
+    /// holds on to what it needs from the store.
+    ///
+    /// The stores keep the entry layout of keyring 3: Secret Service items
+    /// with `service` and `username` attributes, a macOS generic password with
+    /// that service and account, and a Windows credential named
+    /// `{user}.{service}`.
     fn entry(id: &str) -> Result<keyring_core::Entry, SecretError> {
-        ensure_default_store()?;
-        keyring_core::Entry::new(KEYRING_SERVICE, id).map_err(map_keyring_error)
+        let store = new_platform_store().map_err(map_keyring_error)?;
+        store
+            .build(KEYRING_SERVICE, id, None)
+            .map_err(map_keyring_error)
     }
-}
-
-/// Installs the platform credential store as the `keyring_core` default the
-/// first time it is needed. Connecting can fail (for example without a
-/// session bus), so a failure is reported per call and retried on the next
-/// one instead of being remembered.
-///
-/// The stores keep the entry layout of keyring 3: Secret Service items with
-/// `service` and `username` attributes, a macOS generic password with that
-/// service and account, and a Windows credential named `{user}.{service}`.
-fn ensure_default_store() -> Result<(), SecretError> {
-    static INSTALL: Mutex<()> = Mutex::new(());
-    let _guard = INSTALL.lock().unwrap_or_else(|e| e.into_inner());
-    if keyring_core::get_default_store().is_some() {
-        return Ok(());
-    }
-    keyring_core::set_default_store(new_platform_store().map_err(map_keyring_error)?);
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -227,5 +220,7 @@ mod tests {
         assert_eq!(s.get(&id).unwrap().as_deref(), Some("pw"));
         s.delete(&id).unwrap();
         assert_eq!(s.get(&id).unwrap(), None);
+        // Each call builds its own store; none is left as the global default.
+        assert!(keyring_core::get_default_store().is_none());
     }
 }
