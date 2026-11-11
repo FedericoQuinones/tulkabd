@@ -175,3 +175,25 @@ test("a failed fetch is not cached", async () => {
   await expect(cache.get("c1", "Ventas")).rejects.toBe("not_connected");
   expect(await cache.get("c1", "Ventas")).toBe(meta);
 });
+
+test("a synonym is completed like the object it points to", async () => {
+  const withSynonyms: CompletionMetadata = {
+    schemas: ["dbo"],
+    objects: [
+      { schema: "dbo", name: "synTabla", kind: "synonym", target: "table" },
+      { schema: "dbo", name: "synProc", kind: "synonym", target: "procedure" },
+      { schema: "dbo", name: "synScalar", kind: "synonym", target: "function" },
+      { schema: "dbo", name: "synRows", kind: "synonym", target: "tableFunction" },
+      { schema: "dbo", name: "synLost", kind: "synonym" },
+    ],
+    columns: {},
+  };
+  const options = await completionSource(withSynonyms)(new CompletionContext(EditorState.create({ doc: "" }), 0, true));
+  // A procedure cannot be selected from; the others sit where relations do.
+  expect(labels(options)).not.toContain("synProc");
+  expect(labels(options)).toEqual(expect.arrayContaining(["synTabla", "synScalar", "synRows", "synLost"]));
+  expect(option(options, "synTabla")?.apply).toBeUndefined();
+  // A function-like target needs its schema, as a function does.
+  expect(option(options, "synScalar")?.apply).toBe("dbo.synScalar");
+  expect(option(options, "synRows")?.apply).toBe("dbo.synRows");
+});

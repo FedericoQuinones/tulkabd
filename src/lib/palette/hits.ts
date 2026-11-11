@@ -1,5 +1,6 @@
 // Pure parts of the object palette: grouping, match highlighting and keys.
 import type { PaletteHit, SavedQueryHit } from "../ipc";
+import { canSelectTop } from "../objectKind";
 
 export interface PaletteGroup {
   key: string;
@@ -106,8 +107,8 @@ export function paletteKey(e: KeyboardEvent, isMac: boolean, caretAtEnd: boolean
 }
 
 /** Whether an action applies to an object kind: Enter opens anything, Select top 10 needs rows, definitions need code. */
-export function canRun(action: PaletteAction, kind: PaletteHit["object"]["kind"]): boolean {
-  if (action === "selectTop") return kind === "table" || kind === "view" || kind === "synonym";
-  if (action === "definition") return kind !== "table";
+export function canRun(action: PaletteAction, object: PaletteHit["object"]): boolean {
+  if (action === "selectTop") return canSelectTop(object);
+  if (action === "definition") return object.kind !== "table";
   return true;
 }

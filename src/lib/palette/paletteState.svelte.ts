@@ -124,7 +124,7 @@ class PaletteStore {
     }
     const hit = item.hit;
     const kind = hit.object.kind;
-    if (!canRun(action, kind)) return;
+    if (!canRun(action, hit.object)) return;
     this.hide();
     const target: ObjectTarget = {
       connectionId: hit.connectionId,

@@ -3,6 +3,7 @@
 import { t } from "../i18n/t";
 import type { CachedDatabase, ColumnInfo, ConnectionConfig, DbObject, Folder, ObjectKind, PaletteHit } from "../ipc";
 import { tabs } from "../tabs/tabs.svelte";
+import { canSelectTop } from "../objectKind";
 
 /** `[name]` with `]` doubled. */
 export const quoteIdent = (s: string) => `[${s.replaceAll("]", "]]")}]`;
@@ -39,9 +40,6 @@ export const OBJECT_KINDS: ObjectKind[] = ["table", "view", "procedure", "tableF
 
 /** Kinds whose rows expand into columns. */
 export const hasColumns = (kind: ObjectKind) => kind === "table" || kind === "view" || kind === "tableFunction";
-
-/** Kinds that `SELECT TOP 10 *` works on; a function needs arguments and a procedure is run, not read. */
-export const canSelectTop = (kind: ObjectKind) => kind === "table" || kind === "view" || kind === "synonym";
 
 /**
  * Row keys. Folders and connections use their own id (that is what `set_expanded`
@@ -327,7 +325,7 @@ export function buildMenu(row: Row, ui: MenuActions, store: MenuStore): MenuItem
       const { schema, name, kind } = object;
       const target: ObjectTarget = { connectionId, database, schema, name };
       const items: MenuItem[] = [];
-      if (canSelectTop(kind)) {
+      if (canSelectTop(object)) {
         items.push({
           id: "selectTop",
           label: t("explorer.menu.selectTop"),

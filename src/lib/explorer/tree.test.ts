@@ -562,7 +562,13 @@ test("object menus follow the kind", () => {
   // A function needs arguments, so no Select top 10; only table-valued ones have columns to show.
   expect(ids(mk("tableFunction"))).toEqual(["structure", "definition", "copyName"]);
   expect(ids(mk("function"))).toEqual(["definition", "copyName"]);
-  expect(ids(mk("synonym"))).toEqual(["selectTop", "definition", "copyName"]);
+  // A synonym offers what its target does; its own source is the CREATE SYNONYM statement.
+  const synonym = (target?: ObjectKind): Row => ({ ...base, key: "syn", kind: "object", object: { schema: "dbo", name: "syn", kind: "synonym", target } });
+  expect(ids(synonym("table"))).toEqual(["selectTop", "definition", "copyName"]);
+  expect(ids(synonym("view"))).toEqual(["selectTop", "definition", "copyName"]);
+  for (const target of ["procedure", "function", "tableFunction", undefined] as const) {
+    expect(ids(synonym(target))).toEqual(["definition", "copyName"]);
+  }
   expect(buildMenu(mk("table"), actions(), explorer).find((m) => m.id === "copyName")?.hint).toBe("[dbo].[Order Details]");
 });
 

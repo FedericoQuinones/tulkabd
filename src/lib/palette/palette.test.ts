@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
-import type { AppEvent, ConnectionConfig, PaletteHit, SearchResponse } from "../ipc";
+import type { AppEvent, ConnectionConfig, ObjectKind, PaletteHit, SearchResponse } from "../ipc";
 
 vi.mock("../ipc", () => ({
   connectExplorer: vi.fn(),
@@ -216,12 +216,17 @@ test("a not connected procedure waits for the password prompt before opening its
   expect(open).toHaveBeenCalledWith({ kind: "definition", connectionId: "c2", database: "Ventas", schema: "dbo", name: "CerrarMes" });
 });
 
-test("functions and synonyms open their definition, and Select top 10 only suits synonyms", () => {
-  expect(canRun("selectTop", "function")).toBe(false);
-  expect(canRun("selectTop", "synonym")).toBe(true);
-  expect(canRun("definition", "function")).toBe(true);
-  expect(canRun("definition", "synonym")).toBe(true);
-  expect(canRun("selectTop", "tableFunction")).toBe(false);
+test("functions and synonyms open their definition, and Select top 10 suits what a synonym points to", () => {
+  const of = (kind: ObjectKind, target?: ObjectKind) => ({ schema: "dbo", name: "x", kind, target });
+  expect(canRun("selectTop", of("function"))).toBe(false);
+  expect(canRun("selectTop", of("tableFunction"))).toBe(false);
+  expect(canRun("selectTop", of("synonym", "table"))).toBe(true);
+  expect(canRun("selectTop", of("synonym", "view"))).toBe(true);
+  for (const target of ["procedure", "function", "tableFunction", undefined] as const) {
+    expect(canRun("selectTop", of("synonym", target))).toBe(false);
+  }
+  expect(canRun("definition", of("function"))).toBe(true);
+  expect(canRun("definition", of("synonym"))).toBe(true);
 });
 
 test("a cancelled password prompt opens nothing", async () => {
