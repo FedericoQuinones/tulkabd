@@ -3,7 +3,7 @@
 import { t } from "../i18n/t";
 import type { CachedDatabase, ColumnInfo, ConnectionConfig, DbObject, Folder, ObjectKind, PaletteHit } from "../ipc";
 import { tabs } from "../tabs/tabs.svelte";
-import { canSelectTop } from "../objectKind";
+import { canSelectTop, hasColumns } from "../objectKind";
 
 /** `[name]` with `]` doubled. */
 export const quoteIdent = (s: string) => `[${s.replaceAll("]", "]]")}]`;
@@ -37,9 +37,6 @@ export const objectTabs = {
 };
 
 export const OBJECT_KINDS: ObjectKind[] = ["table", "view", "procedure", "tableFunction", "function", "synonym"];
-
-/** Kinds whose rows expand into columns. */
-export const hasColumns = (kind: ObjectKind) => kind === "table" || kind === "view" || kind === "tableFunction";
 
 /**
  * Row keys. Folders and connections use their own id (that is what `set_expanded`
@@ -332,7 +329,8 @@ export function buildMenu(row: Row, ui: MenuActions, store: MenuStore): MenuItem
           run: () => objectTabs.selectTop(target),
         });
       }
-      if (hasColumns(kind)) {
+      // The structure comes from the object itself, which for a synonym is not resolved.
+      if (hasColumns({ kind })) {
         items.push({ id: "structure", label: t("explorer.menu.structure"), run: () => objectTabs.structure(target) });
       }
       if (kind !== "table") {

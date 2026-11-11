@@ -197,3 +197,16 @@ test("a synonym is completed like the object it points to", async () => {
   expect(option(options, "synScalar")?.apply).toBe("dbo.synScalar");
   expect(option(options, "synRows")?.apply).toBe("dbo.synRows");
 });
+
+test("an alias of a synonym completes the columns of its base object", async () => {
+  const withSynonym: CompletionMetadata = {
+    schemas: ["dbo"],
+    objects: [{ schema: "dbo", name: "synPedidos", kind: "synonym", target: "table" }],
+    columns: { "dbo.synPedidos": ["Id", "Cliente"] },
+  };
+  const doc = "SELECT p.| FROM dbo.synPedidos p";
+  const pos = doc.indexOf("|");
+  const state = EditorState.create({ doc: doc.slice(0, pos) + doc.slice(pos + 1) });
+  const r = await completionSource(withSynonym)(new CompletionContext(state, pos, false));
+  expect(labels(r)).toEqual(["Id", "Cliente"]);
+});

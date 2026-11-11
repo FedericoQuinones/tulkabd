@@ -222,9 +222,11 @@ test("functions and synonyms open their definition, and Select top 10 suits what
   expect(canRun("selectTop", of("tableFunction"))).toBe(false);
   expect(canRun("selectTop", of("synonym", "table"))).toBe(true);
   expect(canRun("selectTop", of("synonym", "view"))).toBe(true);
-  for (const target of ["procedure", "function", "tableFunction", undefined] as const) {
+  for (const target of ["procedure", "function", "tableFunction"] as const) {
     expect(canRun("selectTop", of("synonym", target))).toBe(false);
   }
+  // An unknown target (linked server, unreadable database) is left to the server.
+  expect(canRun("selectTop", of("synonym"))).toBe(true);
   expect(canRun("definition", of("function"))).toBe(true);
   expect(canRun("definition", of("synonym"))).toBe(true);
 });
