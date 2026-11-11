@@ -32,6 +32,16 @@ BEGIN
   DROP DATABASE tulka_meta;
 END
 GO
+IF DB_ID('tulka_meta_other') IS NOT NULL
+BEGIN
+  ALTER DATABASE tulka_meta_other SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+  DROP DATABASE tulka_meta_other;
+END
+GO
+CREATE DATABASE tulka_meta_other
+GO
+CREATE TABLE tulka_meta_other.dbo.Remota(Id int NOT NULL)
+GO
 CREATE DATABASE tulka_meta
 GO
 USE tulka_meta
@@ -69,6 +79,30 @@ GO
 CREATE PROCEDURE dbo.pSecreto WITH ENCRYPTION AS SELECT 1
 GO
 CREATE SYNONYM dbo.synPedidos FOR dbo.Pedidos
+GO
+CREATE SYNONYM dbo.synVista FOR dbo.vPedidos
+GO
+CREATE SYNONYM dbo.synProc FOR dbo.pTotal
+GO
+CREATE SYNONYM dbo.synEscalar FOR dbo.fnDoble
+GO
+CREATE SYNONYM dbo.synTabla FOR dbo.fnDeCliente
+GO
+CREATE SYNONYM dbo.synFalta FOR dbo.NoExiste
+GO
+CREATE SYNONYM dbo.synRemota FOR tulka_meta_other.dbo.Remota
+GO
+CREATE SYNONYM dbo.synRemotaFalta FOR tulka_meta_other.dbo.NoExiste
+GO
+CREATE SYNONYM dbo.synBaseFalta FOR tulka_no_existe.dbo.Nada
+GO
+CREATE SYNONYM dbo.synEnlazado FOR [un_servidor].tulka_meta.dbo.Pedidos
+GO
+CREATE SYNONYM dbo.synSinEsquema FOR Pedidos
+GO
+CREATE SYNONYM [dbo].[syn.Con Punto] FOR [dbo].[Order Details]
+GO
+CREATE SYNONYM dbo.synDeSyn FOR dbo.synPedidos
 ";
 
 /// Creates the `tulka_meta` database once per test process.
@@ -108,7 +142,19 @@ async fn snapshot_lists_objects_and_columns() {
             ("dbo".into(), "fnLista".into(), ObjectKind::TableFunction),
             ("dbo".into(), "pSecreto".into(), ObjectKind::Procedure),
             ("dbo".into(), "pTotal".into(), ObjectKind::Procedure),
+            ("dbo".into(), "syn.Con Punto".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synBaseFalta".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synDeSyn".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synEnlazado".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synEscalar".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synFalta".into(), ObjectKind::Synonym),
             ("dbo".into(), "synPedidos".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synProc".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synRemota".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synRemotaFalta".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synSinEsquema".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synTabla".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synVista".into(), ObjectKind::Synonym),
             ("dbo".into(), "vPedidos".into(), ObjectKind::View),
             ("ventas".into(), "Pedidos_Año".into(), ObjectKind::Table),
         ]
@@ -144,7 +190,7 @@ async fn snapshot_lists_objects_and_columns() {
         |name: &str| -> Vec<String> { cols_of(name).iter().map(|c| c.name.clone()).collect() };
     assert_eq!(names("fnDeCliente"), ["Id", "Total"]);
     assert_eq!(names("fnLista"), ["Id", "Cliente", "Total"]);
-    for none in ["fnDoble", "synPedidos"] {
+    for none in ["fnDoble", "synPedidos", "synProc"] {
         assert!(snap.columns.iter().all(|(k, _)| *k != index_of(none)));
     }
 }
@@ -365,4 +411,40 @@ async fn snapshot_is_not_blocked_by_an_open_transaction() {
          DROP DATABASE tulka_meta_lock",
     )
     .await;
+}
+
+#[tokio::test]
+async fn a_synonym_reports_the_kind_of_its_target() {
+    let Some(p) = test_params() else { return };
+    setup(&p).await;
+    let mut s = connect(&p).await;
+
+    let snap = s.snapshot("tulka_meta").await.unwrap();
+    let target = |name: &str| {
+        let o = snap.objects.iter().find(|o| o.name == name).unwrap();
+        assert_eq!(o.kind == ObjectKind::Synonym, name.starts_with("syn"));
+        o.target
+    };
+    for (synonym, expected) in [
+        ("synPedidos", Some(ObjectKind::Table)),
+        ("synVista", Some(ObjectKind::View)),
+        ("synProc", Some(ObjectKind::Procedure)),
+        ("synEscalar", Some(ObjectKind::Function)),
+        ("synTabla", Some(ObjectKind::TableFunction)),
+        ("synSinEsquema", Some(ObjectKind::Table)),
+        ("syn.Con Punto", Some(ObjectKind::Table)),
+        // Another database of the server.
+        ("synRemota", Some(ObjectKind::Table)),
+        // Missing object, missing database, linked server, synonym chain.
+        ("synFalta", None),
+        ("synRemotaFalta", None),
+        ("synBaseFalta", None),
+        ("synEnlazado", None),
+        ("synDeSyn", None),
+    ] {
+        assert_eq!(target(synonym), expected, "{synonym}");
+    }
+    // Objects that are not synonyms carry no target.
+    assert_eq!(target("Pedidos"), None);
+    assert_eq!(target("pTotal"), None);
 }

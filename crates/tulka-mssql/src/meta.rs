@@ -43,19 +43,34 @@ pub fn access_error(
     }
 }
 
+/// Result: schema, name, type, and for a synonym the parts of its base name
+/// (server, database, schema, object) and, when the base object is in this
+/// same database, its type. `PARSENAME` strips the brackets of a quoted part.
 pub fn objects_sql(prefix: &str) -> String {
     format!(
-        "SELECT s.name, o.name, o.type \
+        "SELECT s.name, o.name, o.type, \
+           PARSENAME(y.base_object_name, 4), PARSENAME(y.base_object_name, 3), \
+           PARSENAME(y.base_object_name, 2), PARSENAME(y.base_object_name, 1), \
+           bo.type \
          FROM {prefix}sys.objects o \
          JOIN {prefix}sys.schemas s ON s.schema_id = o.schema_id \
+         LEFT JOIN {prefix}sys.synonyms y ON y.object_id = o.object_id \
+         LEFT JOIN {prefix}sys.schemas bs \
+           ON bs.name = COALESCE(PARSENAME(y.base_object_name, 2), s.name) \
+          AND PARSENAME(y.base_object_name, 3) IS NULL \
+          AND PARSENAME(y.base_object_name, 4) IS NULL \
+         LEFT JOIN {prefix}sys.objects bo \
+           ON bo.schema_id = bs.schema_id AND bo.name = PARSENAME(y.base_object_name, 1) \
          WHERE o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'FS', 'FT', 'SN') \
            AND o.is_ms_shipped = 0 \
          ORDER BY s.name, o.name"
     )
 }
 
-pub fn object_from_row(row: &Row) -> Option<DbObject> {
-    let kind = match row.get::<&str, _>(2)?.trim() {
+/// The kind an object of catalog type `type_code` has in the explorer. A
+/// synonym's target is read the same way.
+pub fn kind_of_type(type_code: &str) -> Option<ObjectKind> {
+    Some(match type_code.trim() {
         "U" => ObjectKind::Table,
         "V" => ObjectKind::View,
         "P" => ObjectKind::Procedure,
@@ -63,12 +78,55 @@ pub fn object_from_row(row: &Row) -> Option<DbObject> {
         "IF" | "TF" | "FT" => ObjectKind::TableFunction,
         "SN" => ObjectKind::Synonym,
         _ => return None,
-    };
-    Some(DbObject {
+    })
+}
+
+/// Where the base object of a synonym lives when it is in another database
+/// of the server: `(database, schema, object)`.
+pub type ForeignBase = (String, String, String);
+
+/// A row of [`objects_sql`]: the object and, for a synonym whose base object
+/// is in another database, where to look for it. A base object on a linked
+/// server is never resolved.
+pub fn object_from_row(row: &Row) -> Option<(DbObject, Option<ForeignBase>)> {
+    let kind = kind_of_type(row.get::<&str, _>(2)?)?;
+    let mut target = None;
+    let mut foreign = None;
+    if kind == ObjectKind::Synonym {
+        let part = |i| row.get::<&str, _>(i).map(str::to_string);
+        // A synonym of a synonym stays unknown.
+        target = row
+            .get::<&str, _>(7)
+            .and_then(kind_of_type)
+            .filter(|k| *k != ObjectKind::Synonym);
+        if part(3).is_none() {
+            if let (Some(db), Some(object)) = (part(4), part(6)) {
+                // A missing schema is the default schema of that database.
+                foreign = Some((db, part(5).unwrap_or_else(|| "dbo".into()), object));
+            }
+        }
+    }
+    let object = DbObject {
         schema: row.get::<&str, _>(0)?.to_string(),
         name: row.get::<&str, _>(1)?.to_string(),
         kind,
-    })
+        target,
+    };
+    Some((object, foreign))
+}
+
+/// Parameters: `@P1`... object names. Result: schema, object and type of the
+/// objects other than synonyms with one of those names.
+pub fn base_types_sql(prefix: &str, names: usize) -> String {
+    let marks: Vec<String> = (1..=names).map(|i| format!("@P{i}")).collect();
+    format!(
+        "SELECT s.name, o.name, o.type \
+         FROM {prefix}sys.objects o \
+         JOIN {prefix}sys.schemas s ON s.schema_id = o.schema_id \
+         WHERE o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'FS', 'FT') \
+           AND o.name IN ({})",
+        marks.join(", ")
+    )
 }
 
 /// Columns of tables, views and table-valued functions, in object and column order. With `one`, only

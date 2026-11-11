@@ -580,6 +580,7 @@ mod tests {
             schema: "dbo".into(),
             name: "Pedidos".into(),
             kind: tulka_core::ObjectKind::Table,
+            target: None,
         };
         let info = ExplorerInfo {
             server: ServerInfo {

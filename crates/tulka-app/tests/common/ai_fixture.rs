@@ -550,6 +550,7 @@ impl Fixture {
                 schema: (*schema).into(),
                 name: (*name).into(),
                 kind: ObjectKind::Table,
+                target: None,
             })
             .collect();
         self.cache

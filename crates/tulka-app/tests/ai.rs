@@ -296,6 +296,7 @@ async fn search_in_columns_and_limit() {
             schema: "dbo".into(),
             name: format!("t{i}"),
             kind: ObjectKind::Table,
+            target: None,
         })
         .collect::<Vec<_>>();
     let columns = (0..5)
@@ -338,11 +339,13 @@ async fn search_live_fallback_reads_one_database() {
                     schema: "dbo".into(),
                     name: "clientes".into(),
                     kind: ObjectKind::Table,
+                    target: None,
                 },
                 DbObject {
                     schema: "dbo".into(),
                     name: "pedidos".into(),
                     kind: ObjectKind::Table,
+                    target: None,
                 },
             ],
             columns: Vec::new(),
@@ -434,6 +437,7 @@ async fn describe_a_synonym_points_to_its_base_object_without_naming_it() {
                     schema: "dbo".into(),
                     name: "alias".into(),
                     kind: ObjectKind::Synonym,
+                    target: None,
                 }],
                 columns: Vec::new(),
             },
@@ -1101,6 +1105,7 @@ async fn a_recreated_cache_file_is_read_again() {
                 schema: "dbo".into(),
                 name: table.into(),
                 kind: ObjectKind::Table,
+                target: None,
             }],
             columns: Vec::new(),
         };

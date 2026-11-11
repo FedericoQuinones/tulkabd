@@ -11,7 +11,7 @@ use crate::private_file;
 
 /// Bump when the table layout changes; a mismatching file is discarded and
 /// rebuilt (it is only a cache).
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE databases (
@@ -27,7 +27,8 @@ CREATE TABLE objects (
     database TEXT NOT NULL,
     schema TEXT NOT NULL,
     name TEXT NOT NULL,
-    kind TEXT NOT NULL
+    kind TEXT NOT NULL,
+    target TEXT
 );
 CREATE INDEX objects_by_database ON objects (connection_id, database);
 CREATE TABLE columns (
@@ -89,6 +90,14 @@ fn kind_str(k: ObjectKind) -> &'static str {
         ObjectKind::TableFunction => "tableFunction",
         ObjectKind::Synonym => "synonym",
     }
+}
+
+fn target_str(k: Option<ObjectKind>) -> Option<&'static str> {
+    k.map(kind_str)
+}
+
+fn target_from(s: Option<String>) -> Option<ObjectKind> {
+    s.as_deref().map(kind_from)
 }
 
 fn kind_from(s: &str) -> ObjectKind {
@@ -336,8 +345,8 @@ impl MetaCache {
             let mut ids = Vec::with_capacity(snap.objects.len());
             {
                 let mut ins = tx.prepare(
-                    "INSERT INTO objects (connection_id, database, schema, name, kind)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO objects (connection_id, database, schema, name, kind, target)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 )?;
                 for o in &snap.objects {
                     ins.execute(params![
@@ -345,7 +354,8 @@ impl MetaCache {
                         database,
                         o.schema,
                         o.name,
-                        kind_str(o.kind)
+                        kind_str(o.kind),
+                        target_str(o.target)
                     ])?;
                     ids.push(tx.last_insert_rowid());
                 }
@@ -467,7 +477,7 @@ impl MetaCache {
         let conn = self.lock();
         let q = || -> rusqlite::Result<Vec<DbObject>> {
             let mut st = conn.prepare(
-                "SELECT schema, name FROM objects
+                "SELECT schema, name, target FROM objects
                  WHERE connection_id = ?1 AND database = ?2 AND kind = ?3
                  ORDER BY schema, name",
             )?;
@@ -476,6 +486,7 @@ impl MetaCache {
                     schema: r.get(0)?,
                     name: r.get(1)?,
                     kind,
+                    target: target_from(r.get(2)?),
                 })
             })?;
             rows.collect()
@@ -550,7 +561,7 @@ impl MetaCache {
         let conn = self.lock();
         let q = || -> rusqlite::Result<Vec<(String, String, DbObject)>> {
             let mut st = conn.prepare(
-                "SELECT connection_id, database, schema, name, kind FROM objects ORDER BY id",
+                "SELECT connection_id, database, schema, name, kind, target FROM objects ORDER BY id",
             )?;
             let rows = st.query_map([], |r| {
                 let kind: String = r.get(4)?;
@@ -561,6 +572,7 @@ impl MetaCache {
                         schema: r.get(2)?,
                         name: r.get(3)?,
                         kind: kind_from(&kind),
+                        target: target_from(r.get(5)?),
                     },
                 ))
             })?;
@@ -594,13 +606,13 @@ impl MetaCache {
         let mut args: Vec<String> = Vec::new();
         let (select, name_expr) = if q.in_columns {
             (
-                "SELECT o.connection_id, o.database, o.schema, o.name, o.kind, c.name
+                "SELECT o.connection_id, o.database, o.schema, o.name, o.kind, c.name, o.target
                  FROM columns c JOIN objects o ON o.id = c.object_id",
                 "c.name",
             )
         } else {
             (
-                "SELECT connection_id, database, schema, name, kind, NULL FROM objects o",
+                "SELECT connection_id, database, schema, name, kind, NULL, target FROM objects o",
                 "(o.schema || '.' || o.name)",
             )
         };
@@ -661,6 +673,7 @@ impl MetaCache {
                         schema: r.get(2)?,
                         name: r.get(3)?,
                         kind: kind_from(&kind),
+                        target: target_from(r.get(6)?),
                     },
                     column: r.get(5)?,
                 })
@@ -735,6 +748,7 @@ mod tests {
             schema: schema.into(),
             name: name.into(),
             kind,
+            target: None,
         }
     }
     fn col(name: &str, pk: bool) -> ColumnInfo {
@@ -1210,6 +1224,24 @@ mod tests {
         });
         assert_eq!(names(&limited), ["Pedido", "PedidoA"]);
         assert_eq!(limited.total, 6);
+    }
+
+    #[test]
+    fn a_synonym_keeps_the_kind_of_its_target() {
+        let c = MetaCache::in_memory();
+        let mut syn = obj("dbo", "Alias", ObjectKind::Synonym);
+        syn.target = Some(ObjectKind::Procedure);
+        let snap = DatabaseSnapshot {
+            objects: vec![syn.clone(), obj("dbo", "Lost", ObjectKind::Synonym)],
+            columns: vec![],
+        };
+        c.replace_database("c1", "db", &snap, 1).unwrap();
+        let listed = c.objects("c1", "db", ObjectKind::Synonym);
+        let target_of = |n: &str| listed.iter().find(|o| o.name == n).unwrap().target;
+        assert_eq!(target_of("Alias"), Some(ObjectKind::Procedure));
+        assert_eq!(target_of("Lost"), None);
+        assert!(c.all_objects().iter().any(|(_, _, o)| *o == syn));
+        assert_eq!(find(&c, &["c1"], "alias").hits[0].object, syn);
     }
 
     #[test]

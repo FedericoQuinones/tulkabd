@@ -15,9 +15,9 @@ use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tulka_core::{
-    quote_ident, CancelHandle, Column, ColumnInfo, ConnectParams, DatabaseSnapshot, DriverError,
-    ExecEvent, MessageKind, ReadOnlyReason, ReadOnlyViolation, ServerInfo, Session, TableStructure,
-    Value,
+    quote_ident, CancelHandle, Column, ColumnInfo, ConnectParams, DatabaseSnapshot, DbObject,
+    DriverError, ExecEvent, MessageKind, ReadOnlyReason, ReadOnlyViolation, ServerInfo, Session,
+    TableStructure, Value,
 };
 
 use crate::batches::{split_batches, Batch};
@@ -528,6 +528,61 @@ impl MssqlSession {
         Ok((meta::catalog_prefix(&database, single), database))
     }
 
+    /// Sets the target of the synonyms (by index in `objects`) whose base
+    /// object lives in another database, reading that database's catalog once
+    /// per database. A database that cannot be read (no access, offline,
+    /// missing, or a single-database server) leaves the target unknown.
+    async fn resolve_foreign_targets(
+        &mut self,
+        objects: &mut [DbObject],
+        foreign: Vec<(usize, meta::ForeignBase)>,
+    ) {
+        if foreign.is_empty() || self.is_single_database().await.unwrap_or(true) {
+            return;
+        }
+        let mut by_database: Vec<(String, Vec<(usize, meta::ForeignBase)>)> = Vec::new();
+        for (index, base) in foreign {
+            let slot = by_database
+                .iter()
+                .position(|(db, _)| db.eq_ignore_ascii_case(&base.0));
+            match slot {
+                Some(i) => by_database[i].1.push((index, base)),
+                None => by_database.push((base.0.clone(), vec![(index, base)])),
+            }
+        }
+        for (database, bases) in by_database {
+            let Ok((prefix, _)) = self.catalog(&database).await else {
+                continue;
+            };
+            let mut names: Vec<String> = bases.iter().map(|(_, b)| b.2.clone()).collect();
+            names.sort_unstable();
+            names.dedup();
+            let mut found: HashMap<(String, String), tulka_core::ObjectKind> = HashMap::new();
+            for chunk in names.chunks(500) {
+                let params: Vec<&dyn ToSql> = chunk.iter().map(|n| n as &dyn ToSql).collect();
+                let Ok(rows) = self
+                    .query_params(&meta::base_types_sql(&prefix, chunk.len()), &params)
+                    .await
+                else {
+                    break;
+                };
+                for row in &rows {
+                    let kind = row.get::<&str, _>(2).and_then(meta::kind_of_type);
+                    if let (Some(s), Some(o), Some(kind)) =
+                        (row.get::<&str, _>(0), row.get::<&str, _>(1), kind)
+                    {
+                        found.insert((s.to_lowercase(), o.to_lowercase()), kind);
+                    }
+                }
+            }
+            for (index, (_, schema, object)) in bases {
+                objects[index].target = found
+                    .get(&(schema.to_lowercase(), object.to_lowercase()))
+                    .copied();
+            }
+        }
+    }
+
     /// Runs a statement that returns one non-null string.
     async fn query_string(&mut self, sql: &str) -> Result<String, DriverError> {
         let rows = self.query_rows(sql).await?;
@@ -677,12 +732,19 @@ impl Session for MssqlSession {
 
     async fn snapshot(&mut self, database: &str) -> Result<DatabaseSnapshot, DriverError> {
         let (prefix, _) = self.catalog(database).await?;
-        let objects: Vec<_> = self
+        let (mut objects, mut foreign) = (Vec::new(), Vec::new());
+        for (object, base) in self
             .query_rows(&meta::objects_sql(&prefix))
             .await?
             .iter()
             .filter_map(meta::object_from_row)
-            .collect();
+        {
+            if let Some(base) = base {
+                foreign.push((objects.len(), base));
+            }
+            objects.push(object);
+        }
+        self.resolve_foreign_targets(&mut objects, foreign).await;
         let index_of: HashMap<(&str, &str), usize> = objects
             .iter()
             .enumerate()

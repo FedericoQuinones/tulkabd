@@ -26,6 +26,11 @@ pub struct DbObject {
     pub schema: String,
     pub name: String,
     pub kind: ObjectKind,
+    /// For a synonym, the kind of object it points to; `None` when that is
+    /// unknown (missing, on a linked server, in an unreadable database, or
+    /// another synonym) and for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ObjectKind>,
 }
 
 /// A column of a table or view.
@@ -109,11 +114,25 @@ mod tests {
             schema: "dbo".into(),
             name: "Pedidos".into(),
             kind: ObjectKind::Table,
+            target: None,
         };
         assert_eq!(
             serde_json::to_value(&o).unwrap(),
             json!({"schema": "dbo", "name": "Pedidos", "kind": "table"})
         );
+    }
+
+    #[test]
+    fn synonym_json_carries_its_target() {
+        let o = DbObject {
+            schema: "dbo".into(),
+            name: "syn".into(),
+            kind: ObjectKind::Synonym,
+            target: Some(ObjectKind::TableFunction),
+        };
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["target"], "tableFunction");
+        assert_eq!(serde_json::from_value::<DbObject>(v).unwrap(), o);
     }
 
     #[test]
