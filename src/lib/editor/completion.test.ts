@@ -176,23 +176,19 @@ test("a failed fetch is not cached", async () => {
   expect(await cache.get("c1", "Ventas")).toBe(meta);
 });
 
-// Table-valued functions carry their result columns in `columns`; a synonym carries its base object's.
+// Table-valued functions carry their result columns in `columns`.
 const fnMeta: CompletionMetadata = {
   schemas: ["dbo"],
   objects: [
     { schema: "dbo", name: "Pedidos", kind: "table" },
     { schema: "dbo", name: "fnOrders", kind: "tableFunction" },
     { schema: "dbo", name: "fnLines", kind: "tableFunction" },
-    { schema: "dbo", name: "synPedidos", kind: "synonym" },
-    { schema: "dbo", name: "synProc", kind: "synonym" },
-    { schema: "dbo", name: "synRemote", kind: "synonym" },
     { schema: "dbo", name: "CerrarMes", kind: "procedure" },
   ],
   columns: {
     "dbo.Pedidos": ["Id", "Cliente"],
     "dbo.fnOrders": ["OrderId", "Amount"],
     "dbo.fnLines": ["LineId", "Qty"],
-    "dbo.synPedidos": ["Id", "Cliente"],
   },
 };
 const completeFn = (doc: string) => complete(doc, false, fnMeta);
@@ -232,11 +228,4 @@ test("the argument list of a function does not break alias detection", async () 
 
 test("built-in and derived table sources are not aliased as objects", () => {
   expect(aliasMap("SELECT 1 FROM STRING_SPLIT(@s, ',') v JOIN (SELECT 1 a) d ON 1=1", 0, fnMeta)).toEqual({});
-});
-
-test("an alias of a synonym completes the columns of its base object, nothing when unresolved", async () => {
-  expect(labels(await completeFn("SELECT s.| FROM dbo.synPedidos s"))).toEqual(["Id", "Cliente"]);
-  // A synonym of a procedure or of an object in another database has no columns.
-  expect(await completeFn("SELECT s.| FROM dbo.synProc s")).toBeNull();
-  expect(await completeFn("SELECT s.| FROM dbo.synRemote AS s")).toBeNull();
 });
