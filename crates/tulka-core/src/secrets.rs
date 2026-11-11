@@ -45,9 +45,48 @@ impl KeyringStore {
         Self
     }
 
-    fn entry(id: &str) -> Result<keyring::Entry, SecretError> {
-        keyring::Entry::new(KEYRING_SERVICE, id).map_err(map_keyring_error)
+    fn entry(id: &str) -> Result<keyring_core::Entry, SecretError> {
+        ensure_default_store()?;
+        keyring_core::Entry::new(KEYRING_SERVICE, id).map_err(map_keyring_error)
     }
+}
+
+/// Installs the platform credential store as the `keyring_core` default the
+/// first time it is needed. Connecting can fail (for example without a
+/// session bus), so a failure is reported per call and retried on the next
+/// one instead of being remembered.
+///
+/// The stores keep the entry layout of keyring 3: Secret Service items with
+/// `service` and `username` attributes, a macOS generic password with that
+/// service and account, and a Windows credential named `{user}.{service}`.
+fn ensure_default_store() -> Result<(), SecretError> {
+    static INSTALL: Mutex<()> = Mutex::new(());
+    let _guard = INSTALL.lock().unwrap_or_else(|e| e.into_inner());
+    if keyring_core::get_default_store().is_some() {
+        return Ok(());
+    }
+    keyring_core::set_default_store(new_platform_store().map_err(map_keyring_error)?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn new_platform_store() -> keyring_core::Result<std::sync::Arc<keyring_core::CredentialStore>> {
+    Ok(zbus_secret_service_keyring_store::Store::new()?)
+}
+
+#[cfg(target_os = "macos")]
+fn new_platform_store() -> keyring_core::Result<std::sync::Arc<keyring_core::CredentialStore>> {
+    Ok(apple_native_keyring_store::keychain::Store::new()?)
+}
+
+#[cfg(target_os = "windows")]
+fn new_platform_store() -> keyring_core::Result<std::sync::Arc<keyring_core::CredentialStore>> {
+    Ok(windows_native_keyring_store::Store::new()?)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn new_platform_store() -> keyring_core::Result<std::sync::Arc<keyring_core::CredentialStore>> {
+    Err(keyring_core::Error::NoDefaultStore)
 }
 
 impl SecretStore for KeyringStore {
@@ -60,14 +99,14 @@ impl SecretStore for KeyringStore {
     fn get(&self, id: &str) -> Result<Option<String>, SecretError> {
         match Self::entry(id)?.get_password() {
             Ok(s) => Ok(Some(s)),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(e) => Err(map_keyring_error(e)),
         }
     }
 
     fn delete(&self, id: &str) -> Result<(), SecretError> {
         match Self::entry(id)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
             Err(e) => Err(map_keyring_error(e)),
         }
     }
@@ -75,11 +114,11 @@ impl SecretStore for KeyringStore {
 
 /// Platform and storage-access failures mean the keychain cannot be used;
 /// everything else is a plain error.
-fn map_keyring_error(e: keyring::Error) -> SecretError {
+fn map_keyring_error(e: keyring_core::Error) -> SecretError {
     match e {
-        keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_) => {
-            SecretError::Unavailable(e.to_string())
-        }
+        keyring_core::Error::PlatformFailure(_)
+        | keyring_core::Error::NoStorageAccess(_)
+        | keyring_core::Error::NoDefaultStore => SecretError::Unavailable(e.to_string()),
         other => SecretError::Other(other.to_string()),
     }
 }
@@ -161,7 +200,7 @@ mod tests {
 
     #[test]
     fn keyring_errors_map_to_unavailable() {
-        use keyring::Error as K;
+        use keyring_core::Error as K;
         let platform = K::PlatformFailure("no dbus".into());
         assert!(matches!(
             map_keyring_error(platform),
