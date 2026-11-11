@@ -27,10 +27,10 @@ const meta: CompletionMetadata = {
 };
 
 /** Completes at `|` in `doc`. */
-async function complete(doc: string, explicit = false): Promise<CompletionResult | null> {
+async function complete(doc: string, explicit = false, m: CompletionMetadata = meta): Promise<CompletionResult | null> {
   const pos = doc.indexOf("|");
   const state = EditorState.create({ doc: doc.slice(0, pos) + doc.slice(pos + 1) });
-  return completionSource(meta)(new CompletionContext(state, pos, explicit));
+  return completionSource(m)(new CompletionContext(state, pos, explicit));
 }
 const labels = (r: CompletionResult | null) => r?.options.map((o) => o.label) ?? [];
 const option = (r: CompletionResult | null, label: string) => r?.options.find((o) => o.label === label);
@@ -174,4 +174,69 @@ test("a failed fetch is not cached", async () => {
   const cache = new MetadataCache(fetch);
   await expect(cache.get("c1", "Ventas")).rejects.toBe("not_connected");
   expect(await cache.get("c1", "Ventas")).toBe(meta);
+});
+
+// Table-valued functions carry their result columns in `columns`; a synonym carries its base object's.
+const fnMeta: CompletionMetadata = {
+  schemas: ["dbo"],
+  objects: [
+    { schema: "dbo", name: "Pedidos", kind: "table" },
+    { schema: "dbo", name: "fnOrders", kind: "tableFunction" },
+    { schema: "dbo", name: "fnLines", kind: "tableFunction" },
+    { schema: "dbo", name: "synPedidos", kind: "synonym" },
+    { schema: "dbo", name: "synProc", kind: "synonym" },
+    { schema: "dbo", name: "synRemote", kind: "synonym" },
+    { schema: "dbo", name: "CerrarMes", kind: "procedure" },
+  ],
+  columns: {
+    "dbo.Pedidos": ["Id", "Cliente"],
+    "dbo.fnOrders": ["OrderId", "Amount"],
+    "dbo.fnLines": ["LineId", "Qty"],
+    "dbo.synPedidos": ["Id", "Cliente"],
+  },
+};
+const completeFn = (doc: string) => complete(doc, false, fnMeta);
+
+test("an alias of a table-valued function completes its result columns", async () => {
+  expect(labels(await completeFn("SELECT o.| FROM dbo.fnOrders(@id) AS o"))).toEqual(["OrderId", "Amount"]);
+  expect(labels(await completeFn("SELECT o.| FROM dbo.fnOrders(1) o"))).toEqual(["OrderId", "Amount"]);
+  expect(labels(await completeFn("SELECT o.| FROM [dbo].[fnOrders](1) o JOIN dbo.Pedidos p ON 1=1"))).toEqual(["OrderId", "Amount"]);
+  expect(labels(await completeFn("SELECT * FROM dbo.Pedidos p JOIN dbo.fnOrders(p.Id) o ON 1=1 WHERE o.|"))).toEqual([
+    "OrderId",
+    "Amount",
+  ]);
+});
+
+test("CROSS and OUTER APPLY aliases are read", async () => {
+  const from = "FROM dbo.fnOrders(@id) o CROSS APPLY dbo.fnLines(o.OrderId) l OUTER APPLY dbo.fnLines(1) m";
+  expect(labels(await completeFn(`SELECT l.| ${from}`))).toEqual(["LineId", "Qty"]);
+  expect(labels(await completeFn(`SELECT m.| ${from}`))).toEqual(["LineId", "Qty"]);
+  expect(aliasMap(`SELECT 1 ${from}`, 0, fnMeta)).toEqual({ o: "dbo.fnOrders", l: "dbo.fnLines", m: "dbo.fnLines" });
+});
+
+test("the argument list of a function does not break alias detection", async () => {
+  const args = "FROM dbo.fnOrders(f(1, (2 + 3)), 'a) b (', /* ) */ N'it''s )') o -- )\n JOIN dbo.Pedidos p ON 1=1";
+  expect(aliasMap(`SELECT 1 ${args}`, 0, fnMeta)).toEqual({ o: "dbo.fnOrders", p: "dbo.Pedidos" });
+  // A comma list continues after a function call.
+  expect(aliasMap("SELECT 1 FROM dbo.fnOrders(1) o, dbo.Pedidos p", 0, fnMeta)).toEqual({
+    o: "dbo.fnOrders",
+    p: "dbo.Pedidos",
+  });
+  // alias. inside the arguments of a later APPLY.
+  expect(labels(await completeFn("SELECT 1 FROM dbo.fnOrders(1) o CROSS APPLY dbo.fnLines(o.|) l"))).toEqual([
+    "OrderId",
+    "Amount",
+  ]);
+  expect(labels(await completeFn("SELECT 1 FROM dbo.Pedidos p CROSS APPLY dbo.fnLines(p.|"))).toEqual(["Id", "Cliente"]);
+});
+
+test("built-in and derived table sources are not aliased as objects", () => {
+  expect(aliasMap("SELECT 1 FROM STRING_SPLIT(@s, ',') v JOIN (SELECT 1 a) d ON 1=1", 0, fnMeta)).toEqual({});
+});
+
+test("an alias of a synonym completes the columns of its base object, nothing when unresolved", async () => {
+  expect(labels(await completeFn("SELECT s.| FROM dbo.synPedidos s"))).toEqual(["Id", "Cliente"]);
+  // A synonym of a procedure or of an object in another database has no columns.
+  expect(await completeFn("SELECT s.| FROM dbo.synProc s")).toBeNull();
+  expect(await completeFn("SELECT s.| FROM dbo.synRemote AS s")).toBeNull();
 });

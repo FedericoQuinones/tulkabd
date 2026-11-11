@@ -219,7 +219,7 @@ function resolveSchema(name: string, meta?: CompletionMetadata): string {
 }
 
 /**
- * Aliases of the tables and views in the `FROM` and `JOIN` clauses of the statement around `cursor`,
+ * Aliases of the tables, views, synonyms and schema-qualified table-valued functions in the `FROM`, `JOIN` and `APPLY` clauses of the statement around `cursor`,
  * as unquoted `schema.name`. A name without a schema takes the only schema in `meta` that has it,
  * else `dbo`. When an alias repeats, the one nearest the cursor wins.
  */
@@ -236,10 +236,10 @@ function aliasesIn(batch: Tok[], cursor: number, meta?: CompletionMetadata): Rec
   const found = new Map<string, { alias: string; target: string; dist: number }>();
   for (let i = 0; i < toks.length; i++) {
     const kw = toks[i].kind === "word" ? toks[i].value.toUpperCase() : "";
-    if (kw !== "FROM" && kw !== "JOIN") continue;
+    if (kw !== "FROM" && kw !== "JOIN" && kw !== "APPLY") continue;
     let j = i + 1;
     for (;;) {
-      // schema.name, db.schema.name or db..name; derived tables and functions are skipped.
+      // schema.name, db.schema.name or db..name, or a schema-qualified function call; derived tables are skipped.
       const parts: string[] = [];
       while (true) {
         const t = toks[j];
@@ -251,7 +251,18 @@ function aliasesIn(batch: Tok[], cursor: number, meta?: CompletionMetadata): Rec
           j++;
         } else break;
       }
-      if (parts.length === 0 || toks[j]?.kind === "lparen") break;
+      if (parts.length === 0) break;
+      if (toks[j]?.kind === "lparen") {
+        // A table-valued function needs a schema; `STRING_SPLIT(...)` and the like have no columns here.
+        if (parts.length < 2) break;
+        let depth = 0;
+        for (; j < toks.length; j++) {
+          if (toks[j].kind === "lparen") depth++;
+          else if (toks[j].kind === "other" && toks[j].value === ")" && --depth === 0) break;
+        }
+        if (j >= toks.length) break;
+        j++;
+      }
       const name = parts[parts.length - 1];
       const schema = parts.length > 1 && parts[parts.length - 2] !== "" ? parts[parts.length - 2] : resolveSchema(name, meta);
       if (toks[j]?.kind === "word" && toks[j].value.toUpperCase() === "AS") j++;
