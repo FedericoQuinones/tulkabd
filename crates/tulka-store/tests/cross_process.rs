@@ -39,13 +39,27 @@ const OLD_SCHEMA: &str = "
     CREATE INDEX run_at_ms ON run (at_ms);
     PRAGMA user_version = 1;";
 
-/// A short pause between a writer's inserts. Each process records a run per
-/// statement, never back to back; without it, one thread re-takes the write
-/// lock right after each commit while SQLite's busy handler makes the other
-/// sleep for growing intervals, and on a slow disk (Windows CI) that one
-/// starves past its busy timeout.
-fn pace() {
-    thread::sleep(std::time::Duration::from_millis(1));
+/// Records a run, trying again while the other writer holds the lock. The
+/// shared log opens its connection on first use, and an open that meets the
+/// lock is retried by the next call. The test is about two connections
+/// sharing one file without losing a row, not about how long a writer waits:
+/// on Windows every sleep is rounded to the same timer tick, so a writer
+/// looping back to back can wake just before the other's busy handler on each
+/// tick and starve it past its busy timeout. The app and the MCP server write
+/// once per statement a user runs, never in such a loop.
+fn insert_until_recorded(insert: impl Fn() -> Result<(), String>) {
+    for _ in 0..50 {
+        match insert() {
+            Ok(()) => return,
+            Err(e)
+                if e.contains("database is locked") || e == "could not open the run log file" =>
+            {
+                thread::sleep(std::time::Duration::from_millis(1))
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+    panic!("the run log stayed locked");
 }
 
 #[test]
@@ -58,9 +72,10 @@ fn two_writers_lose_nothing() {
         let app = app.clone();
         thread::spawn(move || {
             for i in 0..200 {
-                app.insert(&run(format!("app {i}"), RunSource::App))
-                    .unwrap();
-                pace();
+                insert_until_recorded(|| {
+                    app.insert(&run(format!("app {i}"), RunSource::App))
+                        .map(drop)
+                });
             }
         })
     };
@@ -68,8 +83,9 @@ fn two_writers_lose_nothing() {
         let mcp = mcp.clone();
         thread::spawn(move || {
             for i in 0..200 {
-                mcp.insert(&run(format!("ai {i}"), RunSource::Ai)).unwrap();
-                pace();
+                insert_until_recorded(|| {
+                    mcp.insert(&run(format!("ai {i}"), RunSource::Ai)).map(drop)
+                });
             }
         })
     };
