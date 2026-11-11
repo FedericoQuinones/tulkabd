@@ -7,6 +7,7 @@ pub mod connstr;
 pub mod driver;
 pub mod error;
 pub mod export;
+pub mod save;
 pub mod guard;
 pub mod locale;
 pub mod meta;
@@ -29,6 +30,7 @@ pub use driver::{
 };
 pub use error::DriverError;
 pub use export::{estimate_tokens, to_ai, to_excel_tsv, to_excel_value};
+pub use save::{SaveFormat, TableWriter};
 pub use guard::{GuardFinding, GuardKind};
 pub use locale::{decimal_separator_for, system_decimal_separator};
 pub use meta::{

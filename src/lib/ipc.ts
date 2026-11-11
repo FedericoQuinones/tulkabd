@@ -114,6 +114,15 @@ export interface CopyOutcome {
   rows: number;
   tokens: number;
 }
+/** File formats of `saveResults`. */
+export type SaveFormat = "csv" | "tsv" | "json";
+export interface SaveOutcome {
+  rows: number;
+  /** The result was cut by the row cap or the memory limit: the file holds only the kept rows. */
+  truncated: boolean;
+  /** Some values over 1 MB were shortened when the result was received. */
+  capped: boolean;
+}
 /** A filter on one column of a result; filters combine with AND. */
 export type ColumnFilter =
   | { kind: "isNull"; column: number }
@@ -370,6 +379,19 @@ export const copyResults = (
   selection: Selection,
 ) => invoke<CopyOutcome>("copy_results", { tabId, resultIndex, mode, selection });
 
+/**
+ * Asks for a file in the native save dialog and writes the visible rows of the result there (the
+ * current sort and filter apply, as for Copy). `defaultName` and `filterName` only label the
+ * dialog. Resolves to `null` when the dialog is cancelled; fails with "busy" while the tab runs.
+ */
+export const saveResults = (
+  tabId: string,
+  resultIndex: number,
+  format: SaveFormat,
+  defaultName: string,
+  filterName: string,
+) => invoke<SaveOutcome | null>("save_results", { tabId, resultIndex, format, defaultName, filterName });
+
 export const closeSession = (tabId: string) => invoke<void>("close_session", { tabId });
 
 /** Open transactions on the tab's session; 0 without one. Rejects with "busy" while it runs, "disconnected" when lost. */
@@ -392,7 +414,7 @@ export const moveFolder = (id: string, parentId: string | null) =>
   invoke<void>("move_folder", { id, parentId });
 /** Ids of the tree nodes left open (folders and connections). */
 export const listExpanded = () => invoke<string[]>("list_expanded");
-/** Replaces the set of expanded folder and connection ids. */
+/** Replaces the set of open tree nodes: folder and connection ids, and the row keys of the databases and groups below them. */
 export const setExpanded = (ids: string[]) => invoke<void>("set_expanded", { ids });
 /** How "Copy" writes numbers: with the system's decimal separator or always with a dot. */
 export type NumberFormat = "system" | "invariant";

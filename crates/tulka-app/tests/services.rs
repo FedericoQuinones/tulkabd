@@ -16,8 +16,8 @@ use tulka_core::{
     estimate_tokens, system_decimal_separator, to_ai, to_excel_tsv, AiAccess, CancelHandle, Column,
     ColumnInfo, ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, DatabaseSnapshot,
     DbObject, Driver, DriverError, Environment, ExecEvent, MemoryStore, MessageKind, NumberFormat,
-    ObjectKind, Preferences, SecretError, SecretStore, ServerInfo, Session, TableStructure,
-    UnavailableStore, Value,
+    ObjectKind, Preferences, SaveFormat, SecretError, SecretStore, ServerInfo, Session,
+    TableStructure, UnavailableStore, Value,
 };
 
 const PASSWORD: &str = "s3cret-pw";
@@ -2531,4 +2531,90 @@ async fn a_failed_secret_store_rolls_the_flag_back() {
     let listed = list_connections(&f.state).await;
     assert!(!listed[0].password_saved);
     assert_eq!(listed[0].server, "other-host");
+}
+
+// ---------------------------------------------------------------------- save
+
+#[tokio::test]
+async fn save_results_writes_the_visible_rows_to_a_file() {
+    let (f, _) = connected("t1").await;
+    run(&f.state, "t1", "rows 4").await.0.unwrap();
+    let dir = TempDir::new().unwrap();
+
+    // Without a view: all rows in arrival order.
+    let path = dir.path().join("all.csv");
+    let out = save_results(&f.state, "t1".into(), 0, SaveFormat::Csv, path.clone())
+        .await
+        .unwrap();
+    assert_eq!((out.rows, out.truncated, out.capped), (4, false, false));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with('\u{feff}'));
+    assert_eq!(
+        text.trim_start_matches('\u{feff}'),
+        "id,amount,name\r\n0,0.50,row\t0\r\n1,1.50,row\t1\r\n2,2.50,row\t2\r\n3,3.50,row\t3\r\n"
+    );
+
+    // A sort and a filter apply, as they do to Copy.
+    set_result_view(&f.state, "t1".into(), 0, sort_by(0, true))
+        .await
+        .unwrap();
+    let path = dir.path().join("sorted.json");
+    save_results(&f.state, "t1".into(), 0, SaveFormat::Json, path.clone())
+        .await
+        .unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let ids: Vec<_> = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [3, 2, 1, 0]);
+    assert_eq!(json[0]["amount"], "3.50");
+
+    let filter = ViewSpec {
+        text: Some("ROW\t2".into()),
+        ..ViewSpec::default()
+    };
+    set_result_view(&f.state, "t1".into(), 0, filter)
+        .await
+        .unwrap();
+    let path = dir.path().join("filtered.tsv");
+    let out = save_results(&f.state, "t1".into(), 0, SaveFormat::Tsv, path.clone())
+        .await
+        .unwrap();
+    assert_eq!(out.rows, 1);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "id\tamount\tname\n2\t2.50\trow 2\n"
+    );
+
+    // Only the three files are there: no temporary leftovers.
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+}
+
+#[tokio::test]
+async fn save_results_rejects_unknown_results_and_missing_folders() {
+    let (f, _) = connected("t1").await;
+    run(&f.state, "t1", "rows 2").await.0.unwrap();
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("x.csv");
+    assert!(
+        save_results(&f.state, "t1".into(), 5, SaveFormat::Csv, path.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        save_results(&f.state, "nope".into(), 0, SaveFormat::Csv, path.clone())
+            .await
+            .is_err()
+    );
+    let missing = dir.path().join("no-such-folder").join("x.csv");
+    assert!(
+        save_results(&f.state, "t1".into(), 0, SaveFormat::Csv, missing)
+            .await
+            .is_err()
+    );
+    assert!(!path.exists());
 }

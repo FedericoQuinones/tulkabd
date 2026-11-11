@@ -52,6 +52,12 @@ type Loaded<T> = T[] | { error: string };
 /** Children rendered per object group until the user asks for more; 10k tables must not mean 10k rows. */
 export const OBJECT_PAGE = 500;
 
+/**
+ * Most expanded databases, groups and saved-query lists kept across restarts. The newest are kept,
+ * so a long-lived install does not grow a list nobody can see.
+ */
+export const REMEMBERED_PATHS = 500;
+
 /** Hears the end of a connect: `null` when connected, else the error. */
 export type ConnectThen = (error: string | null) => void;
 
@@ -62,6 +68,12 @@ interface FilterSets {
   forced: Set<string>;
   /** Search hits by group key. */
   hits: Map<string, DbObject[]>;
+}
+
+/** Folder and connection ids, and the databases, groups and saved-query lists below a connection, are kept across restarts; opened tables are not. */
+function remembers(key: string): boolean {
+  const k = parseKey(key);
+  return k === null || k[0] === "d" || k[0] === "g" || k[0] === "q";
 }
 
 class ExplorerStore {
@@ -108,9 +120,10 @@ class ExplorerStore {
   }
 
   /**
-   * Loads folders and the expanded set. Connections left expanded are shown
-   * from the cache and are NOT connected: that would mean a burst of logins and
-   * password prompts at every start.
+   * Loads folders and the expanded set (folders, connections, and the databases and groups
+   * below them). Connections left expanded are shown from the cache and are NOT connected:
+   * that would mean a burst of logins and password prompts at every start. What was open under
+   * a connection shows when the user connects it.
    */
   async init(): Promise<void> {
     if (!this.subscribed) {
@@ -123,7 +136,7 @@ class ExplorerStore {
       connections.refresh(),
     ]);
     this.folders = folders;
-    for (const id of expanded) this.expanded.add(id);
+    for (const id of expanded) if (remembers(id)) this.expanded.add(id);
     await Promise.all(
       expanded.filter((id) => connections.list.some((c) => c.id === id)).map((id) => this.loadDatabases(id)),
     );
@@ -220,11 +233,25 @@ class ExplorerStore {
   private schedulePersist(): void {
     clearTimeout(this.persistTimer);
     this.persistTimer = setTimeout(() => {
-      const ids = [...this.expanded].filter(
-        (k) => this.folders.some((f) => f.id === k) || connections.list.some((c) => c.id === k),
-      );
-      ipc.setExpanded(ids).catch(() => {});
+      const top: string[] = [];
+      const deep: string[] = [];
+      for (const k of this.expanded) {
+        const parts = parseKey(k);
+        if (parts === null) {
+          if (this.folders.some((f) => f.id === k) || connections.list.some((c) => c.id === k)) top.push(k);
+        } else if (remembers(k) && connections.list.some((c) => c.id === parts[1])) {
+          deep.push(k);
+        }
+      }
+      // The set keeps insertion order, so the tail is what the user opened last.
+      ipc.setExpanded([...top, ...deep.slice(-REMEMBERED_PATHS)]).catch(() => {});
     }, this.persistDelayMs);
+  }
+
+  /** Forgets what was open below a connection (its databases, groups, objects); the connection itself stays as it is. */
+  private forgetExpanded(id: string): void {
+    for (const k of [...this.expanded]) if (parseKey(k)?.[1] === id) this.expanded.delete(k);
+    this.schedulePersist();
   }
 
   // ---- connecting --------------------------------------------------------
@@ -423,6 +450,7 @@ class ExplorerStore {
     this.objects = keep(this.objects);
     this.columns = keep(this.columns);
     this.limits = keep(this.limits);
+    this.forgetExpanded(id);
     const st = this.conns[id];
     if (st) {
       st.databases = null;
@@ -838,7 +866,6 @@ class ExplorerStore {
       void tabs.unbindConnection(id);
       this.expanded.delete(id);
       delete this.conns[id];
-      this.schedulePersist();
     });
   }
 

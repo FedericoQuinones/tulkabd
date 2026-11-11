@@ -171,19 +171,37 @@ export type Row =
   | (RowBase & { kind: "column"; column: ColumnInfo })
   | (RowBase & { kind: "notice"; tone: "error" | "muted"; text: string; action: NoticeAction | null });
 
+/**
+ * `aria-setsize` and `aria-posinset` of every row: how many rows share its parent and its place
+ * among them. A virtualized tree keeps only some rows in the DOM, so the browser cannot count them.
+ */
+export function siblingPositions(rows: Row[]): { setsize: number; posinset: number }[] {
+  const seen = new Map<string | null, number>();
+  const place = rows.map((r) => {
+    const n = (seen.get(r.parent) ?? 0) + 1;
+    seen.set(r.parent, n);
+    return n;
+  });
+  return rows.map((r, i) => ({ setsize: seen.get(r.parent)!, posinset: place[i] }));
+}
+
 export type NavResult = { focus: string } | { expand: string } | { collapse: string } | { activate: string };
 
-/** Maps a key press on the focused row to what the tree should do. */
-export function navigate(rows: Row[], focusKey: string | null, key: string): NavResult | null {
+/** Maps a key press on the focused row to what the tree should do; PageUp and PageDown move `page` rows. */
+export function navigate(rows: Row[], focusKey: string | null, key: string, page = 10): NavResult | null {
   if (rows.length === 0) return null;
   const i = rows.findIndex((r) => r.key === focusKey);
-  if (i < 0) return ["ArrowDown", "ArrowUp", "Home", "End"].includes(key) ? { focus: rows[0].key } : null;
+  if (i < 0) return ["ArrowDown", "ArrowUp", "Home", "End", "PageDown", "PageUp"].includes(key) ? { focus: rows[0].key } : null;
   const r = rows[i];
   switch (key) {
     case "ArrowDown":
       return { focus: rows[Math.min(i + 1, rows.length - 1)].key };
     case "ArrowUp":
       return { focus: rows[Math.max(i - 1, 0)].key };
+    case "PageDown":
+      return { focus: rows[Math.min(i + page, rows.length - 1)].key };
+    case "PageUp":
+      return { focus: rows[Math.max(i - page, 0)].key };
     case "Home":
       return { focus: rows[0].key };
     case "End":
@@ -209,6 +227,10 @@ export interface MenuItem {
   label: string;
   run: () => unknown;
   danger?: boolean;
+  /** Shown but not selectable. */
+  disabled?: boolean;
+  /** Tooltip, e.g. why the item is disabled. */
+  title?: string;
   /** Draws a rule above the item. */
   separator?: boolean;
   /** Shown muted on the right, e.g. the name Copy name copies. */

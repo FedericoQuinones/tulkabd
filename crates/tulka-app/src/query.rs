@@ -290,9 +290,13 @@ where
         _ => {}
     }
 
-    // A `USE` in the script changes the session's database: read it back.
+    // A `USE` in the script changes the session's database. The server
+    // announces every change in the response, so no query is needed; one is
+    // kept as the fallback for a driver that does not track it.
     let database = if outcome == RunOutcome::Disconnected {
         None
+    } else if let Some(name) = session.announced_database() {
+        Some(name)
     } else {
         session.current_database().await.ok()
     };
@@ -594,11 +598,15 @@ async fn cancel_running(tab: Option<TabState>) {
 }
 
 /// The buffer of a result, shared so it is read without the tabs lock.
-fn result_of(state: &AppState, tab_id: &str, index: u32) -> Result<SharedBuffer, String> {
+pub(crate) fn result_of(
+    state: &AppState,
+    tab_id: &str,
+    index: u32,
+) -> Result<SharedBuffer, String> {
     result_in(state.tabs().open.get(tab_id).ok_or_else(no_session)?, index)
 }
 
-fn result_in(tab: &TabState, index: u32) -> Result<SharedBuffer, String> {
+pub(crate) fn result_in(tab: &TabState, index: u32) -> Result<SharedBuffer, String> {
     tab.results
         .get(index as usize)
         .cloned()

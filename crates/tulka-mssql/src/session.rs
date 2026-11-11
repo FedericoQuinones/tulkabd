@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
-use tiberius::error::Error as TdsError;
+use tiberius::error::{Error as TdsError, TokenError};
 use tiberius::{AuthMethod, Config, EncryptionLevel, QueryItem, Row, SqlBrowser, ToSql};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
@@ -22,6 +22,7 @@ use tulka_core::{
 
 use crate::batches::{split_batches, Batch};
 use crate::convert::{to_value, type_name};
+use crate::lexer::{lex, Kind};
 use crate::meta;
 use crate::readonly;
 
@@ -88,6 +89,10 @@ pub struct MssqlSession {
     /// Whether the server hosts a single database (Azure SQL Database),
     /// learned on first use.
     single_database: Option<bool>,
+    /// What `DB_NAME()` returned when the client announced the database under
+    /// the spelling in `.0`. The login ENVCHANGE echoes the name as the client
+    /// or the login wrote it (`TEMPDB`), which is not the catalog's spelling.
+    database_spelling: Option<(String, String)>,
     /// The metadata settings ([`META_SETUP`]) were applied to this session.
     metadata_ready: bool,
 }
@@ -177,6 +182,7 @@ pub async fn connect(p: &ConnectParams) -> Result<MssqlSession, DriverError> {
         cancel,
         cancel_requested: Arc::new(AtomicBool::new(false)),
         single_database: None,
+        database_spelling: None,
         metadata_ready: false,
     })
 }
@@ -293,21 +299,172 @@ fn login_error(e: TdsError) -> DriverError {
     }
 }
 
-/// Maps an error of a running request. `line_of` turns a server line number
-/// (1-based within the batch) into an editor line.
-fn request_error(e: TdsError, line_of: impl Fn(u32) -> Option<u32>) -> DriverError {
+/// Where the batch being run sits in the editor, to turn the line numbers
+/// the server reports into editor lines.
+struct Site {
+    /// The editor line (1-based) where the batch starts.
+    start_line: u32,
+    /// How many lines the batch has.
+    lines: u32,
+    /// The (lowercase) name of the module the batch creates or alters: the
+    /// server names it in its errors, but counts lines from the batch start.
+    module: Option<String>,
+}
+
+impl Site {
+    /// For statements the app sends itself: no line maps to the editor.
+    const NONE: Site = Site {
+        start_line: 0,
+        lines: 0,
+        module: None,
+    };
+
+    fn of(batch: &Batch) -> Site {
+        Site {
+            start_line: batch.start_line,
+            lines: batch.text.split('\n').count() as u32,
+            module: module_name(&batch.text),
+        }
+    }
+
+    /// The editor line of a message from `procedure` (empty for the batch
+    /// itself), or `None` when it has none. Inside a procedure or trigger the
+    /// line counts from the start of that module, so it is no editor line;
+    /// only the batch that defines a module names it and still counts batch
+    /// lines. A number past the end of the batch comes from other text
+    /// (dynamic SQL).
+    fn message_line(&self, procedure: &str, line: u32) -> Option<u32> {
+        (self.owns(procedure) && line > 0 && line <= self.lines).then(|| self.start_line + line - 1)
+    }
+
+    /// Whether a message from `procedure` counts lines of this batch: the
+    /// batch itself (empty name) or the module it creates. Another module,
+    /// such as a DDL trigger fired by the `CREATE`, counts its own lines.
+    fn owns(&self, procedure: &str) -> bool {
+        if procedure.is_empty() {
+            return true;
+        }
+        let Some(module) = &self.module else {
+            return false;
+        };
+        let reported = procedure.rsplit('.').next().unwrap_or(procedure);
+        let reported = unquote(reported).to_lowercase();
+        // The server pads the name of a local temporary procedure.
+        reported == *module || (module.starts_with('#') && reported.starts_with(module.as_str()))
+    }
+}
+
+/// `name` without the brackets or double quotes around it.
+fn unquote(name: &str) -> String {
+    for (open, close) in [('[', ']'), ('"', '"')] {
+        if let Some(inner) = name
+            .strip_prefix(open)
+            .and_then(|rest| rest.strip_suffix(close))
+        {
+            return inner.replace(&format!("{close}{close}"), &close.to_string());
+        }
+    }
+    name.to_string()
+}
+
+/// The lowercase name (last part, unquoted) of the module that `CREATE`,
+/// `CREATE OR ALTER` or `ALTER` + `PROC`, `PROCEDURE`, `FUNCTION`, `TRIGGER` or
+/// `VIEW` defines anywhere in the batch (a `CREATE` must be the first
+/// statement, but a batch that breaks that rule still gets the server's
+/// error). Text after an unclosed string or comment is ignored.
+fn module_name(text: &str) -> Option<String> {
+    let tokens = match lex(text) {
+        Ok(tokens) => tokens,
+        Err(at) => lex(&text[..at]).ok()?,
+    };
+    let word = |i: usize| {
+        tokens
+            .get(i)
+            .filter(|t| t.kind == Kind::Word)
+            .map(|t| text[t.start..t.end].to_ascii_uppercase())
+    };
+    let is_dot = |i: usize| {
+        tokens
+            .get(i)
+            .is_some_and(|t| t.kind == Kind::Punct && &text[t.start..t.end] == ".")
+    };
+    for i in 0..tokens.len() {
+        let mut at = i + 1;
+        match word(i).as_deref() {
+            Some("CREATE") => {
+                if word(at).as_deref() == Some("OR") && word(at + 1).as_deref() == Some("ALTER") {
+                    at += 2;
+                }
+            }
+            Some("ALTER") => {}
+            _ => continue,
+        }
+        if !matches!(
+            word(at).as_deref(),
+            Some("PROC" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "VIEW")
+        ) {
+            continue;
+        }
+        // The name: parts joined by dots; the last one is the object's.
+        at += 1;
+        let mut last = None;
+        while let Some(t) = tokens.get(at) {
+            if !matches!(t.kind, Kind::Word | Kind::Quoted | Kind::Temp) {
+                break;
+            }
+            last = Some(unquote(&text[t.start..t.end]).to_lowercase());
+            if !is_dot(at + 1) {
+                break;
+            }
+            at += 2;
+        }
+        return last;
+    }
+    None
+}
+
+/// Maps an error of a running request; `site` turns a server line number into
+/// an editor line.
+fn request_error(e: TdsError, site: &Site) -> DriverError {
     match e {
         TdsError::Cancelled => DriverError::Cancelled,
         TdsError::Server(te) if te.class() >= FATAL_SEVERITY => {
             DriverError::Disconnected(te.message().to_string())
         }
-        TdsError::Server(te) => DriverError::Query {
-            message: te.message().to_string(),
-            line: line_of(te.line()),
-        },
+        TdsError::Server(te) => {
+            let (message, line) = error_site(&te, site);
+            DriverError::Query { message, line }
+        }
         TdsError::Io { message, .. } => DriverError::Disconnected(message),
         other => DriverError::Other(other.to_string()),
     }
+}
+
+/// The text and editor line of a server error. An error raised inside a
+/// stored procedure or trigger carries the name of that module and a line
+/// counted from its own start (functions carry no name), so the line says
+/// nothing about the editor: it goes into the text and gets no jump. Errors
+/// of the batch itself have an empty procedure name, and compile errors of a
+/// module's own `CREATE`/`ALTER` batch name that module but count batch lines,
+/// so both keep their jump.
+fn error_site(error: &TokenError, site: &Site) -> (String, Option<u32>) {
+    let procedure = error.procedure();
+    if site.owns(procedure) {
+        return (
+            error.message().to_string(),
+            site.message_line(procedure, error.line()),
+        );
+    }
+    let text = if error.line() > 0 {
+        format!(
+            "{}\nProcedure {procedure}, line {}",
+            error.message(),
+            error.line()
+        )
+    } else {
+        format!("{}\nProcedure {procedure}", error.message())
+    };
+    (text, None)
 }
 
 fn closed() -> DriverError {
@@ -319,7 +476,7 @@ impl MssqlSession {
     async fn query_rows(&mut self, sql: &str) -> Result<Vec<Row>, DriverError> {
         let client = self.client.as_mut().ok_or_else(closed)?;
         let result = async { client.simple_query(sql).await?.into_first_result().await }.await;
-        result.map_err(|e| self.fail(request_error(e, |_| None)))
+        result.map_err(|e| self.fail(request_error(e, &Site::NONE)))
     }
 
     /// Runs a statement with `@P1`, `@P2`... parameters and returns the rows of
@@ -331,7 +488,7 @@ impl MssqlSession {
     ) -> Result<Vec<Row>, DriverError> {
         let client = self.client.as_mut().ok_or_else(closed)?;
         let result = async { client.query(sql, params).await?.into_first_result().await }.await;
-        result.map_err(|e| self.fail(request_error(e, |_| None)))
+        result.map_err(|e| self.fail(request_error(e, &Site::NONE)))
     }
 
     /// Whether the server hosts a single database (`EngineEdition` 5).
@@ -628,7 +785,22 @@ impl Session for MssqlSession {
     }
 
     async fn current_database(&mut self) -> Result<String, DriverError> {
-        self.query_string("SELECT DB_NAME()").await
+        let name = self.query_string("SELECT DB_NAME()").await?;
+        let announced = self
+            .client
+            .as_ref()
+            .and_then(|c| c.database())
+            .map(str::to_string);
+        self.database_spelling = announced.map(|announced| (announced, name.clone()));
+        Ok(name)
+    }
+
+    fn announced_database(&self) -> Option<String> {
+        let announced = self.client.as_ref()?.database()?;
+        match &self.database_spelling {
+            Some((spelled, name)) if spelled == announced => Some(name.clone()),
+            _ => Some(announced.to_string()),
+        }
     }
 
     async fn is_admin(&mut self) -> Result<bool, DriverError> {
@@ -780,12 +952,12 @@ async fn run_batch(
     next_result: &mut u32,
     out: &mut Emitter,
 ) -> Result<(), DriverError> {
-    let line_of = |line: u32| (line > 0).then(|| batch.start_line + line - 1);
+    let site = Site::of(batch);
 
     let stream = client.simple_query(batch.text.as_str());
     let mut stream = resend_cancel_while(stream, out)
         .await
-        .map_err(|e| request_error(e, line_of))?;
+        .map_err(|e| request_error(e, &site))?;
 
     let mut current: Option<ResultSet> = None;
     let mut buffer = RowBuffer {
@@ -840,7 +1012,7 @@ async fn run_batch(
                 out.send(ExecEvent::Message {
                     kind: MessageKind::Info,
                     text: info.message,
-                    line: line_of(info.line),
+                    line: site.message_line(&info.procedure, info.line),
                 })
                 .await;
             }
@@ -849,13 +1021,14 @@ async fn run_batch(
                 // A fatal error ends the connection: report it as the error
                 // of the request, not as a message.
                 if error.class() >= FATAL_SEVERITY {
-                    return Err(request_error(TdsError::Server(error), line_of));
+                    return Err(request_error(TdsError::Server(error), &site));
                 }
                 out.error_sent = true;
+                let (text, line) = error_site(&error, &site);
                 out.send(ExecEvent::Message {
                     kind: MessageKind::Error,
-                    text: error.message().to_string(),
-                    line: line_of(error.line()),
+                    text,
+                    line,
                 })
                 .await;
             }
@@ -868,7 +1041,7 @@ async fn run_batch(
             }
             Err(e) => {
                 buffer.flush(index_of(&current), out).await;
-                return Err(request_error(e, line_of));
+                return Err(request_error(e, &site));
             }
         }
     }
@@ -903,6 +1076,102 @@ mod params;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn module(sql: &str) -> Option<String> {
+        module_name(sql)
+    }
+
+    #[test]
+    fn module_name_finds_the_created_module() {
+        assert_eq!(
+            module("CREATE PROCEDURE dbo.p AS SELECT 1").as_deref(),
+            Some("p")
+        );
+        assert_eq!(module("create proc p as select 1").as_deref(), Some("p"));
+        assert_eq!(
+            module("CREATE OR ALTER FUNCTION f() RETURNS int AS BEGIN RETURN 1 END").as_deref(),
+            Some("f")
+        );
+        assert_eq!(module("ALTER VIEW v AS SELECT 1 a").as_deref(), Some("v"));
+        assert_eq!(
+            module("CREATE TRIGGER trg ON t AFTER INSERT AS SELECT 1").as_deref(),
+            Some("trg")
+        );
+    }
+
+    #[test]
+    fn module_name_skips_comments_and_unquotes_names() {
+        assert_eq!(
+            module("/* c */ -- x\nCREATE PROCEDURE [dbo].[My Proc] AS SELECT 1").as_deref(),
+            Some("my proc")
+        );
+        assert_eq!(
+            module("CREATE PROCEDURE \"db\".\"dbo\".\"P\"\"q\" AS SELECT 1").as_deref(),
+            Some("p\"q")
+        );
+        assert_eq!(
+            module("CREATE PROCEDURE srv.db.dbo.Three AS SELECT 1").as_deref(),
+            Some("three")
+        );
+        assert_eq!(
+            module("CREATE PROCEDURE #Temp AS SELECT 1").as_deref(),
+            Some("#temp")
+        );
+    }
+
+    #[test]
+    fn module_name_ignores_other_statements() {
+        assert_eq!(module("CREATE TABLE t(a int)"), None);
+        assert_eq!(module("ALTER TABLE t ADD b int"), None);
+        assert_eq!(module("ALTER DATABASE d SET RECOVERY SIMPLE"), None);
+        assert_eq!(module("SELECT 'CREATE PROCEDURE p'"), None);
+        assert_eq!(module("-- CREATE PROCEDURE p\nSELECT 1"), None);
+    }
+
+    #[test]
+    fn module_name_accepts_a_create_that_is_not_first() {
+        assert_eq!(
+            module("SELECT 1\nCREATE PROCEDURE dbo.px AS SELECT 1").as_deref(),
+            Some("px")
+        );
+    }
+
+    #[test]
+    fn module_name_survives_an_unclosed_string_or_comment() {
+        assert_eq!(
+            module("CREATE PROCEDURE dbo.px AS\nBEGIN\n  SELECT 'abc\nEND").as_deref(),
+            Some("px")
+        );
+        assert_eq!(
+            module("CREATE PROCEDURE dbo.px AS\nSELECT 1 /* x\nEND").as_deref(),
+            Some("px")
+        );
+        assert_eq!(module("SELECT 'abc"), None);
+    }
+
+    #[test]
+    fn a_site_owns_the_batch_and_the_module_it_creates() {
+        let site = Site {
+            start_line: 1,
+            lines: 5,
+            module: module("CREATE PROCEDURE dbo.px AS SELECT 1"),
+        };
+        assert!(site.owns(""));
+        assert!(site.owns("px"));
+        assert!(site.owns("dbo.PX"));
+        assert!(site.owns("[dbo].[px]"));
+        assert!(!site.owns("trg_audit"));
+        let temp = Site {
+            start_line: 1,
+            lines: 1,
+            module: module("CREATE PROCEDURE #t AS SELECT 1"),
+        };
+        assert!(temp.owns("#t_____________________000000000001"));
+        assert!(!Site::NONE.owns("px"));
+        assert_eq!(site.message_line("px", 3), Some(3));
+        assert_eq!(site.message_line("px", 6), None);
+        assert_eq!(site.message_line("other", 3), None);
+    }
 
     #[test]
     fn a_reset_browser_lookup_gets_the_browser_hint() {

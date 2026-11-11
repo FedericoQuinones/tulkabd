@@ -39,11 +39,12 @@ import {
   keyOf,
   navigate,
   quoteName,
+  siblingPositions,
   selectTop10,
   type MenuActions,
   type Row,
 } from "./tree";
-import { explorer, OBJECT_PAGE } from "./tree.svelte";
+import { explorer, OBJECT_PAGE, REMEMBERED_PATHS } from "./tree.svelte";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -724,4 +725,121 @@ test("deleting a connection unbinds the tabs that used it", async () => {
   expect(await explorer.deleteConnection(local.id)).toBe(true);
   expect(spy).toHaveBeenCalledWith(local.id);
   spy.mockRestore();
+});
+
+// ---- remembering what is open ----
+
+const lastPersisted = () => vi.mocked(ipc.setExpanded).mock.calls.at(-1)?.[0];
+
+test("databases and groups open under a connection are persisted, opened tables are not", async () => {
+  const dbKey = keyOf.db("c2", "Ventas");
+  const groupKey = keyOf.group("c2", "Ventas", "table");
+  const tableKey = keyOf.object("c2", "Ventas", { schema: "dbo", name: "T", kind: "table" });
+  explorer.expanded.add("c2");
+  explorer.expanded.add(dbKey);
+  explorer.expanded.add(groupKey);
+  explorer.expanded.add(tableKey);
+  await explorer.expand(keyOf.saved("c2", "Ventas"));
+  await flush();
+  expect(lastPersisted()).toEqual(["c2", dbKey, groupKey, keyOf.saved("c2", "Ventas")]);
+});
+
+test("init restores open databases and groups without connecting", async () => {
+  const dbKey = keyOf.db("c2", "Ventas");
+  const groupKey = keyOf.group("c2", "Ventas", "table");
+  const tableKey = keyOf.object("c2", "Ventas", { schema: "dbo", name: "T", kind: "table" });
+  vi.mocked(ipc.listExpanded).mockResolvedValue(["c2", dbKey, groupKey, tableKey]);
+  vi.mocked(ipc.explorerDatabases).mockResolvedValue([db("Ventas", { tables: 1 })]);
+  vi.mocked(ipc.explorerObjects).mockResolvedValue([{ schema: "dbo", name: "T", kind: "table" }]);
+  await explorer.init();
+  await flush();
+  await flush();
+  expect(ipc.connectExplorer).not.toHaveBeenCalled();
+  expect(explorer.expanded.has(tableKey)).toBe(false);
+  const rows = labels();
+  expect(rows).toContain("db:Ventas");
+  expect(rows).toContain("notice:Loading…");
+  await flush();
+  expect(labels()).toContain("dbo.T");
+  expect(explorer.state("c2").status).toBe("offline");
+});
+
+test("what is open survives a disconnect and a reconnect", async () => {
+  const dbKey = keyOf.db("c2", "Ventas");
+  vi.mocked(ipc.explorerDatabases).mockResolvedValue([db("Ventas")]);
+  vi.mocked(ipc.disconnectExplorer).mockResolvedValue();
+  vi.mocked(ipc.connectExplorer).mockResolvedValue({ server: { version: "16", user: "sa", singleDatabase: false }, databases: ["Ventas"] });
+  await explorer.expand("c2");
+  await explorer.expand(dbKey);
+  await explorer.disconnect("c2");
+  await explorer.connect("c2");
+  await flush();
+  expect(explorer.rows.find((r) => r.key === dbKey)?.expanded).toBe(true);
+  expect(labels()).toContain("saved:0");
+});
+
+test("only the newest remembered paths are kept", async () => {
+  explorer.expanded.add("c2");
+  for (let i = 0; i < REMEMBERED_PATHS + 20; i++) explorer.expanded.add(keyOf.db("c2", `d${i}`));
+  await explorer.expand(keyOf.db("c2", "last"));
+  await flush();
+  const saved = lastPersisted()!;
+  expect(saved).toHaveLength(1 + REMEMBERED_PATHS);
+  expect(saved[0]).toBe("c2");
+  expect(saved.at(-1)).toBe(keyOf.db("c2", "last"));
+  expect(saved).not.toContain(keyOf.db("c2", "d0"));
+});
+
+test("paths of a deleted connection are forgotten", async () => {
+  const dbKey = keyOf.db("c2", "Ventas");
+  explorer.expanded.add("c2");
+  explorer.expanded.add(dbKey);
+  explorer.expanded.add(keyOf.db("c3", "Other"));
+  connections.onForget?.("c2");
+  await flush();
+  expect(explorer.expanded.has(dbKey)).toBe(false);
+  expect(lastPersisted()).toEqual(["c2", keyOf.db("c3", "Other")]);
+});
+
+test("PageDown and PageUp move by a page and stop at the ends", () => {
+  explorer.expanded.add("fa");
+  const rows = explorer.rows; // Cliente A, Proyecto X, Otros, billing, Local
+  expect(navigate(rows, "fa", "PageDown", 2)).toEqual({ focus: "fo" });
+  expect(navigate(rows, "fa", "PageDown", 50)).toEqual({ focus: "c2" });
+  expect(navigate(rows, "c2", "PageUp", 3)).toEqual({ focus: "fx" });
+  expect(navigate(rows, "fx", "PageUp", 50)).toEqual({ focus: "fa" });
+  expect(navigate(rows, null, "PageDown")).toEqual({ focus: "fa" });
+});
+
+test("siblingPositions counts the rows that share a parent, wherever they sit in the list", () => {
+  explorer.expanded.add("fa");
+  explorer.expanded.add("fx");
+  const rows = explorer.rows;
+  const at = (key: string) => siblingPositions(rows)[rows.findIndex((r) => r.key === key)];
+  expect(at("fa")).toEqual({ setsize: 4, posinset: 1 });
+  expect(at("fx")).toEqual({ setsize: 1, posinset: 1 });
+  expect(at("c1")).toEqual({ setsize: 1, posinset: 1 });
+  expect(at("fo")).toEqual({ setsize: 4, posinset: 2 });
+  expect(at("c2")).toEqual({ setsize: 4, posinset: 4 });
+});
+
+test("a database with thousands of objects flattens to one page of rows and a show-more row", async () => {
+  explorer.expanded.add("c2");
+  explorer.expanded.add(keyOf.db("c2", "Big"));
+  const group = keyOf.group("c2", "Big", "table");
+  explorer.expanded.add(group);
+  const st = explorer.state("c2");
+  st.status = "connected";
+  st.databases = [db("Big", { tables: 10_000 })];
+  vi.mocked(ipc.explorerObjects).mockResolvedValue(
+    Array.from({ length: 10_000 }, (_, i) => ({ schema: "dbo", name: `T${i}`, kind: "table" as const })),
+  );
+  void explorer.rows;
+  await flush();
+  const rows = explorer.rows;
+  const first = rows.findIndex((r) => r.kind === "object");
+  expect(rows.slice(first, first + OBJECT_PAGE).every((r) => r.kind === "object" && r.parent === group)).toBe(true);
+  const more = rows[first + OBJECT_PAGE];
+  expect(more.kind === "notice" && more.action !== null).toBe(true);
+  expect(siblingPositions(rows)[first + OBJECT_PAGE]).toEqual({ setsize: OBJECT_PAGE + 1, posinset: OBJECT_PAGE + 1 });
 });
