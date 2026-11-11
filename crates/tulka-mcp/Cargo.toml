@@ -8,7 +8,7 @@ description = "MCP server that gives AI assistants read-only access to tulkabd c
 
 [dependencies]
 tulka-app = { path = "../tulka-app" }
-rmcp = { version = "3.8", default-features = false, features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.9", default-features = false, features = ["server", "macros", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
 
@@ -16,7 +16,7 @@ serde = { version = "1", features = ["derive"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [dev-dependencies]
-rmcp = { version = "3.8", default-features = false, features = ["client", "server", "macros", "transport-async-rw"] }
+rmcp = { version = "3.9", default-features = false, features = ["client", "server", "macros", "transport-async-rw"] }
 tulka-core = { path = "../tulka-core" }
 tulka-mssql = { path = "../tulka-mssql" }
 tempfile = "3"

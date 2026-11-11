@@ -47,9 +47,8 @@ jobs:
           targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - name: System libraries
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev libssl-dev libdbus-1-dev pkg-config
+        timeout-minutes: 35
+        run: bash scripts/install-linux-deps.sh
       - run: pnpm install --frozen-lockfile
       # Always a draft: a maintainer reviews the attached installers and publishes by hand.
       - uses: tauri-apps/tauri-action@v0
