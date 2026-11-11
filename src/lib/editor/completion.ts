@@ -205,8 +205,11 @@ function statementAt(toks: Tok[], cursor: number): Tok[] {
   return toks.slice(start, end);
 }
 
+/** Words that can follow a table source but are not its alias. */
+const NOT_ALIASES = new Set(["APPLY", "WINDOW", "OUTPUT"]);
+
 const isName = (t: Tok | undefined) =>
-  !!t && (t.kind === "quoted" || (t.kind === "word" && !RESERVED.has(t.value.toUpperCase()) && t.value.toUpperCase() !== "APPLY"));
+  !!t && (t.kind === "quoted" || (t.kind === "word" && !RESERVED.has(t.value.toUpperCase()) && !NOT_ALIASES.has(t.value.toUpperCase())));
 
 /** The unique schema that has a table or view `name`, else `dbo`. */
 function resolveSchema(name: string, meta?: CompletionMetadata): string {
@@ -216,6 +219,16 @@ function resolveSchema(name: string, meta?: CompletionMetadata): string {
     meta.objects.filter((o) => o.kind !== "procedure" && o.name.toLowerCase() === lower).map((o) => o.schema),
   );
   return schemas.size === 1 ? [...schemas][0] : "dbo";
+}
+
+/** The index after the balanced parentheses that open at `toks[at]`, or -1 when they are not closed. */
+function afterParens(toks: Tok[], at: number): number {
+  let depth = 0;
+  for (let k = at; k < toks.length; k++) {
+    if (toks[k].kind === "lparen") depth++;
+    else if (toks[k].kind === "other" && toks[k].value === ")" && --depth === 0) return k + 1;
+  }
+  return -1;
 }
 
 /**
@@ -252,27 +265,34 @@ function aliasesIn(batch: Tok[], cursor: number, meta?: CompletionMetadata): Rec
         } else break;
       }
       if (parts.length === 0) break;
-      if (toks[j]?.kind === "lparen") {
-        // A table-valued function needs a schema; `STRING_SPLIT(...)` and the like have no columns here.
-        if (parts.length < 2) break;
-        let depth = 0;
-        for (; j < toks.length; j++) {
-          if (toks[j].kind === "lparen") depth++;
-          else if (toks[j].kind === "other" && toks[j].value === ")" && --depth === 0) break;
-        }
-        if (j >= toks.length) break;
-        j++;
-      }
       const name = parts[parts.length - 1];
+      let recordable = true;
+      if (toks[j]?.kind === "lparen") {
+        // A call is an alias target only when it names a table-valued function: schema-qualified, or
+        // unqualified and known to `meta` in `dbo`. `STRING_SPLIT(...)` and the like have no columns here.
+        recordable =
+          parts.length > 1 ||
+          !!meta?.objects.some((o) => o.kind === "tableFunction" && o.schema.toLowerCase() === "dbo" && o.name.toLowerCase() === name.toLowerCase());
+        j = afterParens(toks, j);
+        if (j < 0) break;
+      }
       const schema = parts.length > 1 && parts[parts.length - 2] !== "" ? parts[parts.length - 2] : resolveSchema(name, meta);
       if (toks[j]?.kind === "word" && toks[j].value.toUpperCase() === "AS") j++;
       const a = toks[j];
       if (isName(a)) {
-        const dist = Math.abs(a.from - cursor);
-        const key = a.value.toLowerCase();
-        const prev = found.get(key);
-        if (!prev || dist < prev.dist) found.set(key, { alias: a.value, target: `${schema}.${name}`, dist });
+        if (recordable) {
+          const dist = Math.abs(a.from - cursor);
+          const key = a.value.toLowerCase();
+          const prev = found.get(key);
+          if (!prev || dist < prev.dist) found.set(key, { alias: a.value, target: `${schema}.${name}`, dist });
+        }
         j++;
+      }
+      // Table hints: `(NOLOCK)` or `WITH (NOLOCK)`.
+      if (toks[j]?.kind === "word" && toks[j].value.toUpperCase() === "WITH" && toks[j + 1]?.kind === "lparen") j++;
+      if (toks[j]?.kind === "lparen") {
+        j = afterParens(toks, j);
+        if (j < 0) break;
       }
       if (toks[j]?.kind !== "comma") break;
       j++;

@@ -229,3 +229,30 @@ test("the argument list of a function does not break alias detection", async () 
 test("built-in and derived table sources are not aliased as objects", () => {
   expect(aliasMap("SELECT 1 FROM STRING_SPLIT(@s, ',') v JOIN (SELECT 1 a) d ON 1=1", 0, fnMeta)).toEqual({});
 });
+
+test("a built-in function does not end the comma list", () => {
+  expect(aliasMap("SELECT 1 FROM STRING_SPLIT(@s, ',') v, dbo.Pedidos p", 0, fnMeta)).toEqual({ p: "dbo.Pedidos" });
+});
+
+test("table hints after an alias do not end the comma list", () => {
+  expect(aliasMap("SELECT 1 FROM dbo.Pedidos t (NOLOCK), dbo.fnOrders(1) o", 0, fnMeta)).toEqual({
+    t: "dbo.Pedidos",
+    o: "dbo.fnOrders",
+  });
+  expect(aliasMap("SELECT 1 FROM dbo.Pedidos t WITH (NOLOCK, INDEX(1)), dbo.fnOrders(1) o", 0, fnMeta)).toEqual({
+    t: "dbo.Pedidos",
+    o: "dbo.fnOrders",
+  });
+});
+
+test("WINDOW and OUTPUT are not aliases", () => {
+  expect(aliasMap("SELECT 1 FROM dbo.fnOrders(1) WINDOW w AS ()", 0, fnMeta)).toEqual({});
+  expect(aliasMap("DELETE FROM dbo.Pedidos OUTPUT deleted.Id", 0, fnMeta)).toEqual({});
+});
+
+test("an unqualified table-valued function known to the metadata gets its alias", async () => {
+  expect(aliasMap("SELECT 1 FROM fnOrders(1) x", 0, fnMeta)).toEqual({ x: "dbo.fnOrders" });
+  expect(labels(await completeFn("SELECT x.| FROM fnOrders(1) x"))).toEqual(["OrderId", "Amount"]);
+  expect(aliasMap("SELECT 1 FROM fnOrders(1) x", 0)).toEqual({});
+  expect(aliasMap("SELECT 1 FROM OPENJSON(@j) x", 0, fnMeta)).toEqual({});
+});
