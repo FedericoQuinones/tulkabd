@@ -644,6 +644,11 @@ impl MetaCache {
             }
         }
         let mut sql = format!("{select} WHERE ({})", alternatives.join(" OR "));
+        // A synonym repeats the columns of its base object, possibly one in a
+        // database the search is not meant to reveal.
+        if q.in_columns {
+            sql.push_str(" AND o.kind <> 'synonym'");
+        }
         if let Some(db) = q.database {
             sql.push_str(" AND o.database = ? COLLATE NOCASE");
             args.push(db.to_string());
@@ -1304,6 +1309,46 @@ mod tests {
         assert!(m.hits.is_empty());
         // Object search leaves `column` empty.
         assert_eq!(find(&c, &["c1"], "users").hits[0].column, None);
+    }
+
+    #[test]
+    fn a_synonym_keeps_the_columns_of_its_base_object() {
+        let c = MetaCache::in_memory();
+        let snap = DatabaseSnapshot {
+            objects: vec![
+                obj("dbo", "Users", ObjectKind::Table),
+                obj("dbo", "Alias", ObjectKind::Synonym),
+            ],
+            columns: vec![
+                (0, vec![col("Id", true), col("Age", false)]),
+                (1, vec![col("Id", true), col("Age", false)]),
+            ],
+        };
+        c.replace_database("c1", "db", &snap, 1).unwrap();
+        let cols: Vec<String> = c
+            .columns("c1", "db", "dbo", "Alias")
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(cols, ["Id", "Age"]);
+        assert!(c.column_names("c1", "db").contains(&(
+            "dbo".into(),
+            "Alias".into(),
+            vec!["Id".into(), "Age".into()]
+        )));
+        // Searching columns reports the base object alone.
+        let ids = ["c1".to_string()];
+        let m = c.find_objects(&ObjectQuery {
+            connection_ids: &ids,
+            database: None,
+            terms: &terms("age"),
+            kinds: &[],
+            in_columns: true,
+            limit: 50,
+        });
+        assert_eq!(names(&m), ["Users"]);
+        // The synonym is still found by its name.
+        assert_eq!(find(&c, &["c1"], "alias").hits.len(), 1);
     }
 
     #[test]

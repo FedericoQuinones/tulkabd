@@ -32,6 +32,17 @@ BEGIN
   DROP DATABASE tulka_meta;
 END
 GO
+IF DB_ID('tulka_meta_off') IS NOT NULL
+BEGIN
+  ALTER DATABASE tulka_meta_off SET ONLINE;
+  ALTER DATABASE tulka_meta_off SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+  DROP DATABASE tulka_meta_off;
+END
+GO
+CREATE DATABASE tulka_meta_off
+GO
+CREATE TABLE tulka_meta_off.dbo.Apagada(Id int NOT NULL)
+GO
 IF DB_ID('tulka_meta_other') IS NOT NULL
 BEGIN
   ALTER DATABASE tulka_meta_other SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
@@ -40,7 +51,7 @@ END
 GO
 CREATE DATABASE tulka_meta_other
 GO
-CREATE TABLE tulka_meta_other.dbo.Remota(Id int NOT NULL)
+CREATE TABLE tulka_meta_other.dbo.Remota(Id int NOT NULL, Nombre nvarchar(20) NULL)
 GO
 CREATE DATABASE tulka_meta
 GO
@@ -103,6 +114,24 @@ GO
 CREATE SYNONYM [dbo].[syn.Con Punto] FOR [dbo].[Order Details]
 GO
 CREATE SYNONYM dbo.synDeSyn FOR dbo.synPedidos
+GO
+CREATE TABLE dbo.T(Id int NOT NULL, FromDbo bit NULL)
+GO
+CREATE PROCEDURE ventas.T AS SELECT 1
+GO
+CREATE SYNONYM ventas.synT FOR T
+GO
+CREATE TABLE dbo.SoloEnDbo(Id int NOT NULL)
+GO
+CREATE SYNONYM ventas.synSoloDbo FOR SoloEnDbo
+GO
+CREATE SYNONYM dbo.synMismaBd FOR tulka_meta.dbo.fnDeCliente
+GO
+CREATE SYNONYM dbo.synMismaBdTabla FOR tulka_meta..Pedidos
+GO
+CREATE SYNONYM dbo.synApagada FOR tulka_meta_off.dbo.Apagada
+GO
+ALTER DATABASE tulka_meta_off SET OFFLINE WITH ROLLBACK IMMEDIATE
 ";
 
 /// Creates the `tulka_meta` database once per test process.
@@ -133,6 +162,8 @@ async fn snapshot_lists_objects_and_columns() {
         vec![
             ("dbo".into(), "Order Details".into(), ObjectKind::Table),
             ("dbo".into(), "Pedidos".into(), ObjectKind::Table),
+            ("dbo".into(), "SoloEnDbo".into(), ObjectKind::Table),
+            ("dbo".into(), "T".into(), ObjectKind::Table),
             (
                 "dbo".into(),
                 "fnDeCliente".into(),
@@ -143,11 +174,14 @@ async fn snapshot_lists_objects_and_columns() {
             ("dbo".into(), "pSecreto".into(), ObjectKind::Procedure),
             ("dbo".into(), "pTotal".into(), ObjectKind::Procedure),
             ("dbo".into(), "syn.Con Punto".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synApagada".into(), ObjectKind::Synonym),
             ("dbo".into(), "synBaseFalta".into(), ObjectKind::Synonym),
             ("dbo".into(), "synDeSyn".into(), ObjectKind::Synonym),
             ("dbo".into(), "synEnlazado".into(), ObjectKind::Synonym),
             ("dbo".into(), "synEscalar".into(), ObjectKind::Synonym),
             ("dbo".into(), "synFalta".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synMismaBd".into(), ObjectKind::Synonym),
+            ("dbo".into(), "synMismaBdTabla".into(), ObjectKind::Synonym),
             ("dbo".into(), "synPedidos".into(), ObjectKind::Synonym),
             ("dbo".into(), "synProc".into(), ObjectKind::Synonym),
             ("dbo".into(), "synRemota".into(), ObjectKind::Synonym),
@@ -157,6 +191,9 @@ async fn snapshot_lists_objects_and_columns() {
             ("dbo".into(), "synVista".into(), ObjectKind::Synonym),
             ("dbo".into(), "vPedidos".into(), ObjectKind::View),
             ("ventas".into(), "Pedidos_Año".into(), ObjectKind::Table),
+            ("ventas".into(), "T".into(), ObjectKind::Procedure),
+            ("ventas".into(), "synSoloDbo".into(), ObjectKind::Synonym),
+            ("ventas".into(), "synT".into(), ObjectKind::Synonym),
         ]
     );
 
@@ -185,14 +222,12 @@ async fn snapshot_lists_objects_and_columns() {
     assert!(snap.columns.iter().all(|(k, _)| *k != index_of("pTotal")));
 
     // Table-valued functions expose their result columns; scalar functions
-    // and synonyms have none.
+    // and procedures have none.
     let names =
         |name: &str| -> Vec<String> { cols_of(name).iter().map(|c| c.name.clone()).collect() };
     assert_eq!(names("fnDeCliente"), ["Id", "Total"]);
     assert_eq!(names("fnLista"), ["Id", "Cliente", "Total"]);
-    for none in ["fnDoble", "synPedidos", "synProc"] {
-        assert!(snap.columns.iter().all(|(k, _)| *k != index_of(none)));
-    }
+    assert!(snap.columns.iter().all(|(k, _)| *k != index_of("fnDoble")));
 }
 
 #[tokio::test]
@@ -414,37 +449,104 @@ async fn snapshot_is_not_blocked_by_an_open_transaction() {
 }
 
 #[tokio::test]
-async fn a_synonym_reports_the_kind_of_its_target() {
+async fn a_synonym_takes_the_kind_and_columns_of_its_target() {
     let Some(p) = test_params() else { return };
     setup(&p).await;
     let mut s = connect(&p).await;
 
     let snap = s.snapshot("tulka_meta").await.unwrap();
-    let target = |name: &str| {
-        let o = snap.objects.iter().find(|o| o.name == name).unwrap();
-        assert_eq!(o.kind == ObjectKind::Synonym, name.starts_with("syn"));
-        o.target
+    let find = |schema: &str, name: &str| {
+        snap.objects
+            .iter()
+            .position(|o| o.schema == schema && o.name == name)
+            .unwrap()
     };
-    for (synonym, expected) in [
-        ("synPedidos", Some(ObjectKind::Table)),
-        ("synVista", Some(ObjectKind::View)),
-        ("synProc", Some(ObjectKind::Procedure)),
-        ("synEscalar", Some(ObjectKind::Function)),
-        ("synTabla", Some(ObjectKind::TableFunction)),
-        ("synSinEsquema", Some(ObjectKind::Table)),
-        ("syn.Con Punto", Some(ObjectKind::Table)),
+    let columns = |schema: &str, name: &str| -> Option<Vec<String>> {
+        let i = find(schema, name);
+        snap.columns
+            .iter()
+            .find(|(k, _)| *k == i)
+            .map(|(_, c)| c.iter().map(|c| c.name.clone()).collect())
+    };
+    let cols = |names: &[&str]| Some(names.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let pedidos = cols(&["Id", "Cliente", "Total", "Notas", "Creado"]);
+    for (schema, synonym, kind, expected) in [
+        (
+            "dbo",
+            "synPedidos",
+            Some(ObjectKind::Table),
+            pedidos.clone(),
+        ),
+        (
+            "dbo",
+            "synSinEsquema",
+            Some(ObjectKind::Table),
+            pedidos.clone(),
+        ),
+        (
+            "dbo",
+            "synVista",
+            Some(ObjectKind::View),
+            cols(&["Id", "Cliente"]),
+        ),
+        (
+            "dbo",
+            "syn.Con Punto",
+            Some(ObjectKind::Table),
+            cols(&["PedidoId", "Linea"]),
+        ),
+        ("dbo", "synProc", Some(ObjectKind::Procedure), None),
+        ("dbo", "synEscalar", Some(ObjectKind::Function), None),
+        (
+            "dbo",
+            "synTabla",
+            Some(ObjectKind::TableFunction),
+            cols(&["Id", "Total"]),
+        ),
+        // Three parts naming this same database, with and without a schema.
+        (
+            "dbo",
+            "synMismaBd",
+            Some(ObjectKind::TableFunction),
+            cols(&["Id", "Total"]),
+        ),
+        (
+            "dbo",
+            "synMismaBdTabla",
+            Some(ObjectKind::Table),
+            pedidos.clone(),
+        ),
         // Another database of the server.
-        ("synRemota", Some(ObjectKind::Table)),
-        // Missing object, missing database, linked server, synonym chain.
-        ("synFalta", None),
-        ("synRemotaFalta", None),
-        ("synBaseFalta", None),
-        ("synEnlazado", None),
-        ("synDeSyn", None),
+        (
+            "dbo",
+            "synRemota",
+            Some(ObjectKind::Table),
+            cols(&["Id", "Nombre"]),
+        ),
+        // A missing schema is the synonym's own, so ventas.T (a procedure)
+        // wins over dbo.T; dbo is the fallback.
+        ("ventas", "synT", Some(ObjectKind::Procedure), None),
+        (
+            "ventas",
+            "synSoloDbo",
+            Some(ObjectKind::Table),
+            cols(&["Id"]),
+        ),
+        // Missing object or database, linked server, offline database, and a
+        // synonym of a synonym (rejected by the server when used).
+        ("dbo", "synFalta", None, None),
+        ("dbo", "synRemotaFalta", None, None),
+        ("dbo", "synBaseFalta", None, None),
+        ("dbo", "synEnlazado", None, None),
+        ("dbo", "synApagada", None, None),
+        ("dbo", "synDeSyn", None, None),
     ] {
-        assert_eq!(target(synonym), expected, "{synonym}");
+        let o = &snap.objects[find(schema, synonym)];
+        assert_eq!(o.kind, ObjectKind::Synonym, "{synonym}");
+        assert_eq!(o.target, kind, "{synonym}");
+        assert_eq!(columns(schema, synonym), expected, "{synonym}");
     }
     // Objects that are not synonyms carry no target.
-    assert_eq!(target("Pedidos"), None);
-    assert_eq!(target("pTotal"), None);
+    assert_eq!(snap.objects[find("dbo", "Pedidos")].target, None);
+    assert_eq!(snap.objects[find("dbo", "pTotal")].target, None);
 }
