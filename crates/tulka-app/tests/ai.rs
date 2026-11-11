@@ -1193,16 +1193,27 @@ async fn a_timeout_keeps_the_rows_received_before_it() {
 #[tokio::test]
 async fn cancelling_while_waiting_for_a_slot_is_logged_cancelled() {
     let f = Fixture::standard();
+    // Every call gives up at the same moment: with a timer each, the fifth
+    // could fire after a slot was freed and take it.
+    let (give_up, gave_up) = tokio::sync::watch::channel(false);
     let one = || {
-        run_query(&f.state, query("Local", "SELECT slow"), async {
-            // Give up once four calls hold the slots, not after a delay.
-            while f.driver.script.connects.lock().unwrap().len() < 4 {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut gave_up = gave_up.clone();
+        run_query(&f.state, query("Local", "SELECT slow"), async move {
+            let _ = gave_up.wait_for(|g| *g).await;
         })
     };
-    let outs = tokio::join!(one(), one(), one(), one(), one());
+    let signal = async {
+        // Give up once four calls hold the slots, not after a delay.
+        while f.driver.script.connects.lock().unwrap().len() < 4 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        give_up.send_replace(true);
+    };
+    let (outs, ()) = tokio::join!(
+        async { tokio::join!(one(), one(), one(), one(), one()) },
+        signal
+    );
     assert!([&outs.0, &outs.1, &outs.2, &outs.3, &outs.4]
         .iter()
         .all(|o| o.is_error && o.text == "The query was cancelled."));
