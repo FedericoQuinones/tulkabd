@@ -53,6 +53,12 @@ CREATE DATABASE tulka_meta_other
 GO
 CREATE TABLE tulka_meta_other.dbo.Remota(Id int NOT NULL, Nombre nvarchar(20) NULL)
 GO
+EXEC tulka_meta_other..sp_executesql N'CREATE SCHEMA ventas'
+GO
+CREATE TABLE tulka_meta_other.dbo.T(Id int NOT NULL)
+GO
+EXEC tulka_meta_other..sp_executesql N'CREATE SYNONYM ventas.T FOR dbo.T'
+GO
 CREATE DATABASE tulka_meta
 GO
 USE tulka_meta
@@ -131,6 +137,10 @@ CREATE SYNONYM dbo.synMismaBdTabla FOR tulka_meta..Pedidos
 GO
 CREATE SYNONYM dbo.synApagada FOR tulka_meta_off.dbo.Apagada
 GO
+CREATE SYNONYM ventas.synOtraT FOR tulka_meta_other..T
+GO
+-- Left offline on purpose: the setup above brings it back online before
+-- dropping it, so a re-run recovers whatever a failed run left behind.
 ALTER DATABASE tulka_meta_off SET OFFLINE WITH ROLLBACK IMMEDIATE
 ";
 
@@ -192,6 +202,7 @@ async fn snapshot_lists_objects_and_columns() {
             ("dbo".into(), "vPedidos".into(), ObjectKind::View),
             ("ventas".into(), "Pedidos_Año".into(), ObjectKind::Table),
             ("ventas".into(), "T".into(), ObjectKind::Procedure),
+            ("ventas".into(), "synOtraT".into(), ObjectKind::Synonym),
             ("ventas".into(), "synSoloDbo".into(), ObjectKind::Synonym),
             ("ventas".into(), "synT".into(), ObjectKind::Synonym),
         ]
@@ -539,6 +550,9 @@ async fn a_synonym_takes_the_kind_and_columns_of_its_target() {
         ("dbo", "synBaseFalta", None, None),
         ("dbo", "synEnlazado", None, None),
         ("dbo", "synApagada", None, None),
+        // ventas.T of the other database is a synonym, which the server
+        // refuses to follow, even though dbo.T there is a table.
+        ("ventas", "synOtraT", None, None),
         ("dbo", "synDeSyn", None, None),
     ] {
         let o = &snap.objects[find(schema, synonym)];

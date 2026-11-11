@@ -99,13 +99,14 @@ pub fn synonyms_sql(prefix: &str) -> String {
 }
 
 /// Parameters: `@P1`... object names. Result: object id, schema, name and
-/// type of the objects other than synonyms with one of those names.
+/// type of the objects (synonyms included, which the server refuses to
+/// follow) with one of those names.
 pub fn base_objects_sql(prefix: &str, names: usize) -> String {
     format!(
         "SELECT o.object_id, s.name, o.name, o.type \
          FROM {prefix}sys.objects o \
          JOIN {prefix}sys.schemas s ON s.schema_id = o.schema_id \
-         WHERE o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'FS', 'FT') \
+         WHERE o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'FS', 'FT', 'SN') \
            AND o.name IN ({})",
         placeholders(names)
     )

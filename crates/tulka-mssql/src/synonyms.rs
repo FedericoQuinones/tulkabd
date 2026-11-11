@@ -96,18 +96,15 @@ impl NameIndex {
         NameIndex { exact, folded }
     }
 
-    /// Position of the first of `schemas` (in order) holding `name`; an exact
-    /// match in any of them wins over a case-insensitive one.
+    /// Position of the object `name` in the first of `schemas` that holds
+    /// it; within a schema an exact spelling wins over a case-insensitive one.
     pub fn find(&self, schemas: &[String], name: &str) -> Option<usize> {
-        schemas
-            .iter()
-            .find_map(|s| self.exact.get(&(s.clone(), name.to_string())))
-            .or_else(|| {
-                schemas
-                    .iter()
-                    .find_map(|s| self.folded.get(&(s.to_lowercase(), name.to_lowercase())))
-            })
-            .copied()
+        schemas.iter().find_map(|s| {
+            self.exact
+                .get(&(s.clone(), name.to_string()))
+                .or_else(|| self.folded.get(&(s.to_lowercase(), name.to_lowercase())))
+                .copied()
+        })
     }
 }
 
@@ -188,6 +185,14 @@ mod tests {
         // No exact spelling: the first case-insensitive match.
         assert_eq!(index.find(&dbo, "t"), Some(0));
         assert_eq!(index.find(&dbo, "missing"), None);
+    }
+
+    #[test]
+    fn an_earlier_schema_wins_even_with_a_different_case() {
+        let items = [("dbo", "T"), ("ventas", "t")];
+        let index = NameIndex::new(items.iter().map(|(s, n)| (*s, *n)));
+        let both = ["ventas".to_string(), "dbo".to_string()];
+        assert_eq!(index.find(&both, "T"), Some(1));
     }
 
     #[test]

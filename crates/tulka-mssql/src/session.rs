@@ -27,6 +27,16 @@ use crate::meta;
 use crate::readonly;
 use crate::synonyms::{resolve_local, NameIndex, Place, SynonymBase};
 
+/// Keeps a failure confined to the database being read, except a lost
+/// connection, which ends the whole snapshot.
+fn isolate<T>(result: Result<T, DriverError>) -> Result<Option<T>, DriverError> {
+    match result {
+        Ok(v) => Ok(Some(v)),
+        Err(e @ DriverError::Disconnected(_)) => Err(e),
+        Err(_) => Ok(None),
+    }
+}
+
 type Client = tiberius::Client<Compat<TcpStream>>;
 
 /// Rows are sent to the UI in chunks of at most this many rows...
@@ -537,18 +547,23 @@ impl MssqlSession {
         &mut self,
         database: &str,
         items: &[(usize, Vec<String>, String)],
-    ) -> Option<Vec<(usize, ObjectKind, Option<Vec<ColumnInfo>>)>> {
-        let (prefix, _) = self.catalog(database).await.ok()?;
+    ) -> Result<Option<Vec<(usize, ObjectKind, Option<Vec<ColumnInfo>>)>>, DriverError> {
+        let Some((prefix, _)) = isolate(self.catalog(database).await)? else {
+            return Ok(None);
+        };
         let mut names: Vec<String> = items.iter().map(|(_, _, n)| n.clone()).collect();
         names.sort_unstable();
         names.dedup();
         let mut found: Vec<(i32, String, String, ObjectKind)> = Vec::new();
         for chunk in names.chunks(500) {
             let params: Vec<&dyn ToSql> = chunk.iter().map(|n| n as &dyn ToSql).collect();
-            let rows = self
-                .query_params(&meta::base_objects_sql(&prefix, chunk.len()), &params)
-                .await
-                .ok()?;
+            let Some(rows) = isolate(
+                self.query_params(&meta::base_objects_sql(&prefix, chunk.len()), &params)
+                    .await,
+            )?
+            else {
+                return Ok(None);
+            };
             for row in &rows {
                 if let (Some(id), Some(s), Some(o), Some(kind)) = (
                     row.get::<i32, _>(0),
@@ -564,6 +579,8 @@ impl MssqlSession {
         let chosen: Vec<(usize, usize)> = items
             .iter()
             .filter_map(|(syn, cands, name)| Some((*syn, index.find(cands, name)?)))
+            // The server refuses to follow a synonym of a synonym.
+            .filter(|(_, f)| found[*f].3 != ObjectKind::Synonym)
             .collect();
         let mut ids: Vec<i32> = chosen
             .iter()
@@ -575,10 +592,14 @@ impl MssqlSession {
         let mut columns: HashMap<i32, Vec<ColumnInfo>> = HashMap::new();
         for chunk in ids.chunks(500) {
             let params: Vec<&dyn ToSql> = chunk.iter().map(|n| n as &dyn ToSql).collect();
-            let rows = self
-                .query_params(&meta::columns_of_ids_sql(&prefix, chunk.len()), &params)
-                .await
-                .ok()?;
+            // Without its columns a target still has its kind.
+            let Some(rows) = isolate(
+                self.query_params(&meta::columns_of_ids_sql(&prefix, chunk.len()), &params)
+                    .await,
+            )?
+            else {
+                break;
+            };
             for row in &rows {
                 if let (Some(id), Some((_, column))) =
                     (row.get::<i32, _>(11), meta::column_from_row(row))
@@ -587,7 +608,7 @@ impl MssqlSession {
                 }
             }
         }
-        Some(
+        Ok(Some(
             chosen
                 .into_iter()
                 .map(|(syn, f)| {
@@ -595,7 +616,7 @@ impl MssqlSession {
                     (syn, *kind, columns.get(id).cloned())
                 })
                 .collect(),
-        )
+        ))
     }
 
     /// Runs a statement that returns one non-null string.
@@ -808,8 +829,8 @@ impl Session for MssqlSession {
         // A single-database server cannot read another database.
         if !foreign.is_empty() && !self.is_single_database().await.unwrap_or(true) {
             for (db, items) in foreign {
-                for (me, kind, cols) in self.foreign_targets(&db, &items).await.unwrap_or_default()
-                {
+                let resolved = self.foreign_targets(&db, &items).await?;
+                for (me, kind, cols) in resolved.unwrap_or_default() {
                     objects[me].target = Some(kind);
                     if let Some(cols) = cols {
                         synonym_columns.push((me, cols));
