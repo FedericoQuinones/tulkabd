@@ -25,14 +25,24 @@ enum KindParam {
     Table,
     View,
     Procedure,
+    /// Scalar and table-valued functions.
+    Function,
+    ScalarFunction,
+    TableFunction,
+    Synonym,
 }
 
-impl From<KindParam> for ObjectKind {
-    fn from(kind: KindParam) -> Self {
-        match kind {
-            KindParam::Table => ObjectKind::Table,
-            KindParam::View => ObjectKind::View,
-            KindParam::Procedure => ObjectKind::Procedure,
+impl KindParam {
+    /// The kinds it stands for: `function` keeps meaning every function.
+    fn kinds(self) -> Vec<ObjectKind> {
+        match self {
+            KindParam::Table => vec![ObjectKind::Table],
+            KindParam::View => vec![ObjectKind::View],
+            KindParam::Procedure => vec![ObjectKind::Procedure],
+            KindParam::Function => vec![ObjectKind::Function, ObjectKind::TableFunction],
+            KindParam::ScalarFunction => vec![ObjectKind::Function],
+            KindParam::TableFunction => vec![ObjectKind::TableFunction],
+            KindParam::Synonym => vec![ObjectKind::Synonym],
         }
     }
 }
@@ -53,7 +63,8 @@ struct SearchObjectsParams {
     /// shared with you that tulkabd has indexed (a connection that selects
     /// databases is searched in those alone).
     database: Option<String>,
-    /// Only objects of this kind. Default: tables, views and procedures.
+    /// Only objects of this kind: table, view, procedure, function (scalar and
+    /// table-valued), scalarFunction, tableFunction or synonym. Default: every kind.
     kind: Option<KindParam>,
     /// Look in column names instead of object names.
     in_columns: Option<bool>,
@@ -187,7 +198,7 @@ impl TulkaServer {
     }
 
     #[tool(
-        description = "Find tables, views and procedures whose schema.name contains every word of the query (or, with in_columns, columns whose name does), from tulkabd's metadata cache."
+        description = "Find tables, views, procedures, functions and synonyms whose schema.name contains every word of the query (or, with in_columns, columns whose name does), from tulkabd's metadata cache."
     )]
     async fn search_objects(
         &self,
@@ -199,7 +210,7 @@ impl TulkaServer {
             query: p.query,
             connection: p.connection,
             database: p.database,
-            kind: p.kind.map(ObjectKind::from),
+            kinds: p.kind.map(KindParam::kinds).unwrap_or_default(),
             in_columns: p.in_columns.unwrap_or(false),
             limit: p.limit,
         };

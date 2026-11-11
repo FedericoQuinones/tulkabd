@@ -116,7 +116,15 @@ async fn lists_the_five_tools_with_schemas() {
     );
     let search = tools.iter().find(|t| t.name == "search_objects").unwrap();
     let schema = serde_json::to_string(&*search.input_schema).unwrap();
-    for kind in ["\"table\"", "\"view\"", "\"procedure\""] {
+    for kind in [
+        "\"table\"",
+        "\"view\"",
+        "\"procedure\"",
+        "\"function\"",
+        "\"scalarFunction\"",
+        "\"tableFunction\"",
+        "\"synonym\"",
+    ] {
         assert!(schema.contains(kind), "kind schema lacks {kind}: {schema}");
     }
     assert!(required("list_connections").is_empty());

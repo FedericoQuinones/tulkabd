@@ -17,6 +17,7 @@ import {
   keyOf,
   narrowHits,
   OBJECT_KINDS,
+  hasColumns,
   parseKey,
   quoteName,
   type ConnStatus,
@@ -647,7 +648,7 @@ class ExplorerStore {
       if (extra.size > 0) {
         dbs = [
           ...dbs,
-          ...[...extra].map((name) => ({ name, noAccess: false, indexedAt: null, tables: 0, views: 0, procedures: 0 })),
+          ...[...extra].map((name) => ({ name, noAccess: false, indexedAt: null, tables: 0, views: 0, procedures: 0, functions: 0, tableFunctions: 0, synonyms: 0 })),
         ];
       }
     }
@@ -680,7 +681,14 @@ class ExplorerStore {
   private groups(ctx: { fs: FilterSets | null; out: Row[] }, c: string, db: CachedDatabase, level: number, inMatch: boolean) {
     const { fs, out } = ctx;
     const parent = keyOf.db(c, db.name);
-    const counts: Record<ObjectKind, number> = { table: db.tables, view: db.views, procedure: db.procedures };
+    const counts: Record<ObjectKind, number> = {
+      table: db.tables,
+      view: db.views,
+      procedure: db.procedures,
+      tableFunction: db.tableFunctions,
+      function: db.functions,
+      synonym: db.synonyms,
+    };
     this.savedRows(ctx, c, db.name, level, inMatch);
     for (const kind of OBJECT_KINDS) {
       const key = keyOf.group(c, db.name, kind);
@@ -774,7 +782,7 @@ class ExplorerStore {
 
   private objectRow(out: Row[], c: string, d: string, o: DbObject, level: number, parent: string) {
     const key = keyOf.object(c, d, o);
-    const expandable = o.kind !== "procedure";
+    const expandable = hasColumns(o.kind);
     const open = expandable && this.expanded.has(key);
     out.push({ key, level, parent, expandable, expanded: open, kind: "object", connectionId: c, database: d, object: o });
     if (!open) return;

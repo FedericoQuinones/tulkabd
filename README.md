@@ -70,7 +70,7 @@ Use the tools from Copilot Chat in Agent mode.
 | --- | --- |
 | `list_connections` | Lists the connections that allow AI access. |
 | `list_databases` | Lists the databases of a connection. |
-| `search_objects` | Finds tables, views and procedures by name. |
+| `search_objects` | Finds tables, views, procedures, functions and synonyms by name. |
 | `describe_table` | Shows the columns, keys and indexes of a table or view. |
 | `run_query` | Runs a read-only query and returns the rows. |
 
@@ -99,6 +99,7 @@ The read-only check is conservative and has known limits:
 - A function or a view on the server can still have effects tulkabd cannot see. For a hard guarantee, give the connection a login that only has `db_datareader`.
 - Use a least-privilege login for AI connections. With an administrator login, tulkabd cannot stop everything a plain `SELECT` can reach: it refuses the file, password-hash, log and SQL-text sources it knows (for example `sys.fn_xe_file_target_read_file`, `sys.fn_get_audit_file`, `fn_trace_gettable`, `fn_dblog`, `sys.dm_os_enumerate_filesystem`, `sys.sql_logins`, `LOGINPROPERTY`, `sys.dm_exec_sql_text`, `sys.dm_exec_query_plan`, `sys.query_store_query_text`), but the list is not complete: use a least-privilege login. On Windows, a UNC path in such a function makes the service account authenticate over SMB. `list_connections` warns when a connection's login is a sysadmin.
 - "Selected databases" only shapes what tulkabd lists and checks in names: `run_query` refuses `db.schema.object` names outside the selection, but `sys.databases` still lists every database and functions such as `DB_NAME(5)` still answer. A login mapped only to those databases is the real limit.
+- Synonyms are resolved by the server when a query runs, so a synonym can point into a database outside the selection or at a name tulkabd would refuse; those checks read the query text only. The login's permissions remain the real boundary.
 - Hints that can starve the server (`MAXDOP`, `MIN_GRANT_PERCENT`, `MAX_GRANT_PERCENT`, `QUERYTRACEON` inside `OPTION (…)`) are refused. The query timeout cannot be set above 300 seconds.
 - Error text from the driver hides the server and the login, but a query can still `SELECT @@SERVERNAME`, `SUSER_SNAME()` or `HOST_NAME()`.
 - A single huge cell is read whole from the server before being cut to 2000 characters, so it can use memory until the query ends or times out.

@@ -140,7 +140,7 @@ export interface ViewSpec {
   columns: ColumnFilter[];
 }
 
-export type ObjectKind = "table" | "view" | "procedure";
+export type ObjectKind = "table" | "view" | "procedure" | "function" | "tableFunction" | "synonym";
 export interface DbObject {
   schema: string;
   name: string;
@@ -181,6 +181,10 @@ export interface CachedDatabase {
   tables: number;
   views: number;
   procedures: number;
+  /** Scalar functions. */
+  functions: number;
+  tableFunctions: number;
+  synonyms: number;
 }
 export interface ExplorerInfo {
   server: ServerInfo;
