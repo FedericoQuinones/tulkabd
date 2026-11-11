@@ -26,9 +26,8 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: System libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev libssl-dev libdbus-1-dev pkg-config
+        timeout-minutes: 35
+        run: bash scripts/install-linux-deps.sh
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: pnpm vitest run
@@ -74,9 +73,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: System libraries
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev libssl-dev libdbus-1-dev pkg-config
+        timeout-minutes: 35
+        run: bash scripts/install-linux-deps.sh
       - run: pnpm install --frozen-lockfile
       - run: pnpm tauri build
       # On Windows this exercises the GUI-subsystem exe with piped stdio, as an AI client launches it.

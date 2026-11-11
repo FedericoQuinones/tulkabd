@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Installs the system libraries the Linux build needs.
+# A mirror that stops answering makes apt-get wait for hours: each attempt
+# is cut after a few minutes and tried again.
+set -euo pipefail
+
+packages=(libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev libssl-dev libdbus-1-dev pkg-config)
+apt=(sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+
+for attempt in 1 2 3; do
+  if timeout 180 "${apt[@]}" update && timeout 480 "${apt[@]}" install -y "${packages[@]}"; then
+    exit 0
+  fi
+  echo "apt-get attempt $attempt failed" >&2
+  sleep 15
+done
+exit 1
