@@ -291,3 +291,13 @@ test("an unqualified table-valued function known to the metadata gets its alias"
   expect(aliasMap("SELECT 1 FROM fnOrders(1) x", 0)).toEqual({});
   expect(aliasMap("SELECT 1 FROM OPENJSON(@j) x", 0, fnMeta)).toEqual({});
 });
+
+test("an unqualified synonym of a table-valued function gets its alias", async () => {
+  const meta: CompletionMetadata = {
+    schemas: ["dbo"],
+    objects: [{ schema: "dbo", name: "synRows", kind: "synonym", target: "tableFunction" }],
+    columns: { "dbo.synRows": ["RowId"] },
+  };
+  expect(aliasMap("SELECT 1 FROM synRows(1) r", 0, meta)).toEqual({ r: "dbo.synRows" });
+  expect(labels(await complete("SELECT r.| FROM synRows(1) r", false, meta))).toEqual(["RowId"]);
+});

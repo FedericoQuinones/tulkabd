@@ -273,7 +273,7 @@ function aliasesIn(batch: Tok[], cursor: number, meta?: CompletionMetadata): Rec
         // unqualified and known to `meta` in `dbo`. `STRING_SPLIT(...)` and the like have no columns here.
         recordable =
           parts.length > 1 ||
-          !!meta?.objects.some((o) => o.kind === "tableFunction" && o.schema.toLowerCase() === "dbo" && o.name.toLowerCase() === name.toLowerCase());
+          !!meta?.objects.some((o) => effectiveKind(o) === "tableFunction" && o.schema.toLowerCase() === "dbo" && o.name.toLowerCase() === name.toLowerCase());
         j = afterParens(toks, j);
         if (j < 0) break;
       }
