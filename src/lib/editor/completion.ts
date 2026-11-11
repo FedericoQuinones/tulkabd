@@ -205,8 +205,11 @@ function statementAt(toks: Tok[], cursor: number): Tok[] {
   return toks.slice(start, end);
 }
 
+/** Words that can follow a table source but are not its alias. */
+const NOT_ALIASES = new Set(["APPLY", "WINDOW", "OUTPUT"]);
+
 const isName = (t: Tok | undefined) =>
-  !!t && (t.kind === "quoted" || (t.kind === "word" && !RESERVED.has(t.value.toUpperCase()) && t.value.toUpperCase() !== "APPLY"));
+  !!t && (t.kind === "quoted" || (t.kind === "word" && !RESERVED.has(t.value.toUpperCase()) && !NOT_ALIASES.has(t.value.toUpperCase())));
 
 /** The unique schema that has a table or view `name`, else `dbo`. */
 function resolveSchema(name: string, meta?: CompletionMetadata): string {
@@ -218,8 +221,18 @@ function resolveSchema(name: string, meta?: CompletionMetadata): string {
   return schemas.size === 1 ? [...schemas][0] : "dbo";
 }
 
+/** The index after the balanced parentheses that open at `toks[at]`, or -1 when they are not closed. */
+function afterParens(toks: Tok[], at: number): number {
+  let depth = 0;
+  for (let k = at; k < toks.length; k++) {
+    if (toks[k].kind === "lparen") depth++;
+    else if (toks[k].kind === "other" && toks[k].value === ")" && --depth === 0) return k + 1;
+  }
+  return -1;
+}
+
 /**
- * Aliases of the tables and views in the `FROM` and `JOIN` clauses of the statement around `cursor`,
+ * Aliases of the tables, views, synonyms and schema-qualified table-valued functions in the `FROM`, `JOIN` and `APPLY` clauses of the statement around `cursor`,
  * as unquoted `schema.name`. A name without a schema takes the only schema in `meta` that has it,
  * else `dbo`. When an alias repeats, the one nearest the cursor wins.
  */
@@ -236,10 +249,10 @@ function aliasesIn(batch: Tok[], cursor: number, meta?: CompletionMetadata): Rec
   const found = new Map<string, { alias: string; target: string; dist: number }>();
   for (let i = 0; i < toks.length; i++) {
     const kw = toks[i].kind === "word" ? toks[i].value.toUpperCase() : "";
-    if (kw !== "FROM" && kw !== "JOIN") continue;
+    if (kw !== "FROM" && kw !== "JOIN" && kw !== "APPLY") continue;
     let j = i + 1;
     for (;;) {
-      // schema.name, db.schema.name or db..name; derived tables and functions are skipped.
+      // schema.name, db.schema.name or db..name, or a schema-qualified function call; derived tables are skipped.
       const parts: string[] = [];
       while (true) {
         const t = toks[j];
@@ -251,17 +264,35 @@ function aliasesIn(batch: Tok[], cursor: number, meta?: CompletionMetadata): Rec
           j++;
         } else break;
       }
-      if (parts.length === 0 || toks[j]?.kind === "lparen") break;
+      if (parts.length === 0) break;
       const name = parts[parts.length - 1];
+      let recordable = true;
+      if (toks[j]?.kind === "lparen") {
+        // A call is an alias target only when it names a table-valued function: schema-qualified, or
+        // unqualified and known to `meta` in `dbo`. `STRING_SPLIT(...)` and the like have no columns here.
+        recordable =
+          parts.length > 1 ||
+          !!meta?.objects.some((o) => o.kind === "tableFunction" && o.schema.toLowerCase() === "dbo" && o.name.toLowerCase() === name.toLowerCase());
+        j = afterParens(toks, j);
+        if (j < 0) break;
+      }
       const schema = parts.length > 1 && parts[parts.length - 2] !== "" ? parts[parts.length - 2] : resolveSchema(name, meta);
       if (toks[j]?.kind === "word" && toks[j].value.toUpperCase() === "AS") j++;
       const a = toks[j];
       if (isName(a)) {
-        const dist = Math.abs(a.from - cursor);
-        const key = a.value.toLowerCase();
-        const prev = found.get(key);
-        if (!prev || dist < prev.dist) found.set(key, { alias: a.value, target: `${schema}.${name}`, dist });
+        if (recordable) {
+          const dist = Math.abs(a.from - cursor);
+          const key = a.value.toLowerCase();
+          const prev = found.get(key);
+          if (!prev || dist < prev.dist) found.set(key, { alias: a.value, target: `${schema}.${name}`, dist });
+        }
         j++;
+      }
+      // Table hints: `(NOLOCK)` or `WITH (NOLOCK)`.
+      if (toks[j]?.kind === "word" && toks[j].value.toUpperCase() === "WITH" && toks[j + 1]?.kind === "lparen") j++;
+      if (toks[j]?.kind === "lparen") {
+        j = afterParens(toks, j);
+        if (j < 0) break;
       }
       if (toks[j]?.kind !== "comma") break;
       j++;
