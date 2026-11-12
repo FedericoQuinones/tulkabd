@@ -24,6 +24,7 @@ fn find_objects_750k_under_budget() {
                         format!("Tabla{db}_{i}")
                     },
                     kind: ObjectKind::Table,
+                    target: None,
                 })
                 .collect();
             let snap = DatabaseSnapshot {

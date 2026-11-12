@@ -443,6 +443,7 @@ mod tests {
                 schema: schema.into(),
                 name: name.into(),
                 kind,
+                target: None,
             },
         }
     }
@@ -598,6 +599,7 @@ mod tests {
             schema: "dbo".into(),
             name: "Facturas".into(),
             kind: ObjectKind::Table,
+            target: None,
         };
         idx.replace_database("c1", "db1", &[obj]);
         let s = SearchScope::default();

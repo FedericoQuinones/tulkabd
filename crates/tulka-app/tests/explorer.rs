@@ -139,6 +139,7 @@ fn obj(schema: &str, name: &str, kind: ObjectKind) -> DbObject {
         schema: schema.into(),
         name: name.into(),
         kind,
+        target: None,
     }
 }
 

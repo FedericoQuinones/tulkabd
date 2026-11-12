@@ -15,9 +15,9 @@ use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tulka_core::{
-    quote_ident, CancelHandle, Column, ColumnInfo, ConnectParams, DatabaseSnapshot, DriverError,
-    ExecEvent, MessageKind, ReadOnlyReason, ReadOnlyViolation, ServerInfo, Session, TableStructure,
-    Value,
+    quote_ident, CancelHandle, Column, ColumnInfo, ConnectParams, DatabaseSnapshot, DbObject,
+    DriverError, ExecEvent, MessageKind, ObjectKind, ReadOnlyReason, ReadOnlyViolation, ServerInfo,
+    Session, TableStructure, Value,
 };
 
 use crate::batches::{split_batches, Batch};
@@ -25,6 +25,17 @@ use crate::convert::{to_value, type_name};
 use crate::lexer::{lex, Kind};
 use crate::meta;
 use crate::readonly;
+use crate::synonyms::{resolve_local, NameIndex, Place, SynonymBase};
+
+/// Keeps a failure confined to the database being read, except a lost
+/// connection, which ends the whole snapshot.
+fn isolate<T>(result: Result<T, DriverError>) -> Result<Option<T>, DriverError> {
+    match result {
+        Ok(v) => Ok(Some(v)),
+        Err(e @ DriverError::Disconnected(_)) => Err(e),
+        Err(_) => Ok(None),
+    }
+}
 
 type Client = tiberius::Client<Compat<TcpStream>>;
 
@@ -528,6 +539,86 @@ impl MssqlSession {
         Ok((meta::catalog_prefix(&database, single), database))
     }
 
+    /// What the synonyms whose base object lives in another database point
+    /// to, reading each of those databases' catalog once. A database that
+    /// cannot be read (no access, offline, missing, an error) leaves its
+    /// synonyms unresolved. Each item is `(synonym index, schemas, name)`.
+    async fn foreign_targets(
+        &mut self,
+        database: &str,
+        items: &[(usize, Vec<String>, String)],
+    ) -> Result<Option<Vec<(usize, ObjectKind, Option<Vec<ColumnInfo>>)>>, DriverError> {
+        let Some((prefix, _)) = isolate(self.catalog(database).await)? else {
+            return Ok(None);
+        };
+        let mut names: Vec<String> = items.iter().map(|(_, _, n)| n.clone()).collect();
+        names.sort_unstable();
+        names.dedup();
+        let mut found: Vec<(i32, String, String, ObjectKind)> = Vec::new();
+        for chunk in names.chunks(500) {
+            let params: Vec<&dyn ToSql> = chunk.iter().map(|n| n as &dyn ToSql).collect();
+            let Some(rows) = isolate(
+                self.query_params(&meta::base_objects_sql(&prefix, chunk.len()), &params)
+                    .await,
+            )?
+            else {
+                return Ok(None);
+            };
+            for row in &rows {
+                if let (Some(id), Some(s), Some(o), Some(kind)) = (
+                    row.get::<i32, _>(0),
+                    row.get::<&str, _>(1),
+                    row.get::<&str, _>(2),
+                    row.get::<&str, _>(3).and_then(meta::kind_of_type),
+                ) {
+                    found.push((id, s.to_string(), o.to_string(), kind));
+                }
+            }
+        }
+        let index = NameIndex::new(found.iter().map(|(_, s, o, _)| (s.as_str(), o.as_str())));
+        let chosen: Vec<(usize, usize)> = items
+            .iter()
+            .filter_map(|(syn, cands, name)| Some((*syn, index.find(cands, name)?)))
+            // The server refuses to follow a synonym of a synonym.
+            .filter(|(_, f)| found[*f].3 != ObjectKind::Synonym)
+            .collect();
+        let mut ids: Vec<i32> = chosen
+            .iter()
+            .filter(|(_, f)| meta::has_columns(found[*f].3))
+            .map(|(_, f)| found[*f].0)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut columns: HashMap<i32, Vec<ColumnInfo>> = HashMap::new();
+        for chunk in ids.chunks(500) {
+            let params: Vec<&dyn ToSql> = chunk.iter().map(|n| n as &dyn ToSql).collect();
+            // Without its columns a target still has its kind.
+            let Some(rows) = isolate(
+                self.query_params(&meta::columns_of_ids_sql(&prefix, chunk.len()), &params)
+                    .await,
+            )?
+            else {
+                break;
+            };
+            for row in &rows {
+                if let (Some(id), Some((_, column))) =
+                    (row.get::<i32, _>(11), meta::column_from_row(row))
+                {
+                    columns.entry(id).or_default().push(column);
+                }
+            }
+        }
+        Ok(Some(
+            chosen
+                .into_iter()
+                .map(|(syn, f)| {
+                    let (id, _, _, kind) = &found[f];
+                    (syn, *kind, columns.get(id).cloned())
+                })
+                .collect(),
+        ))
+    }
+
     /// Runs a statement that returns one non-null string.
     async fn query_string(&mut self, sql: &str) -> Result<String, DriverError> {
         let rows = self.query_rows(sql).await?;
@@ -676,33 +767,78 @@ impl Session for MssqlSession {
     }
 
     async fn snapshot(&mut self, database: &str) -> Result<DatabaseSnapshot, DriverError> {
-        let (prefix, _) = self.catalog(database).await?;
-        let objects: Vec<_> = self
+        let (prefix, current) = self.catalog(database).await?;
+        let mut objects: Vec<DbObject> = self
             .query_rows(&meta::objects_sql(&prefix))
             .await?
             .iter()
             .filter_map(meta::object_from_row)
             .collect();
-        let index_of: HashMap<(&str, &str), usize> = objects
-            .iter()
-            .enumerate()
-            .map(|(i, o)| ((o.schema.as_str(), o.name.as_str()), i))
-            .collect();
+        let index = NameIndex::new(objects.iter().map(|o| (o.schema.as_str(), o.name.as_str())));
 
         let mut columns: Vec<(usize, Vec<ColumnInfo>)> = Vec::new();
         for row in self.query_rows(&meta::columns_sql(&prefix, false)).await? {
             let Some(((schema, name), column)) = meta::column_from_row(&row) else {
                 continue;
             };
-            let Some(&index) = index_of.get(&(schema.as_str(), name.as_str())) else {
+            let Some(i) = index.find(&[schema], &name) else {
                 continue;
             };
             // Rows arrive grouped by object.
-            match columns.last_mut().filter(|(i, _)| *i == index) {
+            match columns.last_mut().filter(|(k, _)| *k == i) {
                 Some((_, list)) => list.push(column),
-                None => columns.push((index, vec![column])),
+                None => columns.push((i, vec![column])),
             }
         }
+
+        // A synonym takes the kind and the columns of its base object.
+        let kinds: Vec<ObjectKind> = objects.iter().map(|o| o.kind).collect();
+        let columns_at: HashMap<usize, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(pos, (i, _))| (*i, pos))
+            .collect();
+        let mut synonym_columns: Vec<(usize, Vec<ColumnInfo>)> = Vec::new();
+        let mut foreign: HashMap<String, Vec<(usize, Vec<String>, String)>> = HashMap::new();
+        for row in self.query_rows(&meta::synonyms_sql(&prefix)).await? {
+            let Some(base) = SynonymBase::from_row(&row) else {
+                continue;
+            };
+            let Some(me) = index.find(std::slice::from_ref(&base.schema), &base.name) else {
+                continue;
+            };
+            match base.place(&current) {
+                Place::Local(cands) => {
+                    let Some(hit) = resolve_local(&index, &kinds, &cands, &base.base_name) else {
+                        continue;
+                    };
+                    objects[me].target = Some(kinds[hit]);
+                    if let Some(&pos) = columns_at.get(&hit) {
+                        synonym_columns.push((me, columns[pos].1.clone()));
+                    }
+                }
+                Place::Foreign(db, cands) => {
+                    foreign
+                        .entry(db)
+                        .or_default()
+                        .push((me, cands, base.base_name))
+                }
+                Place::Unknown => {}
+            }
+        }
+        // A single-database server cannot read another database.
+        if !foreign.is_empty() && !self.is_single_database().await.unwrap_or(true) {
+            for (db, items) in foreign {
+                let resolved = self.foreign_targets(&db, &items).await?;
+                for (me, kind, cols) in resolved.unwrap_or_default() {
+                    objects[me].target = Some(kind);
+                    if let Some(cols) = cols {
+                        synonym_columns.push((me, cols));
+                    }
+                }
+            }
+        }
+        columns.extend(synonym_columns);
         Ok(DatabaseSnapshot { objects, columns })
     }
 

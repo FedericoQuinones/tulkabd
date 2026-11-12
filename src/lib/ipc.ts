@@ -145,6 +145,8 @@ export interface DbObject {
   schema: string;
   name: string;
   kind: ObjectKind;
+  /** For a synonym, the kind of object it points to; absent when unknown. */
+  target?: ObjectKind;
 }
 export interface ColumnInfo {
   name: string;

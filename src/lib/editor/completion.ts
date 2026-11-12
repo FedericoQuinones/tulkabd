@@ -4,6 +4,7 @@ import type { Completion, CompletionContext, CompletionResult, CompletionSource 
 import * as ipc from "../ipc";
 import type { CompletionMetadata, DbObject } from "../ipc";
 import { quoteIdent } from "../explorer/tree";
+import { effectiveKind, isFunctionLike } from "../objectKind";
 
 /** T-SQL reserved keywords: an identifier spelled like one needs brackets. */
 const RESERVED = new Set(
@@ -216,7 +217,7 @@ function resolveSchema(name: string, meta?: CompletionMetadata): string {
   if (!meta) return "dbo";
   const lower = name.toLowerCase();
   const schemas = new Set(
-    meta.objects.filter((o) => o.kind !== "procedure" && o.name.toLowerCase() === lower).map((o) => o.schema),
+    meta.objects.filter((o) => effectiveKind(o) !== "procedure" && o.name.toLowerCase() === lower).map((o) => o.schema),
   );
   return schemas.size === 1 ? [...schemas][0] : "dbo";
 }
@@ -272,7 +273,7 @@ function aliasesIn(batch: Tok[], cursor: number, meta?: CompletionMetadata): Rec
         // unqualified and known to `meta` in `dbo`. `STRING_SPLIT(...)` and the like have no columns here.
         recordable =
           parts.length > 1 ||
-          !!meta?.objects.some((o) => o.kind === "tableFunction" && o.schema.toLowerCase() === "dbo" && o.name.toLowerCase() === name.toLowerCase());
+          !!meta?.objects.some((o) => effectiveKind(o) === "tableFunction" && o.schema.toLowerCase() === "dbo" && o.name.toLowerCase() === name.toLowerCase());
         j = afterParens(toks, j);
         if (j < 0) break;
       }
@@ -334,7 +335,7 @@ const KIND_TYPE: Record<DbObject["kind"], string> = {
 export function completionSource(meta: CompletionMetadata): CompletionSource {
   const columns = new Map(Object.entries(meta.columns).map(([k, v]) => [k.toLowerCase(), v]));
   const schemas = new Set(meta.schemas.map((s) => s.toLowerCase()));
-  const relations = meta.objects.filter((o) => o.kind !== "procedure");
+  const relations = meta.objects.filter((o) => effectiveKind(o) !== "procedure");
 
   return (ctx: CompletionContext): CompletionResult | null => {
     // An IME is composing: the text under the cursor is not final, so nothing opens.
@@ -380,7 +381,7 @@ export function completionSource(meta: CompletionMetadata): CompletionSource {
     for (const s of meta.schemas) options.push(option(s, "namespace", "schema"));
     for (const o of relations) {
       // A scalar function must be called with a two-part name, so functions are never inserted bare.
-      const isFunction = o.kind === "function" || o.kind === "tableFunction";
+      const isFunction = isFunctionLike(o);
       const apply = o.schema.toLowerCase() === "dbo" && !isFunction ? undefined : `${sqlName(o.schema)}.${name(o.name)}`;
       options.push(option(o.name, KIND_TYPE[o.kind], o.schema, apply));
     }

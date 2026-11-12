@@ -54,8 +54,9 @@ pub fn objects_sql(prefix: &str) -> String {
     )
 }
 
-pub fn object_from_row(row: &Row) -> Option<DbObject> {
-    let kind = match row.get::<&str, _>(2)?.trim() {
+/// The kind an object of catalog type `type_code` has in the explorer.
+pub fn kind_of_type(type_code: &str) -> Option<ObjectKind> {
+    Some(match type_code.trim() {
         "U" => ObjectKind::Table,
         "V" => ObjectKind::View,
         "P" => ObjectKind::Procedure,
@@ -63,31 +64,92 @@ pub fn object_from_row(row: &Row) -> Option<DbObject> {
         "IF" | "TF" | "FT" => ObjectKind::TableFunction,
         "SN" => ObjectKind::Synonym,
         _ => return None,
-    };
+    })
+}
+
+/// Whether objects of this kind have columns in the catalog.
+pub fn has_columns(kind: ObjectKind) -> bool {
+    matches!(
+        kind,
+        ObjectKind::Table | ObjectKind::View | ObjectKind::TableFunction
+    )
+}
+
+pub fn object_from_row(row: &Row) -> Option<DbObject> {
     Some(DbObject {
         schema: row.get::<&str, _>(0)?.to_string(),
         name: row.get::<&str, _>(1)?.to_string(),
-        kind,
+        kind: kind_of_type(row.get::<&str, _>(2)?)?,
+        target: None,
     })
+}
+
+/// Result: schema, name and the server, database, schema and object parts of
+/// the base name of every synonym. `PARSENAME` strips the brackets of a
+/// quoted part and is `NULL` for a part that was not written.
+pub fn synonyms_sql(prefix: &str) -> String {
+    format!(
+        "SELECT s.name, y.name, \
+           PARSENAME(y.base_object_name, 4), PARSENAME(y.base_object_name, 3), \
+           PARSENAME(y.base_object_name, 2), PARSENAME(y.base_object_name, 1) \
+         FROM {prefix}sys.synonyms y \
+         JOIN {prefix}sys.schemas s ON s.schema_id = y.schema_id \
+         WHERE y.is_ms_shipped = 0"
+    )
+}
+
+/// Parameters: `@P1`... object names. Result: object id, schema, name and
+/// type of the objects (synonyms included, which the server refuses to
+/// follow) with one of those names.
+pub fn base_objects_sql(prefix: &str, names: usize) -> String {
+    format!(
+        "SELECT o.object_id, s.name, o.name, o.type \
+         FROM {prefix}sys.objects o \
+         JOIN {prefix}sys.schemas s ON s.schema_id = o.schema_id \
+         WHERE o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'FS', 'FT', 'SN') \
+           AND o.name IN ({})",
+        placeholders(names)
+    )
+}
+
+fn placeholders(n: usize) -> String {
+    (1..=n)
+        .map(|i| format!("@P{i}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Columns of tables, views and table-valued functions, in object and column order. With `one`, only
 /// the object named by `@P1` (name) and `@P2` (schema).
 ///
 /// Result: schema, object, column, type, user-defined, max_length, precision,
-/// scale, nullable, primary key, default.
+/// scale, nullable, primary key, default, object id.
 pub fn columns_sql(prefix: &str, one: bool) -> String {
-    let filter = if one {
-        "AND o.name = @P1 AND s.name = @P2"
-    } else {
-        ""
-    };
+    columns_query(
+        prefix,
+        if one {
+            "AND o.name = @P1 AND s.name = @P2"
+        } else {
+            ""
+        },
+    )
+}
+
+/// Like [`columns_sql`] for the objects whose ids are `@P1`... (`ids` of them).
+pub fn columns_of_ids_sql(prefix: &str, ids: usize) -> String {
+    columns_query(
+        prefix,
+        &format!("AND o.object_id IN ({})", placeholders(ids)),
+    )
+}
+
+fn columns_query(prefix: &str, filter: &str) -> String {
     format!(
         "SELECT s.name, o.name, c.name, t.name, CAST(t.is_user_defined AS bit), \
            CAST(c.max_length AS int), CAST(c.precision AS int), CAST(c.scale AS int), \
            c.is_nullable, \
            CAST(CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END AS bit), \
-           dc.definition \
+           dc.definition, o.object_id \
          FROM {prefix}sys.objects o \
          JOIN {prefix}sys.schemas s ON s.schema_id = o.schema_id \
          JOIN {prefix}sys.columns c ON c.object_id = o.object_id \

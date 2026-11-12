@@ -204,6 +204,7 @@ impl Session for FakeSession {
                 schema: "dbo".into(),
                 name: "Pedidos".into(),
                 kind: ObjectKind::Table,
+                target: None,
             }],
             columns: vec![(0, vec![fake_column()])],
         })

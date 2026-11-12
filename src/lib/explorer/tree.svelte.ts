@@ -5,6 +5,7 @@
 import { SvelteSet } from "svelte/reactivity";
 import { t } from "../i18n/t";
 import * as ipc from "../ipc";
+import { hasColumns } from "../objectKind";
 import type { AppEvent, CachedDatabase, ColumnInfo, ConnectionConfig, DbObject, Folder, ObjectKind, PaletteHit } from "../ipc";
 import { connections } from "../connections/store.svelte";
 import { tabs } from "../tabs/tabs.svelte";
@@ -17,7 +18,6 @@ import {
   keyOf,
   narrowHits,
   OBJECT_KINDS,
-  hasColumns,
   parseKey,
   quoteName,
   type ConnStatus,
@@ -782,7 +782,7 @@ class ExplorerStore {
 
   private objectRow(out: Row[], c: string, d: string, o: DbObject, level: number, parent: string) {
     const key = keyOf.object(c, d, o);
-    const expandable = hasColumns(o.kind);
+    const expandable = hasColumns(o);
     const open = expandable && this.expanded.has(key);
     out.push({ key, level, parent, expandable, expanded: open, kind: "object", connectionId: c, database: d, object: o });
     if (!open) return;

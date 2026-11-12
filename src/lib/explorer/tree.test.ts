@@ -415,6 +415,22 @@ test("tables load lazily and expand into columns", async () => {
   expect(labels().slice(-8)).toEqual(["dbo.Pedidos", "col:Id", "col:Nota", "group:view", "group:procedure", "group:tableFunction", "group:function", "group:synonym"]);
 });
 
+test("a synonym expands into columns only when its target has them", async () => {
+  explorer.expanded.add("c2");
+  explorer.state("c2").databases = [db("Ventas", { synonyms: 3 })];
+  vi.mocked(ipc.explorerObjects).mockResolvedValue([
+    { schema: "dbo", name: "synTable", kind: "synonym", target: "table" },
+    { schema: "dbo", name: "synProc", kind: "synonym", target: "procedure" },
+    { schema: "dbo", name: "synLinked", kind: "synonym" },
+  ]);
+  await explorer.expand(keyOf.db("c2", "Ventas"));
+  await explorer.expand(keyOf.group("c2", "Ventas", "synonym"));
+  const expandable = (name: string) => explorer.rows.find((r) => r.kind === "object" && r.object.name === name)?.expandable;
+  expect(expandable("synTable")).toBe(true);
+  expect(expandable("synProc")).toBe(false);
+  expect(expandable("synLinked")).toBe(false);
+});
+
 test("a group of thousands of objects shows a page at a time", async () => {
   explorer.expanded.add("c2");
   explorer.state("c2").databases = [db("Ventas", { tables: 1200 })];
@@ -562,7 +578,15 @@ test("object menus follow the kind", () => {
   // A function needs arguments, so no Select top 10; only table-valued ones have columns to show.
   expect(ids(mk("tableFunction"))).toEqual(["structure", "definition", "copyName"]);
   expect(ids(mk("function"))).toEqual(["definition", "copyName"]);
-  expect(ids(mk("synonym"))).toEqual(["selectTop", "definition", "copyName"]);
+  // A synonym offers what its target does; its own source is the CREATE SYNONYM statement.
+  const synonym = (target?: ObjectKind): Row => ({ ...base, key: "syn", kind: "object", object: { schema: "dbo", name: "syn", kind: "synonym", target } });
+  expect(ids(synonym("table"))).toEqual(["selectTop", "definition", "copyName"]);
+  expect(ids(synonym("view"))).toEqual(["selectTop", "definition", "copyName"]);
+  for (const target of ["procedure", "function", "tableFunction"] as const) {
+    expect(ids(synonym(target))).toEqual(["definition", "copyName"]);
+  }
+  // Where it points is unknown (linked server, unreadable database): the server still resolves it, so it may be selected.
+  expect(ids(synonym(undefined))).toEqual(["selectTop", "definition", "copyName"]);
   expect(buildMenu(mk("table"), actions(), explorer).find((m) => m.id === "copyName")?.hint).toBe("[dbo].[Order Details]");
 });
 

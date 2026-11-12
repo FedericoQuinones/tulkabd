@@ -176,6 +176,41 @@ test("a failed fetch is not cached", async () => {
   expect(await cache.get("c1", "Ventas")).toBe(meta);
 });
 
+test("a synonym is completed like the object it points to", async () => {
+  const withSynonyms: CompletionMetadata = {
+    schemas: ["dbo"],
+    objects: [
+      { schema: "dbo", name: "synTabla", kind: "synonym", target: "table" },
+      { schema: "dbo", name: "synProc", kind: "synonym", target: "procedure" },
+      { schema: "dbo", name: "synScalar", kind: "synonym", target: "function" },
+      { schema: "dbo", name: "synRows", kind: "synonym", target: "tableFunction" },
+      { schema: "dbo", name: "synLost", kind: "synonym" },
+    ],
+    columns: {},
+  };
+  const options = await completionSource(withSynonyms)(new CompletionContext(EditorState.create({ doc: "" }), 0, true));
+  // A procedure cannot be selected from; the others sit where relations do.
+  expect(labels(options)).not.toContain("synProc");
+  expect(labels(options)).toEqual(expect.arrayContaining(["synTabla", "synScalar", "synRows", "synLost"]));
+  expect(option(options, "synTabla")?.apply).toBeUndefined();
+  // A function-like target needs its schema, as a function does.
+  expect(option(options, "synScalar")?.apply).toBe("dbo.synScalar");
+  expect(option(options, "synRows")?.apply).toBe("dbo.synRows");
+});
+
+test("an alias of a synonym completes the columns of its base object", async () => {
+  const withSynonym: CompletionMetadata = {
+    schemas: ["dbo"],
+    objects: [{ schema: "dbo", name: "synPedidos", kind: "synonym", target: "table" }],
+    columns: { "dbo.synPedidos": ["Id", "Cliente"] },
+  };
+  const doc = "SELECT p.| FROM dbo.synPedidos p";
+  const pos = doc.indexOf("|");
+  const state = EditorState.create({ doc: doc.slice(0, pos) + doc.slice(pos + 1) });
+  const r = await completionSource(withSynonym)(new CompletionContext(state, pos, false));
+  expect(labels(r)).toEqual(["Id", "Cliente"]);
+});
+
 // Table-valued functions carry their result columns in `columns`.
 const fnMeta: CompletionMetadata = {
   schemas: ["dbo"],
@@ -255,4 +290,14 @@ test("an unqualified table-valued function known to the metadata gets its alias"
   expect(labels(await completeFn("SELECT x.| FROM fnOrders(1) x"))).toEqual(["OrderId", "Amount"]);
   expect(aliasMap("SELECT 1 FROM fnOrders(1) x", 0)).toEqual({});
   expect(aliasMap("SELECT 1 FROM OPENJSON(@j) x", 0, fnMeta)).toEqual({});
+});
+
+test("an unqualified synonym of a table-valued function gets its alias", async () => {
+  const meta: CompletionMetadata = {
+    schemas: ["dbo"],
+    objects: [{ schema: "dbo", name: "synRows", kind: "synonym", target: "tableFunction" }],
+    columns: { "dbo.synRows": ["RowId"] },
+  };
+  expect(aliasMap("SELECT 1 FROM synRows(1) r", 0, meta)).toEqual({ r: "dbo.synRows" });
+  expect(labels(await complete("SELECT r.| FROM synRows(1) r", false, meta))).toEqual(["RowId"]);
 });

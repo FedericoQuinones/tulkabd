@@ -7,6 +7,7 @@ mod lexer;
 mod meta;
 pub mod readonly;
 mod session;
+mod synonyms;
 
 // Lets the shared test support code name this crate the way integration tests do.
 #[cfg(test)]
