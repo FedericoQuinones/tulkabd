@@ -1,5 +1,5 @@
-// SQL autocompletion from the cached metadata of the tab's database: keywords,
-// schemas, tables and views, and columns after `alias.` or `table.`.
+// SQL autocompletion from the cached metadata of the tab's database: keywords, schemas, tables and views,
+// the columns of the statement's tables, and columns after `alias.` or `table.`.
 import type { Completion, CompletionContext, CompletionResult, CompletionSource } from "@codemirror/autocomplete";
 import * as ipc from "../ipc";
 import type { CompletionMetadata, DbObject } from "../ipc";
@@ -241,13 +241,33 @@ export function aliasMap(sql: string, cursor: number, meta?: CompletionMetadata)
   return aliasesIn(tokensAround(sql, cursor), cursor, meta);
 }
 
+/** A table source of a statement: `target` is the unquoted `schema.name`; `at` is where the alias is written (-1 without one). */
+interface Source {
+  alias: string | null;
+  target: string;
+  at: number;
+}
+
 /** `aliasMap` over the tokens of the batch around `cursor`. */
 function aliasesIn(batch: Tok[], cursor: number, meta?: CompletionMetadata): Record<string, string> {
+  const found = new Map<string, { alias: string; target: string; dist: number }>();
+  for (const s of sourcesIn(batch, cursor, meta)) {
+    if (s.alias === null) continue;
+    const dist = Math.abs(s.at - cursor);
+    const key = s.alias.toLowerCase();
+    const prev = found.get(key);
+    if (!prev || dist < prev.dist) found.set(key, { alias: s.alias, target: s.target, dist });
+  }
+  return Object.fromEntries([...found.values()].map((f) => [f.alias, f.target]));
+}
+
+/** The table sources, aliased or not, of the `FROM`, `JOIN` and `APPLY` clauses of the statement around `cursor`. */
+function sourcesIn(batch: Tok[], cursor: number, meta?: CompletionMetadata): Source[] {
   const toks = statementAt(
     batch.filter((t) => t.kind !== "skip"),
     cursor,
   );
-  const found = new Map<string, { alias: string; target: string; dist: number }>();
+  const found: Source[] = [];
   for (let i = 0; i < toks.length; i++) {
     const kw = toks[i].kind === "word" ? toks[i].value.toUpperCase() : "";
     if (kw !== "FROM" && kw !== "JOIN" && kw !== "APPLY") continue;
@@ -280,15 +300,9 @@ function aliasesIn(batch: Tok[], cursor: number, meta?: CompletionMetadata): Rec
       const schema = parts.length > 1 && parts[parts.length - 2] !== "" ? parts[parts.length - 2] : resolveSchema(name, meta);
       if (toks[j]?.kind === "word" && toks[j].value.toUpperCase() === "AS") j++;
       const a = toks[j];
-      if (isName(a)) {
-        if (recordable) {
-          const dist = Math.abs(a.from - cursor);
-          const key = a.value.toLowerCase();
-          const prev = found.get(key);
-          if (!prev || dist < prev.dist) found.set(key, { alias: a.value, target: `${schema}.${name}`, dist });
-        }
-        j++;
-      }
+      const aliased = isName(a);
+      if (recordable) found.push({ alias: aliased ? a.value : null, target: `${schema}.${name}`, at: aliased ? a.from : -1 });
+      if (aliased) j++;
       // Table hints: `(NOLOCK)` or `WITH (NOLOCK)`.
       if (toks[j]?.kind === "word" && toks[j].value.toUpperCase() === "WITH" && toks[j + 1]?.kind === "lparen") j++;
       if (toks[j]?.kind === "lparen") {
@@ -299,7 +313,30 @@ function aliasesIn(batch: Tok[], cursor: number, meta?: CompletionMetadata): Rec
       j++;
     }
   }
-  return Object.fromEntries([...found.values()].map((f) => [f.alias, f.target]));
+  return found;
+}
+
+/** Clause keywords that tell what a comma continues. */
+const CLAUSES = new Set(["SELECT", "FROM", "WHERE", "ON", "GROUP", "ORDER", "SET", "HAVING"]);
+/** Keywords after which a table, not a column, is expected. */
+const TABLE_AFTER = new Set(["FROM", "JOIN", "APPLY", "INTO", "UPDATE", "TABLE", "EXEC", "EXECUTE"]);
+
+/** Whether a column can be written at `at`, judging by the significant token before it and its statement. */
+function columnAllowedAt(batch: Tok[], at: number): boolean {
+  const before = statementAt(
+    batch.filter((t) => t.kind !== "skip" && t.to <= at),
+    at,
+  );
+  const prev = before[before.length - 1];
+  if (!prev) return true;
+  if (prev.kind === "word" && TABLE_AFTER.has(prev.value.toUpperCase())) return false;
+  if (prev.kind !== "comma") return true;
+  for (let i = before.length - 2; i >= 0; i--) {
+    const t = before[i];
+    const kw = t.kind === "word" ? t.value.toUpperCase() : "";
+    if (CLAUSES.has(kw)) return kw !== "FROM";
+  }
+  return true;
 }
 
 // ---- completion -------------------------------------------------------------
@@ -377,6 +414,19 @@ export function completionSource(meta: CompletionMetadata): CompletionSource {
 
     if (typed === "" && !ctx.explicit) return null;
     const options: Completion[] = [];
+    if (columnAllowedAt(toks, from)) {
+      // Columns of every table source of the statement, ranked above keywords and objects.
+      const seen = new Set<string>();
+      for (const src of sourcesIn(toks, pos, meta)) {
+        const detail = src.alias ?? src.target.slice(src.target.indexOf(".") + 1);
+        for (const c of columns.get(src.target.toLowerCase()) ?? []) {
+          const key = `${detail.toLowerCase()}\0${c.toLowerCase()}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          options.push({ ...option(c, "property", detail), boost: 2 });
+        }
+      }
+    }
     if (!bracketed) for (const k of KEYWORDS) options.push({ label: k, type: "keyword" });
     for (const s of meta.schemas) options.push(option(s, "namespace", "schema"));
     for (const o of relations) {
