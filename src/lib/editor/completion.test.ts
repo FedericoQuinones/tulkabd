@@ -301,3 +301,46 @@ test("an unqualified synonym of a table-valued function gets its alias", async (
   expect(aliasMap("SELECT 1 FROM synRows(1) r", 0, meta)).toEqual({ r: "dbo.synRows" });
   expect(labels(await complete("SELECT r.| FROM synRows(1) r", false, meta))).toEqual(["RowId"]);
 });
+
+const kw = (r: CompletionResult | null) => option(r, "ORDER");
+const colsOf = (r: CompletionResult | null) => r?.options.filter((o) => o.type === "property") ?? [];
+
+test("an unqualified word offers the columns of the statement's tables, ranked above keywords", async () => {
+  const r = await complete("SELECT * FROM dbo.Pedidos WHERE Tot|");
+  expect(option(r, "Total")).toMatchObject({ type: "property", detail: "Pedidos", boost: 2 });
+  expect(kw(r)?.boost).toBeUndefined();
+});
+
+test("columns are offered before FROM, from sources after the cursor", async () => {
+  const r = await complete("SELECT Cli| FROM dbo.Pedidos");
+  expect(option(r, "Cliente")).toMatchObject({ type: "property", detail: "Pedidos" });
+});
+
+test("column details are the alias, else the table name", async () => {
+  const r = await complete("SELECT I| FROM dbo.Pedidos p JOIN ventas.Clientes JOIN ventas.Pedidos_Año AS a ON 1=1");
+  expect(colsOf(r).filter((o) => o.label === "Id").map((o) => o.detail)).toEqual(["p", "Clientes", "a"]);
+});
+
+test("a table repeated without an alias does not duplicate its columns", async () => {
+  const r = await complete("SELECT I| FROM dbo.Pedidos, dbo.Pedidos");
+  expect(colsOf(r).filter((o) => o.label === "Id")).toHaveLength(1);
+});
+
+test("no columns where a table is expected", async () => {
+  expect(colsOf(await complete("SELECT * FROM dbo.Pedidos p JOIN |", true))).toEqual([]);
+  expect(colsOf(await complete("SELECT * FROM |", true))).toEqual([]);
+  expect(colsOf(await complete("SELECT * FROM dbo.Pedidos p, |", true))).toEqual([]);
+  expect(colsOf(await complete("SELECT * FROM dbo.Pedidos p, ventas.Clientes c, Ped|"))).toEqual([]);
+  expect(colsOf(await complete("SELECT p.Id, | FROM dbo.Pedidos p", true)).length).toBeGreaterThan(0);
+});
+
+test("unknown tables and tables without columns add nothing", async () => {
+  const r = await complete("SELECT * FROM Nada n JOIN dbo.CerrarMes ON 1=1 WHERE Ord|");
+  expect(colsOf(r)).toEqual([]);
+  expect(labels(r)).toContain("ORDER");
+});
+
+test("column names that need brackets are inserted quoted", async () => {
+  const r = await complete("SELECT Unit| FROM dbo.[Order Details]");
+  expect(option(r, "Unit Price")?.apply).toBe("[Unit Price]");
+});
