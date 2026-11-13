@@ -217,7 +217,6 @@ export class TabsStore {
   shown = $state(0);
   /** The last session save failed or ran out of time: closing the window may lose unsaved text. */
   private sessionSaveFailed = false;
-  private counter = 0;
   private pending = new Map<string, Pending>();
   private saveNotices = new WeakMap<PaneState, string>();
   /** Binding a saved query tab was opened for, while its pane has none yet (see `tabOf`). */
@@ -315,7 +314,7 @@ export class TabsStore {
     const saved = spec.kind === "query" ? spec.savedQuery : undefined;
     const file = spec.kind === "query" ? spec.file : undefined;
     const title =
-      spec.kind === "definition" ? spec.name : saved ? saved.name : file ? file.name : `untitled-${++this.counter}`;
+      spec.kind === "definition" ? spec.name : saved ? saved.name : file ? file.name : this.untitledTitle();
     if (spec.kind === "query" && spec.sql) pane.initialDoc = spec.sql;
     const tab: Tab = { id, kind: "query", title, pane, connectError: null, dirty: false };
     if (saved) tab.savedQuery = { database: saved.database, name: saved.name };
@@ -354,7 +353,7 @@ export class TabsStore {
       pane.notice = t("runlog.connectionGone");
     }
     if (entry.sqlTruncated) pane.notice = pane.notice ? `${pane.notice} ${t("runlog.truncated")}` : t("runlog.truncated");
-    this.add({ id, kind: "query", title: `untitled-${++this.counter}`, pane, connectError: null, dirty: false });
+    this.add({ id, kind: "query", title: this.untitledTitle(), pane, connectError: null, dirty: false });
     return id;
   }
 
@@ -459,6 +458,14 @@ export class TabsStore {
    * Closes a tab the way the UI asks for it: first asks what to do with unsaved changes, then with
    * an open transaction.
    */
+  /** `untitled-N` with the lowest N no open tab uses, so closed tabs give their numbers back. */
+  private untitledTitle(): string {
+    const used = new Set(this.list.map((x) => /^untitled-(\d+)$/.exec(x.title)?.[1]).filter((n) => n !== undefined).map(Number));
+    let n = 1;
+    while (used.has(n)) n++;
+    return `untitled-${n}`;
+  }
+
   async requestClose(id: string): Promise<void> {
     const tab = this.list.find((x) => x.id === id);
     if (!tab || this.modalOpen()) return;
@@ -1315,8 +1322,6 @@ export class TabsStore {
       }
     }
     for (const tab of w.list) this.track(tab);
-    const restored = w.list.map((x) => Number(/^untitled-(\d+)$/.exec(x.title)?.[1] ?? 0));
-    this.counter = Math.max(this.counter, 0, ...restored);
   }
 
   /**
@@ -1487,7 +1492,6 @@ export class TabsStore {
     this.endPrompt();
     this.pending.clear();
     this.wanted.clear();
-    this.counter = 0;
     await Promise.all(panes.map((p) => p?.close()));
   }
 }

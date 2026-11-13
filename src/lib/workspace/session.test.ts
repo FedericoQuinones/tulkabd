@@ -432,7 +432,7 @@ test("restoring connects nothing", async () => {
   expect(ipc.connectExplorer).not.toHaveBeenCalled();
 });
 
-test("the next untitled tab does not reuse a restored title", async () => {
+test("the next untitled tab takes a number no restored tab uses", async () => {
   tabs.open({ kind: "query" });
   tabs.open({ kind: "query" });
   tabs.open({ kind: "query" });
@@ -441,7 +441,7 @@ test("the next untitled tab does not reuse a restored title", async () => {
   await tabs.reset();
   restore(tabs, parseSession(json)!, known);
   tabs.open({ kind: "query" });
-  expect(tabs.list.map((x) => x.title)).toEqual(["untitled-2", "untitled-3", "untitled-4"]);
+  expect(tabs.list.map((x) => x.title)).toEqual(["untitled-2", "untitled-3", "untitled-1"]);
 });
 
 test("typing in an editor saves once, 1 s after the last change", async () => {

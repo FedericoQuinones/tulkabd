@@ -71,6 +71,19 @@ test("open numbers untitled tabs and activates the new one", () => {
   expect(a).not.toBe(b);
 });
 
+test("a new untitled tab takes the lowest number no open tab uses", () => {
+  const a = tabs.open({ kind: "query" });
+  tabs.open({ kind: "query" });
+  tabs.close(a);
+  tabs.open({ kind: "query" });
+  expect(tabs.list.map((x) => x.title)).toEqual(["untitled-2", "untitled-1"]);
+  tabs.open({ kind: "query" });
+  expect(tabs.list.map((x) => x.title)).toEqual(["untitled-2", "untitled-1", "untitled-3"]);
+  for (const x of [...tabs.list]) tabs.close(x.id);
+  tabs.open({ kind: "query" });
+  expect(tabs.list.map((x) => x.title)).toEqual(["untitled-1"]);
+});
+
 test("closing the active tab activates the one on its right, or the left if last", () => {
   const [a, b, c] = [tabs.open({ kind: "query" }), tabs.open({ kind: "query" }), tabs.open({ kind: "query" })];
   tabs.activate(b);
