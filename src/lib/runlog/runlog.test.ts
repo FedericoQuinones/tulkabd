@@ -17,6 +17,9 @@ vi.mock("@tauri-apps/api/window", () => ({
 import * as ipc from "../ipc";
 import type { ConnectionConfig, RunLogEntry } from "../ipc";
 import { connections } from "../connections/store.svelte";
+import { EditorView } from "@codemirror/view";
+import { undo } from "@codemirror/commands";
+import SqlEditor from "../editor/SqlEditor.svelte";
 import { PaneState } from "../pane/pane.svelte";
 import ResultsPanel from "../results/ResultsPanel.svelte";
 import Rail from "../shell/Rail.svelte";
@@ -56,7 +59,26 @@ const page = (from: number, n: number) => Array.from({ length: n }, (_, i) => en
 
 const conn = { id: "c1", name: "Sales", passwordSaved: true, environment: "production" } as ConnectionConfig;
 let cmp: ReturnType<typeof mount> | undefined;
+let editor: ReturnType<typeof mount> | undefined;
 let pane: PaneState;
+
+function ctrlClick(sel: string) {
+  document.querySelector<HTMLElement>(sel)!.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+}
+
+/** A query tab with a mounted editor and the run log on view; returns its id. */
+function openTab(doc = "") {
+  const id = tabs.open({ kind: "query" })!;
+  const p = tabs.list.find((x) => x.id === id)!.pane!;
+  p.initialDoc = doc;
+  p.bottomTab = "runlog";
+  editor = mount(SqlEditor, { target: document.body, props: { pane: p, onrun: () => {}, oncursor: () => {} } });
+  cmp = mount(ResultsPanel, { target: document.body, props: { pane: p, onjump: () => {} } });
+  flushSync();
+  return id;
+}
+const docText = (id: string) => tabs.list.find((x) => x.id === id)!.pane!.text();
+const viewOf = () => EditorView.findFromDOM(document.querySelector<HTMLElement>(".cm-editor")!)!;
 
 function show() {
   cmp = mount(ResultsPanel, { target: document.body, props: { pane, onjump: () => {} } });
@@ -75,7 +97,8 @@ beforeEach(async () => {
 
 afterEach(() => {
   if (cmp) unmount(cmp);
-  cmp = undefined;
+  if (editor) unmount(editor);
+  cmp = editor = undefined;
   document.body.innerHTML = "";
 });
 
@@ -160,7 +183,7 @@ test("ai entries show the AI tag with the client in the title", () => {
   expect(tag(2)!.textContent).toBe("AI");
   expect(tag(2)!.title).toBe("Run by an AI assistant (claude-code)");
   expect(tag(3)!.title).toBe("Run by an AI assistant");
-  tag(2)!.closest("tr")!.click();
+  tag(2)!.closest("tr")!.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
   expect(tabs.active!.pane!.connectionId).toBe("c1");
 });
 
@@ -188,11 +211,11 @@ test("blocked and cancelled show their outcome, not rows", async () => {
   expect(cells[3][1]).toBe("Sales · Orders");
 });
 
-test("click opens a new tab bound to the entry's connection and database without connecting", () => {
+test("Ctrl+click opens a new tab bound to the entry's connection and database without connecting", () => {
   runLog.prepend(entry(1, { sql: "DELETE FROM dbo.Pedidos", database: "Billing" }));
   pane.bottomTab = "runlog";
   show();
-  document.querySelector<HTMLElement>('tr[data-id="1"]')!.click();
+  ctrlClick('tr[data-id="1"]');
   const tab = tabs.active!;
   expect(tab.pane!.connectionId).toBe("c1");
   expect(tab.pane!.database).toBe("Billing");
@@ -201,7 +224,7 @@ test("click opens a new tab bound to the entry's connection and database without
   expect(ipc.openSession).not.toHaveBeenCalled();
 });
 
-test("Enter on a focused row opens it and the arrows move the focus", () => {
+test("Ctrl+Enter on a focused row opens it and the arrows move the focus", () => {
   runLog.prepend(entry(1));
   runLog.prepend(entry(2));
   pane.bottomTab = "runlog";
@@ -210,7 +233,7 @@ test("Enter on a focused row opens it and the arrows move the focus", () => {
   r[0].focus();
   r[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
   expect(document.activeElement).toBe(r[1]);
-  r[1].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  r[1].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
   expect(tabs.active!.pane!.initialDoc).toBe("SELECT 1");
 });
 
@@ -218,7 +241,7 @@ test("deleted connection opens unbound with a notice", () => {
   runLog.prepend(entry(1, { connectionId: "gone" }));
   pane.bottomTab = "runlog";
   show();
-  document.querySelector<HTMLElement>('tr[data-id="1"]')!.click();
+  ctrlClick('tr[data-id="1"]');
   const p = tabs.active!.pane!;
   expect(p.connectionId).toBeNull();
   expect(p.notice).toBe("The connection of this run no longer exists.");
@@ -278,7 +301,7 @@ test("a truncated run opens with a notice", () => {
   runLog.prepend(entry(1, { sqlTruncated: true }));
   pane.bottomTab = "runlog";
   show();
-  document.querySelector<HTMLElement>('tr[data-id="1"]')!.click();
+  ctrlClick('tr[data-id="1"]');
   expect(tabs.active!.pane!.notice).toBe("This run was longer than 100 KB; only the beginning was kept.");
 });
 
@@ -290,12 +313,12 @@ test("a new run goes back from the run log to the results", () => {
   expect(pane.bottomTab).toBe("results");
 });
 
-test("Enter with a modifier is left to the shortcuts", () => {
+test("Shift+Enter is left to the shortcuts", () => {
   runLog.prepend(entry(1));
   pane.bottomTab = "runlog";
   show();
   const row = document.querySelector<HTMLElement>('tr[data-id="1"]')!;
-  row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
+  row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true }));
   expect(tabs.list).toHaveLength(0);
 });
 
@@ -326,4 +349,61 @@ test("ArrowDown on the last row loads more", async () => {
   const rows = document.querySelectorAll<HTMLElement>("tr[data-id]");
   rows[99].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
   await vi.waitFor(() => expect(ipc.listRunLog).toHaveBeenLastCalledWith(101, 100));
+});
+
+test("click inserts the statement at the cursor of its own tab and runs nothing", () => {
+  runLog.prepend(entry(1, { sql: "SELECT 1" }));
+  const id = openTab("AB CD");
+  viewOf().dispatch({ selection: { anchor: 2 } });
+  const before = tabs.list.length;
+  document.querySelector<HTMLElement>('tr[data-id="1"]')!.click();
+  flushSync();
+  expect(docText(id)).toBe("ABSELECT 1 CD");
+  expect(tabs.list).toHaveLength(before);
+  expect(tabs.list.find((x) => x.id === id)!.dirty).toBe(true);
+  expect(ipc.openSession).not.toHaveBeenCalled();
+  expect(viewOf().state.selection.main.head).toBe(2 + "SELECT 1".length);
+  expect(undo(viewOf())).toBe(true);
+  expect(docText(id)).toBe("AB CD");
+});
+
+test("insertion replaces the selection", () => {
+  runLog.prepend(entry(1, { sql: "X" }));
+  const id = openTab("one two three");
+  viewOf().dispatch({ selection: { anchor: 4, head: 7 } });
+  document.querySelector<HTMLElement>('tr[data-id="1"]')!.click();
+  flushSync();
+  expect(docText(id)).toBe("one X three");
+});
+
+test("Enter inserts and Ctrl+Enter opens a new tab", () => {
+  runLog.prepend(entry(1, { sql: "SELECT 7" }));
+  const id = openTab("");
+  const row = document.querySelector<HTMLElement>('tr[data-id="1"]')!;
+  row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  flushSync();
+  expect(docText(id)).toBe("SELECT 7");
+  expect(tabs.list).toHaveLength(1);
+  row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
+  expect(tabs.list).toHaveLength(2);
+  expect(tabs.active!.pane!.initialDoc).toBe("SELECT 7");
+});
+
+test("an insert asked before the editor mounts goes in when it mounts", () => {
+  const p = new PaneState("tab-y");
+  p.initialDoc = "head";
+  p.insertAtCursor(" tail");
+  editor = mount(SqlEditor, { target: document.body, props: { pane: p, onrun: () => {}, oncursor: () => {} } });
+  flushSync();
+  expect(p.text()).toBe(" tailhead");
+  expect(p.pendingInserts).toEqual([]);
+});
+
+test("a truncated entry is inserted with a notice", () => {
+  runLog.prepend(entry(1, { sqlTruncated: true, sql: "SELECT t" }));
+  const id = openTab("");
+  document.querySelector<HTMLElement>('tr[data-id="1"]')!.click();
+  flushSync();
+  expect(docText(id)).toBe("SELECT t");
+  expect(tabs.list.find((x) => x.id === id)!.pane!.notice).toBe("This run was longer than 100 KB; only the beginning was kept.");
 });

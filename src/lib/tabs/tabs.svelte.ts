@@ -358,6 +358,19 @@ export class TabsStore {
     return id;
   }
 
+  /**
+   * Puts the SQL of a run log entry into the editor of the tab that shows the log, at the cursor.
+   * Nothing runs and the tab keeps its session, connection and database (an open transaction
+   * stays visible to what the user runs next).
+   */
+  insertFromRunLog(tabId: string, entry: RunLogEntry): boolean {
+    const pane = this.list.find((x) => x.id === tabId)?.pane;
+    if (!pane) return false;
+    pane.insertAtCursor(entry.sql);
+    if (entry.sqlTruncated) pane.notice = pane.notice ? `${pane.notice} ${t("runlog.truncated")}` : t("runlog.truncated");
+    return true;
+  }
+
   /** Ctrl+T: a new query tab bound to the active tab's connection and database. */
   newTab(): string | null {
     const { connectionId, database } = this.binding(this.active);
