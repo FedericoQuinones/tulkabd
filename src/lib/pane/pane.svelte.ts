@@ -63,6 +63,8 @@ export class PaneState {
   initialDoc = $state("");
   /** Bumped when `loadText` replaces the document; a mounted editor swaps its content. */
   docVersion = $state(0);
+  /** Text waiting to go in at the cursor; the editor applies it as soon as it can (see `insertAtCursor`). */
+  pendingInserts = $state<string[]>([]);
   /** Bumped on every edit by the user (see `edited`); the session autosave watches it. */
   edits = $state(0);
   /** Set by the tabs store: hears every edit by the user, to mark the tab as unsaved. */
@@ -130,6 +132,14 @@ export class PaneState {
     this.initialDoc = text;
     this.editorState = null;
     this.docVersion++;
+  }
+
+  /**
+   * Asks the editor to insert text at the cursor, replacing the selection, as an undoable edit.
+   * A mounted editor takes it right away; otherwise it waits and goes in when the editor mounts.
+   */
+  insertAtCursor(text: string) {
+    this.pendingInserts = [...this.pendingInserts, text];
   }
 
   /**

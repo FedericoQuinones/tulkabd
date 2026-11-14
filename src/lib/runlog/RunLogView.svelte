@@ -47,12 +47,21 @@
     if (el.scrollTop + el.clientHeight >= el.scrollHeight - NEAR_END_PX) void runLog.loadMore();
   }
 
+  const mac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  const hint = t("runlog.rowHint", { key: mac ? "Cmd" : "Ctrl" });
+
+  /** Plain activation inserts the statement into this tab; Ctrl/Cmd opens it in a new tab. */
+  function activate(entry: RunLogEntry, newTab: boolean) {
+    if (newTab) tabs.openFromRunLog(entry);
+    else tabs.insertFromRunLog(tabId, entry);
+  }
+
   function onkey(e: KeyboardEvent, entry: RunLogEntry) {
     const row = e.currentTarget as HTMLElement;
     if (e.key === "Enter") {
-      if (e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
+      if (e.shiftKey || e.altKey) return;
       e.preventDefault();
-      tabs.openFromRunLog(entry);
+      activate(entry, e.ctrlKey || e.metaKey);
       return;
     }
     const moves: Record<string, () => Element | null> = {
@@ -99,8 +108,8 @@
             <tr
               data-id={e.id}
               tabindex={e.id === tabbable ? 0 : -1}
-              title={e.sql.slice(0, TITLE_CHARS)}
-              onclick={() => tabs.openFromRunLog(e)}
+              title={`${e.sql.slice(0, TITLE_CHARS)}\n\n${hint}`}
+              onclick={(ev) => activate(e, ev.ctrlKey || ev.metaKey)}
               onkeydown={(ev) => onkey(ev, e)}
               onfocus={() => (focusId = e.id)}
             >

@@ -262,6 +262,7 @@
   "runlog.ai": "AI",
   "runlog.aiBy": "Run by an AI assistant ({client})",
   "runlog.aiByUnknown": "Run by an AI assistant",
+  "runlog.rowHint": "Click to insert at the cursor. {key}+click to open in a new tab.",
   "runlog.meta": "All tabs",
   "results.tab": "Results",
   "results.tabN": "Results {n}",

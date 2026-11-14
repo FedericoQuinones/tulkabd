@@ -155,6 +155,27 @@
     pane.editorState = null;
   });
 
+  // Text the pane asks to insert at the cursor: an undoable edit that replaces the selection.
+  function applyInserts() {
+    if (!view || pane.pendingInserts.length === 0) return;
+    const queued = pane.pendingInserts;
+    pane.pendingInserts = [];
+    for (const text of queued) {
+      const { from, to } = view.state.selection.main;
+      view.dispatch({
+        changes: { from, to, insert: text },
+        selection: { anchor: from + text.length },
+        scrollIntoView: true,
+        userEvent: "input.paste",
+      });
+    }
+    view.focus();
+  }
+  $effect(() => {
+    void pane.pendingInserts;
+    applyInserts();
+  });
+
   onMount(() => {
     const extensions = [
           lineNumbers(),
@@ -205,6 +226,7 @@
     report(view);
     pane.liveDoc = () => view?.state.doc.toString() ?? "";
     shownVersion = pane.docVersion;
+    applyInserts();
     return () => {
       pane.liveDoc = null;
       if (view) pane.editorState = view.state.toJSON({ history: historyField });
