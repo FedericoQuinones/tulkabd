@@ -463,3 +463,63 @@ test("Test connection asks for the password when the saved one cannot be reused"
   expect(document.body.textContent).toContain("Enter the password to test");
   expect(document.body.textContent).not.toContain("password_required");
 });
+
+const checkbox = (label: string) =>
+  [...document.querySelectorAll<HTMLLabelElement>("label.chk")].find((l) => l.textContent?.trim() === label)!.querySelector("input")!;
+const note = () => document.querySelector('[data-testid="weaker-tls-note"]');
+
+function toggle(label: string) {
+  checkbox(label).click();
+  flushSync();
+}
+
+function reopen(props: Parameters<typeof open>[0]) {
+  if (cmp) unmount(cmp);
+  cmp = undefined;
+  document.body.innerHTML = "";
+  open(props);
+}
+
+test("weaker TLS on a connection with a saved password warns that the password will be removed", () => {
+  const stored = { ...base, environment: "production" as const, trustServerCertificate: false, passwordSaved: true };
+  connections.list = [stored];
+  open({ initial: stored });
+  expect(note()).toBeNull();
+  toggle("Trust server certificate");
+  expect(note()?.textContent).toContain("saved password will be removed");
+  toggle("Trust server certificate");
+  expect(note()).toBeNull();
+  toggle("Encrypt");
+  expect(note()).not.toBeNull();
+});
+
+test("typing the password hides the weaker TLS note", () => {
+  const stored = { ...base, environment: "production" as const, trustServerCertificate: false, passwordSaved: true };
+  connections.list = [stored];
+  open({ initial: stored });
+  toggle("Trust server certificate");
+  const input = document.querySelector<HTMLInputElement>("#c-pass")!;
+  input.value = "x";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  flushSync();
+  expect(note()).toBeNull();
+});
+
+test("no weaker TLS note on Local, without a saved password, or on a new connection", () => {
+  const local = { ...base, trustServerCertificate: false, passwordSaved: true };
+  connections.list = [local];
+  open({ initial: local });
+  toggle("Trust server certificate");
+  expect(note()).toBeNull();
+
+  const unsaved = { ...base, environment: "production" as const, trustServerCertificate: false, passwordSaved: false };
+  connections.list = [unsaved];
+  reopen({ initial: unsaved });
+  toggle("Trust server certificate");
+  expect(note()).toBeNull();
+
+  connections.list = [];
+  reopen({});
+  toggle("Encrypt");
+  expect(note()).toBeNull();
+});
