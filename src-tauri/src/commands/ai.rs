@@ -2,7 +2,7 @@ use tulka_app::ai::AiVisible;
 use tulka_app::ai::agent::{self, ClaudeStatus};
 
 /// Where Claude Code's install instructions are.
-const CLAUDE_INSTALL_DOCS: &str = "https://docs.claude.com/en/docs/claude-code/setup";
+const CLAUDE_INSTALL_DOCS: &str = "https://code.claude.com/docs/en/setup";
 
 #[tauri::command]
 pub async fn ai_claude_status() -> ClaudeStatus {
