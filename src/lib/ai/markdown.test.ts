@@ -49,3 +49,13 @@ test("fence_line_with_many_spaces_is_fast", () => {
   parseMarkdown("```" + " ".repeat(10000) + "!");
   expect(Date.now() - start).toBeLessThan(500);
 });
+
+test("table_lines_stay_one_aligned_block", () => {
+  const rows = ["| name | rows |", "|------|------|", "| a    | 10   |"];
+  expect(parseMarkdown(rows.join("\n"))).toEqual([{ kind: "code", lang: "", text: rows.join("\n") }]);
+  expect(parseMarkdown("Before\n" + rows.join("\n") + "\nAfter")).toEqual([
+    { kind: "p", inline: [{ kind: "text", text: "Before" }] },
+    { kind: "code", lang: "", text: rows.join("\n") },
+    { kind: "p", inline: [{ kind: "text", text: "After" }] },
+  ]);
+});

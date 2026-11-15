@@ -44,6 +44,13 @@ export function parseMarkdown(src: string): Block[] {
       blocks.push({ kind: "code", lang: fence[1] ?? "", text: body.join("\n") });
       continue;
     }
+    if (line.trim().startsWith("|")) {
+      flush();
+      const rows = [line];
+      while (i + 1 < lines.length && lines[i + 1].trim().startsWith("|")) rows.push(lines[++i]);
+      blocks.push({ kind: "code", lang: "", text: rows.join("\n") });
+      continue;
+    }
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
       flush();
