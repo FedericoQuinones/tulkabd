@@ -169,10 +169,18 @@ pub fn claude_args(files: &AiFiles, session_id: Option<&str>) -> Vec<OsString> {
     args.push("--append-system-prompt-file".into());
     args.push(files.system_prompt.clone().into_os_string());
     if let Some(id) = session_id {
-        args.push("--resume".into());
-        args.push(id.into());
+        args.push(format!("--resume={id}").into());
     }
     args
+}
+
+/// Whether `id` looks like a session id: it is passed to Claude Code, so it
+/// must never be readable as an option.
+fn valid_session_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    id.len() <= 128
+        && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// The chats that are running, by chat id.
@@ -215,7 +223,8 @@ pub async fn stop(runs: &ChatRuns, chat_id: &str) {
 
 /// Sends `text` to Claude Code for the chat `chat_id` (continuing
 /// `session_id` when given) and reports what happens to `on_event` until the
-/// run ends. Fails with `busy` while the chat is already running.
+/// run ends. Fails with `busy` while the chat is already running and with
+/// `invalid_session` when `session_id` is not a plausible session id.
 pub async fn send(
     runs: &ChatRuns,
     chat_id: String,
@@ -223,6 +232,12 @@ pub async fn send(
     text: String,
     on_event: impl Fn(ChatEvent) + Send + 'static,
 ) -> Result<(), String> {
+    if session_id
+        .as_deref()
+        .is_some_and(|id| !valid_session_id(id))
+    {
+        return Err("invalid_session".to_string());
+    }
     let stop = runs.start(&chat_id)?;
     let Some(program) = agent::find_claude() else {
         runs.finish(&chat_id);
@@ -519,8 +534,39 @@ mod tests {
         .collect();
         assert_eq!(text(claude_args(&files, None)), base);
         let mut resumed = base;
-        resumed.extend(["--resume".into(), "abc".into()]);
+        resumed.push("--resume=abc".into());
         assert_eq!(text(claude_args(&files, Some("abc"))), resumed);
+    }
+
+    #[test]
+    fn session_ids_are_checked() {
+        assert!(valid_session_id("0b5c1c1e-7a52-4c0f-9d5e-3f1d2a6b7c80"));
+        assert!(valid_session_id("a"));
+        assert!(valid_session_id(&"a".repeat(128)));
+        for bad in ["", "-x", "--mcp-config=x", "_a", "a b", "a=b", "a\n"] {
+            assert!(!valid_session_id(bad), "{bad:?}");
+        }
+        assert!(!valid_session_id(&"a".repeat(129)));
+    }
+
+    #[tokio::test]
+    async fn send_rejects_an_invalid_session() {
+        for bad in ["--mcp-config=x", "-x", "", &"a".repeat(129)] {
+            let runs = ChatRuns::default();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let sink = seen.clone();
+            let out = send(
+                &runs,
+                "chat".into(),
+                Some(bad.to_string()),
+                "hi".into(),
+                move |e| sink.lock().unwrap().push(e),
+            )
+            .await;
+            assert_eq!(out, Err("invalid_session".to_string()), "{bad:?}");
+            assert!(seen.lock().unwrap().is_empty());
+            assert!(runs.start("chat").is_ok(), "nothing stays registered");
+        }
     }
 
     #[cfg(unix)]

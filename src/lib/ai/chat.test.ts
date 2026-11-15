@@ -158,3 +158,14 @@ test("prefix_quotes_awkward_names", async () => {
   await c.send("q", { connectionLabel: 'a"b\nc', database: null });
   expect(send.mock.calls[0][2]).toBe('[Context: the user is looking at connection "a\\"b\\nc".]\n\nq');
 });
+
+test("invalid_session_resets_the_session", async () => {
+  const c = new AiChat();
+  c.sessionId = "bad";
+  send.mockRejectedValueOnce("invalid_session");
+  await c.send("hi", null);
+  expect(c.sessionId).toBeNull();
+  expect((c.items.at(-1) as { text: string }).text).toMatch(/could not be continued/);
+  await c.send("again", null);
+  expect(send.mock.calls[1][1]).toBeNull();
+});

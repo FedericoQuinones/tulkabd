@@ -33,6 +33,7 @@ function failure(message: string): string {
 
 function rejection(e: unknown): string {
   if (e === "busy") return t("ai.chat.busy");
+  if (e === "invalid_session") return t("ai.chat.invalidSession");
   return e instanceof Error ? e.message : String(e);
 }
 
@@ -105,7 +106,10 @@ export class AiChat {
         if (chatId === this.chatId) this.apply(ev);
       });
     } catch (e) {
-      if (chatId === this.chatId) this.apply({ kind: "failed", message: rejection(e) });
+      if (chatId === this.chatId) {
+        if (e === "invalid_session") this.sessionId = null;
+        this.apply({ kind: "failed", message: rejection(e) });
+      }
     } finally {
       if (chatId === this.chatId) {
         this.running = false;

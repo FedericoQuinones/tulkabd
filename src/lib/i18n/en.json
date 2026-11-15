@@ -63,6 +63,7 @@
   "ai.panel.label": "AI assistant",
   "ai.chat.stopped": "Stopped.",
   "ai.chat.notInstalled": "Claude Code is not installed on this computer. Install it to chat here.",
+  "ai.chat.invalidSession": "The conversation could not be continued. Send your message again to start a new one.",
   "ai.chat.busy": "Claude Code is still answering. Wait for it or stop it first.",
   "ai.chat.endedWithError": "Claude Code ended with an error.",
   "ai.chat.example": "Ask something like: why is order 123 still pending?",
