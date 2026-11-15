@@ -307,6 +307,29 @@ class ExplorerStore {
     return status === "connected" || status === "connecting";
   }
 
+  /**
+   * The connection (and database) a new query tab should bind to: those of the focused row, else
+   * the only connected connection. `null` when neither says which one.
+   */
+  tabContext(): { connectionId: string; database: string | null } | null {
+    const byKey = new Map(this.rows.map((r) => [r.key, r]));
+    let row = this.focusKey ? byKey.get(this.focusKey) : undefined;
+    let connectionId: string | null = null;
+    let database: string | null = null;
+    // Walk up from the row to the connection above it, noting the first database on the way.
+    for (let hops = 0; row && hops < 16 && !connectionId; hops++) {
+      if (row.kind === "connection") connectionId = row.conn.id;
+      else if (row.kind !== "folder" && row.kind !== "column" && row.kind !== "notice") {
+        connectionId = row.connectionId;
+        database ??= row.kind === "database" ? row.db.name : row.database;
+      }
+      row = row.parent ? byKey.get(row.parent) : undefined;
+    }
+    if (connectionId) return { connectionId, database };
+    const live = connections.list.filter((c) => this.conns[c.id]?.status === "connected");
+    return live.length === 1 ? { connectionId: live[0].id, database: null } : null;
+  }
+
   /** After an edit is saved while live: the backend stopped the session that read the old server, so connect again. */
   reconnectIfLive(id: string, wasLive: boolean, password?: string): void {
     if (wasLive) void this.connect(id, password);
@@ -996,6 +1019,7 @@ class ExplorerStore {
 }
 
 export const explorer = new ExplorerStore();
+tabs.setExplorerContext(() => explorer.tabContext());
 connections.onForget = (id) => explorer.forgetCached(id);
 
 /** The context menu of a row, wired to the explorer store. */

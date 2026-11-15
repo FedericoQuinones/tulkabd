@@ -370,9 +370,27 @@ export class TabsStore {
     return true;
   }
 
-  /** Ctrl+T: a new query tab bound to the active tab's connection and database. */
+  private explorerContext: (() => ExplorerContext | null) | null = null;
+
+  /** Registers what the Explorer currently points at; a new tab with no tab to copy from binds to it. */
+  setExplorerContext(provider: (() => ExplorerContext | null) | null): void {
+    this.explorerContext = provider;
+  }
+
+  /** The Explorer's connection and database, when it names a saved connection. */
+  private explorerBinding(): ExplorerContext | null {
+    const ctx = this.explorerContext?.() ?? null;
+    return ctx && connections.list.some((c) => c.id === ctx.connectionId) ? ctx : null;
+  }
+
+  /** Ctrl+T: a new query tab bound to the active tab's connection and database, else to the Explorer's. */
   newTab(): string | null {
-    const { connectionId, database } = this.binding(this.active);
+    let { connectionId, database } = this.binding(this.active);
+    if (!connectionId) {
+      const ctx = this.explorerBinding();
+      connectionId = ctx?.connectionId ?? null;
+      database = ctx?.database ?? null;
+    }
     return this.open({ kind: "query", connectionId: connectionId ?? undefined, database: database ?? undefined });
   }
 
@@ -852,17 +870,22 @@ export class TabsStore {
    * Runs sql in a query tab. A tab bound to a connection but without a session (restored at
    * startup) connects first, asking for the password if needed, and runs once connected.
    */
-  run(id: string, sql: string, lineOffset: number): void {
+  /**
+   * Runs the sql in the tab. An unbound tab never picks a connection to run on: it returns false
+   * and nothing runs, so the caller can send the user to the connection picker.
+   */
+  run(id: string, sql: string, lineOffset: number): boolean {
     const pane = this.list.find((x) => x.id === id)?.pane;
-    if (!pane || pane.status !== "idle") return;
+    if (!pane || pane.status !== "idle") return true;
     if (pane.session) {
       void pane.run(sql, lineOffset);
-      return;
+      return true;
     }
     const conn = connections.list.find((c) => c.id === pane.connectionId);
-    if (!conn) return;
+    if (!conn) return false;
     this.pending.set(id, { sql, run: true, lineOffset });
     void this.connectTab(id, conn, undefined, pane.database ?? undefined);
+    return true;
   }
 
   /**
@@ -1507,6 +1530,12 @@ export class TabsStore {
     this.wanted.clear();
     await Promise.all(panes.map((p) => p?.close()));
   }
+}
+
+/** What the Explorer points at: the connection of its focused row, and the database when inside one. */
+export interface ExplorerContext {
+  connectionId: string;
+  database: string | null;
 }
 
 export const tabs = new TabsStore();

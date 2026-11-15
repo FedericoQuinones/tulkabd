@@ -867,3 +867,41 @@ test("a database with thousands of objects flattens to one page of rows and a sh
   expect(more.kind === "notice" && more.action !== null).toBe(true);
   expect(siblingPositions(rows)[first + OBJECT_PAGE]).toEqual({ setsize: OBJECT_PAGE + 1, posinset: OBJECT_PAGE + 1 });
 });
+
+test("tabContext follows the focused row: its connection, and its database when inside one", () => {
+  explorer.expanded.add("c2");
+  const st = explorer.state("c2");
+  st.status = "connected";
+  st.databases = [db("Ventas")];
+  explorer.expanded.add(keyOf.db("c2", "Ventas"));
+  explorer.focusKey = "c2";
+  expect(explorer.tabContext()).toEqual({ connectionId: "c2", database: null });
+  const dbRow = explorer.rows.find((r) => r.kind === "database")!;
+  explorer.focusKey = dbRow.key;
+  expect(explorer.tabContext()).toEqual({ connectionId: "c2", database: "Ventas" });
+  const group = explorer.rows.find((r) => r.kind === "group")!;
+  explorer.focusKey = group.key;
+  expect(explorer.tabContext()).toEqual({ connectionId: "c2", database: "Ventas" });
+});
+
+test("tabContext falls back to the only connected connection, else null", () => {
+  expect(explorer.tabContext()).toBeNull();
+  explorer.state("c2").status = "connected";
+  expect(explorer.tabContext()).toEqual({ connectionId: "c2", database: null });
+  explorer.state("c1").status = "connected";
+  expect(explorer.tabContext()).toBeNull();
+  explorer.focusKey = "fa";
+  expect(explorer.tabContext()).toBeNull();
+});
+
+test("a new tab binds to the focused Explorer row's connection", async () => {
+  vi.mocked(ipc.openSession).mockResolvedValue({
+    server: { version: "16", user: "sa", singleDatabase: false },
+    databases: ["master"],
+    currentDatabase: "master",
+  });
+  explorer.focusKey = "c3";
+  const id = tabs.newTab()!;
+  await flush();
+  expect(tabs.binding(tabs.list.find((x) => x.id === id)!).connectionId).toBe("c3");
+});
