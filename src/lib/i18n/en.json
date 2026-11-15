@@ -63,6 +63,7 @@
   "ai.panel.label": "AI assistant",
   "ai.connect.refresh": "Refresh",
   "ai.connect.notInstalled": "Claude Code is not installed on this computer.",
+  "ai.connect.startFailed": "Claude Code was found but did not start: {error}",
   "ai.connect.install": "How to install Claude Code",
   "ai.connect.version": "Claude Code {version}",
   "ai.connect.connect": "Connect",

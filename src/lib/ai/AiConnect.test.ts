@@ -21,6 +21,7 @@ const status = (over: Partial<ClaudeStatus> = {}): ClaudeStatus => ({
   connected: false,
   connectedElsewhere: false,
   path: "/usr/bin/claude",
+  error: null,
   ...over,
 });
 
@@ -173,4 +174,12 @@ it("other agents copies the JSON and the VS Code setup", async () => {
   flushSync();
   button("Copy for VS Code")!.click();
   expect(ipc.copyMcpSetup).toHaveBeenCalledWith("vscode");
+});
+
+it("says Claude Code was found but did not start", async () => {
+  vi.mocked(ipc.claudeStatus).mockResolvedValue(status({ version: null, error: "node: not found" }));
+  await show();
+  expect(document.body.textContent).toContain("Claude Code was found but did not start: node: not found");
+  expect(button("Connect")).toBeFalsy();
+  expect(document.body.textContent).not.toContain("is not installed");
 });

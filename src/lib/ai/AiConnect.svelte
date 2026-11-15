@@ -82,6 +82,8 @@
   {:else if status && !status.installed}
     <p class="text">{t("ai.connect.notInstalled")}</p>
     <button type="button" class="link" disabled={busy} onclick={() => void run(() => ipc.openClaudeInstallDocs())}>{t("ai.connect.install")}</button>
+  {:else if status?.error}
+    <p class="text">{t("ai.connect.startFailed", { error: status.error })}</p>
   {:else if status}
     {#if status.connected}
       <div class="summary">

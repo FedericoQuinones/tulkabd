@@ -615,6 +615,8 @@ export interface ClaudeStatus {
   /** Registered in Claude Code but pointing at another tulkabd. */
   connectedElsewhere: boolean;
   path: string | null;
+  /** Claude Code was found but did not start: what it said. */
+  error: string | null;
 }
 /** A connection with read-only AI access, named as the assistant sees it. */
 export interface AiVisible {
