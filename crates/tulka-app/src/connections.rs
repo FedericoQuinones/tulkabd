@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use tulka_core::{
-    clamp_zoom, format_connection_string, AppConfig, ConnectParams, ConnectionConfig, Folder,
-    ParsedConnection, Preferences, SecretError, SecretStore, ServerInfo,
+    clamp_zoom, format_connection_string, AppConfig, ConnectParams, ConnectionConfig, DriverError,
+    Folder, ParsedConnection, Preferences, SecretError, SecretStore, ServerInfo,
 };
 
 use crate::explorer;
@@ -83,6 +83,13 @@ pub async fn save_connection(
     // so the stored connection never ends up with a secret meant for another
     // target, nor a `password_saved` flag over a deleted one.
     *current = persist(state, next).await?;
+    // A password typed earlier belongs to the stored server and user, like
+    // the keychain secret: another target or a new password replaces it.
+    if existing.is_some_and(|i| {
+        password.is_some() || !may_reuse_saved_password(&previous.connections[i], &conn)
+    }) {
+        state.remembered.forget(&conn.id);
+    }
 
     let mut keyring_unavailable = false;
     let mut secret_orphaned = false;
@@ -148,6 +155,7 @@ pub async fn save_connection(
 pub async fn delete_connection(state: &AppState, id: String) -> Result<bool, String> {
     state.ensure_writable()?;
     let mut orphaned = false;
+    state.remembered.forget(&id);
     {
         let mut current = state.connections.lock().await;
         let secrets = state.secrets.clone();
@@ -515,29 +523,13 @@ pub async fn list_server_databases(
     mut conn: ConnectionConfig,
     password: Option<String>,
 ) -> Result<Vec<String>, String> {
-    if password.is_none() {
-        conn.password_saved = reusable_saved_password(state, &conn).await;
-    }
-    let password = resolve_password(state, &conn, password).await?;
+    let password = resolve_form_password(state, &mut conn, password).await?;
     let driver = state.driver(&conn.driver)?;
     let mut session = driver
         .connect(&connect_params(&conn, password, None))
         .await
         .map_err(|e| e.to_string())?;
     session.list_databases().await.map_err(|e| e.to_string())
-}
-
-/// Whether the password saved for `conn.id` may be sent to what the form
-/// describes. The stored connection decides, never the form (which may be
-/// stale or hold pasted values): see [`may_reuse_saved_password`].
-async fn reusable_saved_password(state: &AppState, conn: &ConnectionConfig) -> bool {
-    state
-        .connections
-        .lock()
-        .await
-        .connections
-        .iter()
-        .any(|c| c.id == conn.id && c.password_saved && may_reuse_saved_password(c, conn))
 }
 
 /// The saved password of `stored` may be used to log in as `requested` only
@@ -576,10 +568,7 @@ pub async fn test_connection(
     mut conn: ConnectionConfig,
     password: Option<String>,
 ) -> Result<ServerInfo, String> {
-    if password.is_none() {
-        conn.password_saved = reusable_saved_password(state, &conn).await;
-    }
-    let password = resolve_password(state, &conn, password).await?;
+    let password = resolve_form_password(state, &mut conn, password).await?;
     let driver = state.driver(&conn.driver)?;
     let mut session = driver
         .connect(&connect_params(&conn, password, None))
@@ -588,9 +577,10 @@ pub async fn test_connection(
     session.server_info().await.map_err(|e| e.to_string())
 }
 
-/// The password to log in with: `given`, else the saved one. Fails with
-/// [`PASSWORD_REQUIRED`] when neither exists (a keychain that is unavailable
-/// counts as nothing saved).
+/// The password to log in with for a stored connection: `given`, else the
+/// one saved in the keychain, else the one typed earlier in this run. Fails
+/// with [`PASSWORD_REQUIRED`] when none exists (a keychain that is
+/// unavailable counts as nothing saved).
 pub(crate) async fn resolve_password(
     state: &AppState,
     conn: &ConnectionConfig,
@@ -599,7 +589,111 @@ pub(crate) async fn resolve_password(
     if let Some(password) = given {
         return Ok(password);
     }
-    saved_password(state.secrets.clone(), conn).await
+    match saved_password(state.secrets.clone(), conn).await {
+        Err(e) if e == PASSWORD_REQUIRED => state
+            .remembered
+            .get(&conn.id)
+            .ok_or_else(|| PASSWORD_REQUIRED.to_string()),
+        other => other,
+    }
+}
+
+/// Like [`resolve_password`] for a connection as a form describes it: the
+/// saved and the remembered passwords are used only while the form still
+/// targets the stored connection (see [`may_reuse_saved_password`]).
+async fn resolve_form_password(
+    state: &AppState,
+    conn: &mut ConnectionConfig,
+    given: Option<String>,
+) -> Result<String, String> {
+    if given.is_none() {
+        let stored = state
+            .connections
+            .lock()
+            .await
+            .connections
+            .iter()
+            .find(|c| c.id == conn.id && may_reuse_saved_password(c, conn))
+            .map(|c| c.password_saved);
+        match stored {
+            Some(saved) => conn.password_saved = saved,
+            None => return Err(PASSWORD_REQUIRED.into()),
+        }
+    }
+    resolve_password(state, conn, given).await
+}
+
+/// Keeps the outcome of a login with `typed` (a password from the prompt):
+/// a successful one is remembered for this run, an authentication failure
+/// forgets what was remembered, so the next connect asks again.
+pub(crate) fn note_login<T>(
+    state: &AppState,
+    id: &str,
+    typed: Option<&str>,
+    outcome: &Result<T, DriverError>,
+) {
+    match outcome {
+        Ok(_) => {
+            if let Some(password) = typed {
+                state.remembered.remember(id, password);
+            }
+        }
+        Err(DriverError::AuthFailed(_)) => state.remembered.forget(id),
+        Err(_) => {}
+    }
+}
+
+/// Stores the password typed in the prompt for this connection (remembered
+/// by a successful login, see [`note_login`]) in the keychain and sets
+/// `password_saved`. The keychain is only reached after a login worked, so
+/// a wrong password is never stored. Without a usable keychain the
+/// connection stays as it was and `keyring_unavailable` is set; the password
+/// is still remembered for this run. Fails with [`PASSWORD_REQUIRED`] when
+/// nothing was typed and with [`NOT_FOUND`] for an unknown connection.
+pub async fn save_remembered_password(
+    state: &AppState,
+    id: String,
+) -> Result<SaveConnectionResult, String> {
+    state.ensure_writable()?;
+    let mut current = state.connections.lock().await;
+    let index = current
+        .connections
+        .iter()
+        .position(|c| c.id == id)
+        .ok_or(NOT_FOUND)?;
+    let password = state
+        .remembered
+        .get(&id)
+        .ok_or_else(|| PASSWORD_REQUIRED.to_string())?;
+    let secrets: Arc<dyn SecretStore> = state.secrets.clone();
+    let key = id.clone();
+    match blocking(move || secrets.set(&key, &password)).await? {
+        Ok(()) => {}
+        Err(SecretError::Unavailable(_)) => {
+            return Ok(SaveConnectionResult {
+                connection: current.connections[index].clone(),
+                keyring_unavailable: true,
+                secret_orphaned: false,
+            });
+        }
+        Err(e) => return Err(format!("could not store the password: {e}")),
+    }
+    let mut next = current.clone();
+    next.connections[index].password_saved = true;
+    match persist(state, next).await {
+        Ok(saved) => *current = saved,
+        Err(e) => {
+            // The flag could not be stored: do not leave a secret behind it.
+            let secrets = state.secrets.clone();
+            let _ = blocking(move || secrets.delete(&id)).await;
+            return Err(e);
+        }
+    }
+    Ok(SaveConnectionResult {
+        connection: current.connections[index].clone(),
+        keyring_unavailable: false,
+        secret_orphaned: false,
+    })
 }
 
 /// The password saved for `conn` in the keychain. Fails with

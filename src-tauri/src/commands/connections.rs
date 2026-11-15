@@ -26,6 +26,15 @@ pub async fn save_connection(
     tulka_app::save_connection(&state, conn, password).await
 }
 
+/// Stores the password typed in the prompt, once a login with it worked.
+#[tauri::command]
+pub async fn save_remembered_password(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<SaveConnectionResult, String> {
+    tulka_app::save_remembered_password(&state, id).await
+}
+
 #[tauri::command]
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> Result<bool, String> {
     tulka_app::delete_connection(&state, id).await

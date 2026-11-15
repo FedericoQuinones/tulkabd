@@ -67,7 +67,7 @@ use tulka_core::{
 };
 use tulka_store::{CachedDatabase, MetaCache, SearchEntry, SearchIndex, SearchScope};
 
-use crate::connections::{blocking, connect_params, resolve_password};
+use crate::connections::{blocking, connect_params, note_login, resolve_password};
 use crate::state::AppState;
 use crate::types::{
     AppEvent, AppEvents, CompletionMetadata, ConnectionStatus, ExplorerInfo, NoopEvents,
@@ -690,6 +690,7 @@ pub async fn connect_explorer(
         .ok_or_else(|| NOT_FOUND.to_string())?;
     // Before the keychain read, so a disconnect meanwhile cancels this attempt.
     let epoch = explorer.begin_attempt(&connection_id);
+    let typed = password.clone();
     let password = match resolve_password(state, &conn, password).await {
         Ok(password) => password,
         Err(e) => {
@@ -718,7 +719,9 @@ pub async fn connect_explorer(
     explorer.status(&connection_id, ConnectionStatus::Connecting, None);
     let params = connect_params(&conn, password, None);
     let opened = async {
-        let mut session = driver.connect(&params).await?;
+        let connected = driver.connect(&params).await;
+        note_login(state, &connection_id, typed.as_deref(), &connected);
+        let mut session = connected?;
         let server = session.server_info().await?;
         let mut databases = session.list_databases().await?;
         retain_in_scope(&mut databases, &conn.databases);
