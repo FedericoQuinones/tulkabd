@@ -1,5 +1,6 @@
 <script lang="ts">
   import { t } from "../i18n/t";
+  import type { ConnectionConfig } from "../ipc";
   import { connections } from "../connections/store.svelte";
   import { ENVIRONMENTS } from "../connections/env";
   import SqlEditor from "../editor/SqlEditor.svelte";
@@ -19,11 +20,14 @@
     /** Focus the editor when it mounts. */
     autofocus?: boolean;
     /** Runs the sql; defaults to the pane's own run, which needs an open session. */
-    onrun?: (sql: string, lineOffset: number) => void;
+    onrun?: (sql: string, lineOffset: number) => boolean | void;
+    /** Binds the tab to a connection picked in the toolbar. */
+    onconnect?: (conn: ConnectionConfig) => void;
   }
-  let { pane, onreconnect, onretry, connectError = null, autofocus = true, onrun }: Props = $props();
+  let { pane, onreconnect, onretry, connectError = null, autofocus = true, onrun, onconnect }: Props = $props();
 
   let editor = $state<SqlEditor>();
+  let toolbar = $state<PaneToolbar>();
 
   const connection = $derived(connections.list.find((c) => c.id === pane.connectionId) ?? null);
   const envColor = $derived(
@@ -31,7 +35,12 @@
   );
 
   function run(target = editor?.target() ?? { sql: "", lineOffset: 0 }) {
-    if (target.sql.trim() === "" || pane.status !== "idle" || pane.switching || !connection) return;
+    if (target.sql.trim() === "" || pane.status !== "idle" || pane.switching) return;
+    if (!connection) {
+      // Unbound: never run on a connection the user did not pick; send them to the picker.
+      if (!onrun?.(target.sql, target.lineOffset)) toolbar?.focusPicker();
+      return;
+    }
     if (onrun) onrun(target.sql, target.lineOffset);
     else void pane.run(target.sql, target.lineOffset);
   }
@@ -49,6 +58,8 @@
 
 <section class="pane" style:--env={envColor}>
   <PaneToolbar
+    bind:this={toolbar}
+    {onconnect}
     {connection}
     database={pane.database}
     databases={pane.session?.databases ?? (pane.database ? [pane.database] : [])}

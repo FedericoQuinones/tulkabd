@@ -867,3 +867,42 @@ test("a stuck log does not hold the window close for long", async () => {
   await closeRequested!({ preventDefault: vi.fn() });
   expect(Date.now() - t0).toBeLessThan(2000);
 });
+
+test("a new tab with no tab to copy binds to the Explorer's connection and database", async () => {
+  tabs.setExplorerContext(() => ({ connectionId: "c1", database: "Sales" }));
+  const id = tabs.newTab()!;
+  await flush();
+  expect(tabs.binding(tabs.list.find((x) => x.id === id)!)).toEqual({ connectionId: "c1", database: "Sales" });
+  expect(ipc.openSession).toHaveBeenCalledWith(id, "c1", "Sales", undefined);
+  tabs.setExplorerContext(null);
+});
+
+test("a new tab stays unbound when the Explorer names nothing or an unknown connection", () => {
+  tabs.setExplorerContext(() => null);
+  const a = tabs.newTab()!;
+  expect(tabs.binding(tabs.list.find((x) => x.id === a)!).connectionId).toBeNull();
+  tabs.setExplorerContext(() => ({ connectionId: "gone", database: null }));
+  const b = tabs.newTab()!;
+  expect(tabs.binding(tabs.list.find((x) => x.id === b)!).connectionId).toBeNull();
+  tabs.setExplorerContext(null);
+});
+
+test("the active tab's binding wins over the Explorer's", async () => {
+  tabs.open({ kind: "query", connectionId: "c1", database: "Sales" });
+  await flush();
+  tabs.setExplorerContext(() => ({ connectionId: "c2", database: "master" }));
+  const id = tabs.newTab()!;
+  await flush();
+  expect(tabs.binding(tabs.list.find((x) => x.id === id)!).connectionId).toBe("c1");
+  tabs.setExplorerContext(null);
+});
+
+test("running in an unbound tab opens no session and runs nothing, even with an Explorer context", async () => {
+  tabs.setExplorerContext(() => ({ connectionId: "c1", database: "Sales" }));
+  const id = tabs.open({ kind: "query" });
+  expect(tabs.run(id, "select 1", 0)).toBe(false);
+  await flush();
+  expect(ipc.openSession).not.toHaveBeenCalled();
+  expect(ipc.runQuery).not.toHaveBeenCalled();
+  tabs.setExplorerContext(null);
+});

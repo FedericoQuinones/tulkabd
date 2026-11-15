@@ -4,6 +4,7 @@
   import { ENVIRONMENTS } from "../connections/env";
   import { connections } from "../connections/store.svelte";
   import GuardMenu from "../guard/GuardMenu.svelte";
+  import { explorer } from "../explorer/tree.svelte";
   import type { PaneStatus } from "./pane.svelte";
 
   interface Props {
@@ -17,8 +18,25 @@
     /** True while a database switch is in flight. */
     switching?: boolean;
     ondatabase: (name: string) => Promise<void>;
+    /** Binds the tab to the connection picked in the picker of an unbound tab. */
+    onconnect?: (conn: ConnectionConfig) => void;
   }
-  let { connection, database, databases, status, switching = false, onrun, onstop, onreconnect, ondatabase }: Props = $props();
+  let { connection, database, databases, status, switching = false, onrun, onstop, onreconnect, ondatabase, onconnect }: Props = $props();
+
+  let picker = $state<HTMLSelectElement>();
+  /** Moves the keyboard to the connection picker of an unbound tab. */
+  export function focusPicker() {
+    picker?.focus();
+  }
+
+  // Connected connections first, then the rest, each by name.
+  const choices = $derived(
+    [...connections.list].sort(
+      (a, b) =>
+        Number(explorer.conns[b.id]?.status === "connected") - Number(explorer.conns[a.id]?.status === "connected") ||
+        a.name.localeCompare(b.name),
+    ),
+  );
 
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
   const runKey = t(isMac ? "pane.runKey.mac" : "pane.runKey.other");
@@ -28,7 +46,8 @@
   const guardLabel = $derived(
     !connection ? "" : connections.guardOff.includes(connection.id) ? t("guard.offSession") : t(`guard.${connection.guard}`),
   );
-  const canRun = $derived(status === "idle" && !switching && connection !== null);
+  // An unbound tab can still press Run: that sends the user to the connection picker.
+  const canRun = $derived(status === "idle" && !switching);
 </script>
 
 <div class="bar">
@@ -52,7 +71,21 @@
     </div>
     <GuardMenu {connection} label={guardLabel} />
   {:else}
-    <span class="hint">{t("pane.noConnection")}</span>
+    <div class="pick">
+      <select
+        bind:this={picker}
+        aria-label={t("pane.connection")}
+        value=""
+        onchange={(e) => {
+          const conn = connections.list.find((c) => c.id === e.currentTarget.value);
+          e.currentTarget.value = "";
+          if (conn) onconnect?.(conn);
+        }}
+      >
+        <option value="" disabled>{t("pane.pickConnection")}</option>
+        {#each choices as c (c.id)}<option value={c.id}>{c.name} · {t(`env.short.${c.environment}`)}</option>{/each}
+      </select>
+    </div>
   {/if}
   {#if status === "disconnected"}
     <button class="reconnect" onclick={onreconnect}>{t("pane.disconnected")} · {t("pane.reconnect")}</button>
