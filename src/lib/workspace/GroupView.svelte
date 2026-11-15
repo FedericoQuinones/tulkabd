@@ -33,6 +33,7 @@
           onreconnect={() => tabs.reconnect(tab.id)}
           onretry={canRetry ? () => tabs.retry(tab.id) : undefined}
           onrun={(sql, lineOffset) => tabs.run(tab.id, sql, lineOffset)}
+          onconnect={(conn) => void tabs.connectTab(tab.id, conn)}
         />
       {/key}
     {:else if tab?.kind === "structure"}
