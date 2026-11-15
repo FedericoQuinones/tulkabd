@@ -420,7 +420,7 @@ const MAC_SCRIPT: &str = "claude.command";
 fn mac_script(dir: &Path, claude: &Path, mcp_config: &Path) -> String {
     let claude_dir = claude.parent().unwrap_or_else(|| Path::new("."));
     format!(
-        "#!/bin/sh\ncd {}\nexport PATH={}:\"$PATH\"\nexec {} --mcp-config {}\n",
+        "#!/bin/sh\ncd {} || exit 1\nexport PATH={}:\"$PATH\"\nexec {} --mcp-config {}\n",
         sh_quote(&dir.to_string_lossy()),
         sh_quote(&claude_dir.to_string_lossy()),
         sh_quote(&claude.to_string_lossy()),
@@ -678,11 +678,15 @@ mod tests {
         let args = terminal_invocation(t, dir, claude, file).unwrap().args;
         assert_eq!(
             args,
-            ["-a", "Terminal", "/Users/o'neil/ai/claude.command"].map(OsString::from)
+            [
+                OsString::from("-a"),
+                OsString::from("Terminal"),
+                dir.join(MAC_SCRIPT).into_os_string()
+            ]
         );
         assert_eq!(
             mac_script(dir, claude, file),
-            "#!/bin/sh\ncd '/Users/o'\\''neil/ai'\nexport PATH='/Users/o'\\''neil/.nvm/bin':\"$PATH\"\nexec '/Users/o'\\''neil/.nvm/bin/claude' --mcp-config '/Users/o'\\''neil/ai/mcp.json'\n"
+            "#!/bin/sh\ncd '/Users/o'\\''neil/ai' || exit 1\nexport PATH='/Users/o'\\''neil/.nvm/bin':\"$PATH\"\nexec '/Users/o'\\''neil/.nvm/bin/claude' --mcp-config '/Users/o'\\''neil/ai/mcp.json'\n"
         );
     }
 
