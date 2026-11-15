@@ -2634,8 +2634,15 @@ async fn save_results_rejects_unknown_results_and_missing_folders() {
 
 /// A fixture with one connection saved without a password.
 async fn unsaved() -> (Fixture, ConnectionConfig) {
+    unsaved_in(Environment::Local).await
+}
+
+/// Like [`unsaved`], for a connection in `environment`.
+async fn unsaved_in(environment: Environment) -> (Fixture, ConnectionConfig) {
     let f = fixture(Arc::new(MemoryStore::default()));
-    let saved = save_connection(&f.state, new_conn(), None)
+    let mut conn = new_conn();
+    conn.environment = environment;
+    let saved = save_connection(&f.state, conn, None)
         .await
         .unwrap()
         .connection;
@@ -2766,14 +2773,26 @@ async fn a_remembered_password_is_forgotten_when_the_target_changes() {
         |c| c.encrypt = false,
         |c| c.trust_server_certificate = true,
     ];
+    // Production: on Local, weaker TLS keeps the password (see the next test).
     for edit in edits {
-        let (f, conn) = unsaved().await;
+        let (f, conn) = unsaved_in(Environment::Production).await;
         type_password(&f, &conn.id).await;
         let mut edited = conn.clone();
         edit(&mut edited);
         save_connection(&f.state, edited, None).await.unwrap();
         assert!(needs_password(&f, &conn.id).await);
     }
+}
+
+#[tokio::test]
+async fn a_local_connection_keeps_its_remembered_password_with_weaker_tls() {
+    let (f, conn) = unsaved().await;
+    type_password(&f, &conn.id).await;
+    let mut edited = conn.clone();
+    edited.encrypt = false;
+    edited.trust_server_certificate = true;
+    save_connection(&f.state, edited, None).await.unwrap();
+    assert!(!needs_password(&f, &conn.id).await);
 }
 
 #[tokio::test]
