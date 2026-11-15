@@ -164,7 +164,7 @@ export type Row =
   | (RowBase & { kind: "savedQuery"; connectionId: string; database: string; name: string })
   | (RowBase & { kind: "object"; connectionId: string; database: string; object: DbObject })
   | (RowBase & { kind: "column"; column: ColumnInfo })
-  | (RowBase & { kind: "notice"; tone: "error" | "muted"; text: string; action: NoticeAction | null });
+  | (RowBase & { kind: "notice"; connectionId: string; tone: "error" | "muted"; text: string; action: NoticeAction | null });
 
 /**
  * `aria-setsize` and `aria-posinset` of every row: how many rows share its parent and its place
