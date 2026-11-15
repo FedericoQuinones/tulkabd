@@ -2,15 +2,13 @@
   import { onMount, tick } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
-  import type { AiVisible, ClaudeStatus } from "../ipc";
   import { tabs } from "../tabs/tabs.svelte";
   import { aiChat, contextFor, type ChatItem } from "./chat.svelte";
   import { parseMarkdown, type Inline } from "./markdown";
+  import { aiStatus } from "./status.svelte";
 
   type ToolItem = Extract<ChatItem, { kind: "tool" }>;
 
-  let visible = $state<AiVisible[]>([]);
-  let status = $state<ClaudeStatus | null>(null);
   let draft = $state("");
   let copied = $state<string | null>(null);
   let logEl = $state<HTMLElement>();
@@ -18,27 +16,15 @@
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
 
   const pane = $derived(tabs.activePane);
-  const context = $derived(contextFor(pane?.connectionId ?? null, pane?.database ?? null, visible));
-  const notInstalled = $derived(status !== null && !status.installed);
+  const context = $derived(contextFor(pane?.connectionId ?? null, pane?.database ?? null, aiStatus.visible));
+  const notInstalled = $derived(aiStatus.status !== null && !aiStatus.status.installed);
   const lastLen = $derived.by(() => {
     const last = aiChat.items[aiChat.items.length - 1];
     return last && (last.kind === "assistant" || last.kind === "user" || last.kind === "error") ? last.text.length : 0;
   });
 
-  async function loadVisible() {
-    try {
-      visible = await ipc.aiVisibleConnections();
-    } catch {
-      /* keep the previous list */
-    }
-  }
-
   onMount(() => {
-    void loadVisible();
-    ipc
-      .claudeStatus()
-      .then((s) => (status = s))
-      .catch(() => {});
+    void aiStatus.refresh();
     return () => clearTimeout(copyTimer);
   });
 
@@ -46,7 +32,7 @@
   let wasRunning = false;
   $effect(() => {
     const r = aiChat.running;
-    if (wasRunning && !r) void loadVisible();
+    if (wasRunning && !r) void aiStatus.refreshVisible();
     wasRunning = r;
   });
 
@@ -109,7 +95,7 @@
     }
   }
 
-  const connectionIdOf = (item: ToolItem) => visible.find((v) => v.label === str(item.input.connection))?.connectionId;
+  const connectionIdOf = (item: ToolItem) => aiStatus.visible.find((v) => v.label === str(item.input.connection))?.connectionId;
 
   function openInTab(item: ToolItem) {
     const connectionId = connectionIdOf(item);

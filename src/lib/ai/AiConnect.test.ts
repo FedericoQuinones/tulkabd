@@ -14,6 +14,7 @@ vi.mock("../ipc", () => ({
 import * as ipc from "../ipc";
 import type { ClaudeStatus } from "../ipc";
 import AiConnect from "./AiConnect.svelte";
+import { aiStatus } from "./status.svelte";
 
 const status = (over: Partial<ClaudeStatus> = {}): ClaudeStatus => ({
   installed: true,
@@ -39,6 +40,7 @@ const button = (name: string) =>
 
 beforeEach(() => {
   for (const f of Object.values(vi.mocked(ipc))) (f as ReturnType<typeof vi.fn>).mockReset();
+  aiStatus.reset();
   vi.mocked(ipc.aiVisibleConnections).mockResolvedValue([]);
 });
 afterEach(() => {

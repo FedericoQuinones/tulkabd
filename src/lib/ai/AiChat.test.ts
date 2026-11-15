@@ -23,6 +23,7 @@ vi.mock("../tabs/tabs.svelte", () => ({
 import * as ipc from "../ipc";
 import { aiChat } from "./chat.svelte";
 import AiChat from "./AiChat.svelte";
+import { aiStatus } from "./status.svelte";
 
 let cmp: ReturnType<typeof mount> | null = null;
 
@@ -57,6 +58,7 @@ beforeEach(async () => {
   vi.mocked(ipc.aiVisibleConnections).mockResolvedValue([{ connectionId: "c1", label: "localtest", passwordSaved: true }]);
   vi.mocked(ipc.aiChatSend).mockResolvedValue(undefined as never);
   vi.mocked(ipc.aiChatStop).mockResolvedValue(undefined as never);
+  aiStatus.reset();
   await aiChat.reset();
   aiChat.useContext = true;
 });
@@ -185,4 +187,23 @@ it("expanded_tool_rows_survive_remount_and_reset", async () => {
   expect(document.body.textContent).toContain("SELECT 3");
   await aiChat.reset();
   expect(aiChat.expanded).toEqual({});
+});
+
+it("composer_returns_after_a_refresh_finds_claude", async () => {
+  const missing = { installed: false, version: null, connected: false, connectedElsewhere: false, path: null, error: null };
+  vi.mocked(ipc.claudeStatus).mockResolvedValue(missing);
+  await show();
+  await vi.waitFor(() => expect(document.querySelector("textarea")).toBeNull());
+  vi.mocked(ipc.claudeStatus).mockResolvedValue({ ...missing, installed: true, version: "2", connected: true });
+  await aiStatus.refresh();
+  flushSync();
+  expect(document.querySelector("textarea")).not.toBeNull();
+  expect(document.body.textContent).not.toContain("not installed");
+});
+
+it("visible_list_refreshes_after_a_run_ends", async () => {
+  await show();
+  vi.mocked(ipc.aiVisibleConnections).mockResolvedValue([{ connectionId: "c9", label: "other", passwordSaved: true }]);
+  await aiChat.send("hi", null);
+  await vi.waitFor(() => expect(aiStatus.visible.map((v) => v.label)).toEqual(["other"]));
 });
