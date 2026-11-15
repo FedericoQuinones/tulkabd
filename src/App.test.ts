@@ -3,7 +3,11 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async (cmd: string) => (cmd.startsWith("list_") ? [] : null)),
+  invoke: vi.fn(async (cmd: string, args?: { connectionId?: string; password?: string | null }) => {
+    // A connection whose id starts with "p" has no password saved: the backend asks for it.
+    if (cmd === "open_session" && args?.connectionId?.startsWith("p") && args.password == null) throw "password_required";
+    return cmd.startsWith("list_") ? [] : null;
+  }),
   Channel: class {},
 }));
 vi.mock("@tauri-apps/api/window", () => ({

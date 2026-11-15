@@ -19,6 +19,7 @@ vi.mock("../ipc", () => ({
   deleteFolder: vi.fn(),
   listConnections: vi.fn(),
   saveConnection: vi.fn(),
+  saveRememberedPassword: vi.fn(),
   deleteConnection: vi.fn(),
   onAppEvent: vi.fn(),
   openSession: vi.fn(),
@@ -239,6 +240,31 @@ test("password_required asks for a password and retries with it", async () => {
   expect(explorer.passwordRequest).toBeNull();
   expect(ipc.connectExplorer).toHaveBeenLastCalledWith("c2", "secret");
   expect(explorer.state("c2").status).toBe("connected");
+});
+
+test("a typed password is saved once the Explorer connected, only when asked", async () => {
+  vi.mocked(ipc.saveRememberedPassword).mockResolvedValue({ connection: conn("c2", "Prod", null), keyringUnavailable: false, secretOrphaned: false });
+  const info = { server: { version: "16", user: "sa", singleDatabase: false }, databases: [] };
+  vi.mocked(ipc.connectExplorer).mockRejectedValueOnce("password_required").mockResolvedValueOnce(info);
+  await explorer.expand("c2");
+  await explorer.submitPassword("secret", true);
+  await flush();
+  expect(ipc.saveRememberedPassword).toHaveBeenCalledWith("c2");
+
+  vi.mocked(ipc.saveRememberedPassword).mockClear();
+  vi.mocked(ipc.connectExplorer).mockRejectedValueOnce("password_required").mockResolvedValueOnce(info);
+  await explorer.connect("c2");
+  await explorer.submitPassword("secret", false);
+  await flush();
+  expect(ipc.saveRememberedPassword).not.toHaveBeenCalled();
+});
+
+test("a typed password that fails to connect is not saved", async () => {
+  vi.mocked(ipc.connectExplorer).mockRejectedValueOnce("password_required").mockRejectedValueOnce("authentication failed: Login failed");
+  await explorer.expand("c2");
+  await explorer.submitPassword("bad", true);
+  await flush();
+  expect(ipc.saveRememberedPassword).not.toHaveBeenCalled();
 });
 
 test("cancelling the password prompt leaves the connection offline", async () => {

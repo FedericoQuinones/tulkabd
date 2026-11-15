@@ -63,6 +63,17 @@ class ConnectionStore {
     return result;
   }
 
+  /** Saves the password just typed in the prompt; without a keychain it is only kept until the app closes. */
+  async savePassword(id: string): Promise<void> {
+    try {
+      const result = await ipc.saveRememberedPassword(id);
+      if (result.keyringUnavailable) this.warning = t("password.keyringUnavailable");
+    } catch (e) {
+      this.warning = t("password.saveFailed", { error: String(e) });
+    }
+    await this.refresh();
+  }
+
   /**
    * Saves a guard level for good and mirrors it here (the saved level also ends the
    * until-restart override). Resolves with the previous level, for undo.

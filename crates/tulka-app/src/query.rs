@@ -15,7 +15,7 @@ use tulka_core::{
 };
 use tulka_store::RunLogOutcome;
 
-use crate::connections::{blocking, connect_params, resolve_password};
+use crate::connections::{blocking, connect_params, note_login, resolve_password};
 use crate::results::{
     display_cell, ByteBudget, PushOutcome, ResultBuffer, Selection, ViewSpec, CELLS_CAPPED_WARNING,
     MAX_RUN_BYTES,
@@ -73,15 +73,17 @@ pub async fn open_session(
         .find(|c| c.id == connection_id)
         .cloned()
         .ok_or_else(|| NOT_FOUND.to_string())?;
+    let typed = password.clone();
     let password = resolve_password(state, &conn, password).await?;
     let driver = state.driver(&conn.driver)?;
     let database = database.filter(|d| !d.is_empty());
     let chosen_database = database.is_some();
 
-    let mut session = driver
+    let connected = driver
         .connect(&connect_params(&conn, password, database))
-        .await
-        .map_err(|e| e.to_string())?;
+        .await;
+    note_login(state, &conn.id, typed.as_deref(), &connected);
+    let mut session = connected.map_err(|e| e.to_string())?;
     let server = session.server_info().await.map_err(|e| e.to_string())?;
     let mut databases = session.list_databases().await.map_err(|e| e.to_string())?;
     if let DatabaseScope::Selected { names } = &conn.databases {

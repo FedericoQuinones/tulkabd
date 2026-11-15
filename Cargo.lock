@@ -5033,6 +5033,7 @@ dependencies = [
  "tulka-mssql",
  "tulka-store",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

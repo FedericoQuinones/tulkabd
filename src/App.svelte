@@ -319,7 +319,7 @@
     <PasswordPrompt
       connection={tabs.passwordRequest.conn}
       oncancel={() => tabs.cancelPassword()}
-      onsubmit={(pw) => void tabs.submitPassword(pw)}
+      onsubmit={(pw, save) => void tabs.submitPassword(pw, save)}
     />
   {/key}
 {:else if explorer.passwordRequest}
@@ -327,7 +327,7 @@
     <PasswordPrompt
       connection={explorer.passwordRequest.conn}
       oncancel={() => explorer.cancelPassword()}
-      onsubmit={(pw) => void explorer.submitPassword(pw)}
+      onsubmit={(pw, save) => void explorer.submitPassword(pw, save)}
     />
   {/key}
 {/if}

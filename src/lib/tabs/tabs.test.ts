@@ -3,6 +3,7 @@ import type { ConnectionConfig, RunSummary } from "../ipc";
 
 vi.mock("../ipc", () => ({
   openSession: vi.fn(),
+  saveRememberedPassword: vi.fn(),
   closeSession: vi.fn(),
   useDatabase: vi.fn(),
   runQuery: vi.fn(),
@@ -46,7 +47,11 @@ beforeEach(async () => {
   vi.resetAllMocks();
   vi.mocked(ipc.closeSession).mockResolvedValue();
   vi.mocked(ipc.logCancelledRun).mockResolvedValue();
-  vi.mocked(ipc.openSession).mockResolvedValue(info);
+  // The backend asks for the password of c2 until one is typed.
+  vi.mocked(ipc.openSession).mockImplementation(async (_tab, id, _db, pw) => {
+    if (id === "c2" && pw === undefined) throw "password_required";
+    return info;
+  });
   vi.mocked(ipc.runQuery).mockResolvedValue(ok);
   vi.mocked(ipc.transactionCount).mockResolvedValue(0);
   vi.mocked(ipc.endTransactions).mockResolvedValue();
@@ -171,11 +176,35 @@ test("newTab with no tabs opens an unbound tab", () => {
 test("a connection without a saved password asks for it before opening", async () => {
   const id = tabs.open({ kind: "query", connectionId: "c2" });
   await flush();
-  expect(ipc.openSession).not.toHaveBeenCalled();
+  expect(ipc.openSession).toHaveBeenCalledWith(id, "c2", undefined, undefined);
   expect(tabs.passwordRequest?.tabId).toBe(id);
   await tabs.submitPassword("pw");
-  expect(ipc.openSession).toHaveBeenCalledWith(id, "c2", undefined, "pw");
+  expect(ipc.openSession).toHaveBeenLastCalledWith(id, "c2", undefined, "pw");
   expect(tabs.passwordRequest).toBeNull();
+});
+
+test("a typed password is saved after the connect works, only when asked", async () => {
+  vi.mocked(ipc.saveRememberedPassword).mockResolvedValue({ connection: nopw, keyringUnavailable: false, secretOrphaned: false });
+  vi.mocked(ipc.listConnections).mockResolvedValue([conn, nopw]);
+  const id = tabs.open({ kind: "query", connectionId: "c2" });
+  await flush();
+  await tabs.submitPassword("pw", true);
+  expect(ipc.saveRememberedPassword).toHaveBeenCalledWith("c2");
+
+  vi.mocked(ipc.saveRememberedPassword).mockClear();
+  const other = tabs.open({ kind: "query", connectionId: "c2" });
+  await flush();
+  await tabs.submitPassword("pw", false);
+  expect(ipc.saveRememberedPassword).not.toHaveBeenCalled();
+  expect(other).not.toBe(id);
+});
+
+test("a typed password that fails to connect is not saved", async () => {
+  tabs.open({ kind: "query", connectionId: "c2" });
+  await flush();
+  vi.mocked(ipc.openSession).mockRejectedValueOnce("authentication failed: Login failed");
+  await tabs.submitPassword("bad", true);
+  expect(ipc.saveRememberedPassword).not.toHaveBeenCalled();
 });
 
 test("password_required from the backend raises the prompt", async () => {

@@ -92,6 +92,8 @@ pub struct AppState {
     /// Connections whose guard is switched off until the app closes. Only
     /// held for short, non-async critical sections.
     pub(crate) guard_off_session: std::sync::Mutex<HashSet<String>>,
+    /// Passwords typed in the prompt, reused until the app closes.
+    pub(crate) remembered: RememberedPasswords,
     /// Every statement run, with where it ran; see [`crate::runlog`].
     pub(crate) runlog: Arc<RunLogStore>,
     /// Highest run log id already looked at for AI entries; `-1` until the
@@ -158,6 +160,7 @@ impl AppState {
             queries: SavedQueries::unavailable(),
             files: AllowedFiles::default(),
             guard_off_session: std::sync::Mutex::default(),
+            remembered: RememberedPasswords::default(),
             runlog: Arc::new(RunLogStore::in_memory()),
             ai_runs_seen: AtomicI64::new(-1),
         })
@@ -185,6 +188,7 @@ impl AppState {
             queries: SavedQueries::unavailable(),
             files: AllowedFiles::default(),
             guard_off_session: std::sync::Mutex::default(),
+            remembered: RememberedPasswords::default(),
             runlog: Arc::new(RunLogStore::in_memory()),
             ai_runs_seen: AtomicI64::new(-1),
         }
@@ -291,5 +295,44 @@ impl AppState {
 
     pub(crate) fn new_generation(&self) -> u64 {
         self.next_generation.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// Passwords typed in the prompt, kept in memory for this run only: per
+/// connection id, never written anywhere and wiped when forgotten or dropped.
+#[derive(Default)]
+pub(crate) struct RememberedPasswords(std::sync::Mutex<HashMap<String, Secret>>);
+
+/// A password whose bytes are overwritten on drop and that never prints.
+struct Secret(String);
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
+
+impl std::fmt::Debug for RememberedPasswords {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RememberedPasswords(..)")
+    }
+}
+
+impl RememberedPasswords {
+    fn map(&self) -> MutexGuard<'_, HashMap<String, Secret>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn remember(&self, id: &str, password: &str) {
+        self.map()
+            .insert(id.to_owned(), Secret(password.to_owned()));
+    }
+
+    pub(crate) fn get(&self, id: &str) -> Option<String> {
+        self.map().get(id).map(|s| s.0.clone())
+    }
+
+    pub(crate) fn forget(&self, id: &str) {
+        self.map().remove(id);
     }
 }

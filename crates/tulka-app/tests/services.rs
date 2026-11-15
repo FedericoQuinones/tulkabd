@@ -2629,3 +2629,259 @@ async fn save_results_rejects_unknown_results_and_missing_folders() {
     );
     assert!(!path.exists());
 }
+
+// ------------------------------------------------- remembered typed password
+
+/// A fixture with one connection saved without a password.
+async fn unsaved() -> (Fixture, ConnectionConfig) {
+    unsaved_in(Environment::Local).await
+}
+
+/// Like [`unsaved`], for a connection in `environment`.
+async fn unsaved_in(environment: Environment) -> (Fixture, ConnectionConfig) {
+    let f = fixture(Arc::new(MemoryStore::default()));
+    let mut conn = new_conn();
+    conn.environment = environment;
+    let saved = save_connection(&f.state, conn, None)
+        .await
+        .unwrap()
+        .connection;
+    (f, saved)
+}
+
+/// Logs in a tab with the right password typed.
+async fn type_password(f: &Fixture, id: &str) {
+    open_session(
+        &f.state,
+        "t1".into(),
+        id.into(),
+        None,
+        Some(PASSWORD.into()),
+    )
+    .await
+    .unwrap();
+}
+
+async fn needs_password(f: &Fixture, id: &str) -> bool {
+    open_session(&f.state, "probe".into(), id.into(), None, None)
+        .await
+        .is_err_and(|e| e == PASSWORD_REQUIRED)
+}
+
+#[tokio::test]
+async fn a_typed_password_is_reused_without_asking_again() {
+    let (f, conn) = unsaved().await;
+    assert!(needs_password(&f, &conn.id).await);
+    type_password(&f, &conn.id).await;
+    // Another tab and the Explorer need no prompt now.
+    open_session(&f.state, "t2".into(), conn.id.clone(), None, None)
+        .await
+        .unwrap();
+    connect_explorer(&f.state, conn.id.clone(), None)
+        .await
+        .unwrap();
+    // Nothing reached the keychain or the config.
+    assert!(f.secrets.get(&conn.id).unwrap().is_none());
+    assert!(!list_connections(&f.state).await[0].password_saved);
+}
+
+#[tokio::test]
+async fn a_password_typed_for_the_explorer_is_shared_with_tabs() {
+    let (f, conn) = unsaved().await;
+    connect_explorer(&f.state, conn.id.clone(), Some(PASSWORD.into()))
+        .await
+        .unwrap();
+    open_session(&f.state, "t1".into(), conn.id, None, None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_wrong_password_is_not_remembered() {
+    let (f, conn) = unsaved().await;
+    let err = open_session(
+        &f.state,
+        "t1".into(),
+        conn.id.clone(),
+        None,
+        Some("bad".into()),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("authentication failed"), "{err}");
+    assert!(needs_password(&f, &conn.id).await);
+}
+
+#[tokio::test]
+async fn a_remembered_password_is_forgotten_after_an_authentication_failure() {
+    let driver = Arc::new(ChangingDriver {
+        accept: Mutex::new("first".into()),
+    });
+    let f = fixture_with(Arc::new(MemoryStore::default()), vec![driver.clone()]);
+    let mut c = new_conn();
+    c.driver = "changing".into();
+    let conn = save_connection(&f.state, c, None).await.unwrap().connection;
+    open_session(
+        &f.state,
+        "t1".into(),
+        conn.id.clone(),
+        None,
+        Some("first".into()),
+    )
+    .await
+    .unwrap();
+    open_session(&f.state, "t2".into(), conn.id.clone(), None, None)
+        .await
+        .unwrap();
+    // The password changed on the server: the next login fails and the one
+    // after asks again instead of retrying the old one.
+    *driver.accept.lock().unwrap() = "second".into();
+    let err = open_session(&f.state, "t3".into(), conn.id.clone(), None, None)
+        .await
+        .unwrap_err();
+    assert!(err.contains("authentication failed"), "{err}");
+    assert!(needs_password(&f, &conn.id).await);
+}
+
+/// Accepts only the password currently set in `accept`.
+struct ChangingDriver {
+    accept: Mutex<String>,
+}
+
+#[async_trait]
+impl Driver for ChangingDriver {
+    fn id(&self) -> &'static str {
+        "changing"
+    }
+
+    async fn connect(&self, p: &ConnectParams) -> Result<Box<dyn Session>, DriverError> {
+        if p.password != *self.accept.lock().unwrap() {
+            return Err(DriverError::AuthFailed("Login failed".into()));
+        }
+        let mut ok = p.clone();
+        ok.password = PASSWORD.into();
+        FakeDriver.connect(&ok).await
+    }
+}
+
+#[tokio::test]
+async fn a_remembered_password_is_forgotten_when_the_target_changes() {
+    let edits: Vec<fn(&mut ConnectionConfig)> = vec![
+        |c| c.server = "other-host".into(),
+        |c| c.port = 1444,
+        |c| c.user = "other".into(),
+        |c| c.encrypt = false,
+        |c| c.trust_server_certificate = true,
+    ];
+    // Production: on Local, weaker TLS keeps the password (see the next test).
+    for edit in edits {
+        let (f, conn) = unsaved_in(Environment::Production).await;
+        type_password(&f, &conn.id).await;
+        let mut edited = conn.clone();
+        edit(&mut edited);
+        save_connection(&f.state, edited, None).await.unwrap();
+        assert!(needs_password(&f, &conn.id).await);
+    }
+}
+
+#[tokio::test]
+async fn a_local_connection_keeps_its_remembered_password_with_weaker_tls() {
+    let (f, conn) = unsaved().await;
+    type_password(&f, &conn.id).await;
+    let mut edited = conn.clone();
+    edited.encrypt = false;
+    edited.trust_server_certificate = true;
+    save_connection(&f.state, edited, None).await.unwrap();
+    assert!(!needs_password(&f, &conn.id).await);
+}
+
+#[tokio::test]
+async fn a_remembered_password_survives_an_edit_that_keeps_the_target() {
+    let (f, conn) = unsaved().await;
+    type_password(&f, &conn.id).await;
+    let mut renamed = conn.clone();
+    renamed.name = "Renamed".into();
+    save_connection(&f.state, renamed, None).await.unwrap();
+    assert!(!needs_password(&f, &conn.id).await);
+}
+
+#[tokio::test]
+async fn a_remembered_password_is_forgotten_when_the_connection_is_deleted() {
+    let (f, conn) = unsaved().await;
+    type_password(&f, &conn.id).await;
+    delete_connection(&f.state, conn.id.clone()).await.unwrap();
+    // The same id coming back must not inherit it.
+    save_connection(&f.state, conn.clone(), None).await.unwrap();
+    assert!(needs_password(&f, &conn.id).await);
+}
+
+#[tokio::test]
+async fn test_connection_never_sends_a_remembered_password_elsewhere() {
+    let (f, conn) = unsaved().await;
+    type_password(&f, &conn.id).await;
+    test_connection(&f.state, conn.clone(), None).await.unwrap();
+    let mut pasted = conn.clone();
+    pasted.server = "evil-host".into();
+    let err = test_connection(&f.state, pasted.clone(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err, PASSWORD_REQUIRED);
+    let err = list_server_databases(&f.state, pasted, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err, PASSWORD_REQUIRED);
+}
+
+#[tokio::test]
+async fn saving_the_remembered_password_stores_it_and_sets_the_flag() {
+    let (f, conn) = unsaved().await;
+    // Nothing typed yet: nothing to save.
+    let err = save_remembered_password(&f.state, conn.id.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(err, PASSWORD_REQUIRED);
+    type_password(&f, &conn.id).await;
+    assert!(f.secrets.get(&conn.id).unwrap().is_none());
+
+    let result = save_remembered_password(&f.state, conn.id.clone())
+        .await
+        .unwrap();
+    assert!(result.connection.password_saved && !result.keyring_unavailable);
+    assert_eq!(f.secrets.get(&conn.id).unwrap().as_deref(), Some(PASSWORD));
+    assert!(list_connections(&f.state).await[0].password_saved);
+}
+
+#[tokio::test]
+async fn a_wrong_password_is_never_saved() {
+    let (f, conn) = unsaved().await;
+    open_session(
+        &f.state,
+        "t1".into(),
+        conn.id.clone(),
+        None,
+        Some("bad".into()),
+    )
+    .await
+    .unwrap_err();
+    assert!(save_remembered_password(&f.state, conn.id.clone())
+        .await
+        .is_err());
+    assert!(f.secrets.get(&conn.id).unwrap().is_none());
+    assert!(!list_connections(&f.state).await[0].password_saved);
+}
+
+#[tokio::test]
+async fn saving_without_a_keychain_keeps_the_password_in_memory_only() {
+    let f = fixture(Arc::new(UnavailableStore));
+    let conn = save_connection(&f.state, new_conn(), None)
+        .await
+        .unwrap()
+        .connection;
+    type_password(&f, &conn.id).await;
+    let result = save_remembered_password(&f.state, conn.id.clone())
+        .await
+        .unwrap();
+    assert!(result.keyring_unavailable && !result.connection.password_saved);
+    assert!(!list_connections(&f.state).await[0].password_saved);
+    assert!(!needs_password(&f, &conn.id).await);
+}

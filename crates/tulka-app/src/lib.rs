@@ -31,7 +31,7 @@ pub use connections::{
     copy_connection_string, create_folder, delete_connection, delete_folder, duplicate_connection,
     get_preferences, list_connections, list_expanded, list_folders, list_server_databases,
     move_connection, move_folder, parse_connection_string, rename_folder, save_connection,
-    set_expanded, set_preferences, set_zoom, test_connection,
+    save_remembered_password, set_expanded, set_preferences, set_zoom, test_connection,
 };
 pub use explorer::{
     clear_metadata_cache, completion_metadata, connect_explorer, disconnect_explorer,
