@@ -12,7 +12,6 @@
   let visible = $state<AiVisible[]>([]);
   let status = $state<ClaudeStatus | null>(null);
   let draft = $state("");
-  let expanded = $state<Record<string, boolean>>({});
   let copied = $state<string | null>(null);
   let logEl = $state<HTMLElement>();
   let stick = true;
@@ -73,7 +72,7 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       submit();
     }
@@ -118,8 +117,6 @@
     const database = str(item.input.database);
     tabs.open({ kind: "query", connectionId, database: database || undefined, sql: str(item.input.sql) });
   }
-
-  
 </script>
 
 <div class="wrap">
@@ -132,7 +129,7 @@
     {#if aiChat.items.length === 0}
       <p class="empty">{t("ai.chat.example")}</p>
     {/if}
-    {#each aiChat.items as item, n (n)}
+    {#each aiChat.items as item, n (item.kind === "tool" ? `tool:${item.id}` : n)}
       {#if item.kind === "user"}
         <div class="user">{item.text}</div>
       {:else if item.kind === "assistant"}
@@ -157,9 +154,9 @@
           {/each}
         </div>
       {:else if item.kind === "tool"}
-        {@const open = expanded[item.id] === true}
+        {@const open = aiChat.expanded[item.id] === true}
         <div class="tool">
-          <button type="button" class="trow" aria-label={toolLabel(item)} aria-expanded={open} onclick={() => (expanded[item.id] = !open)}>
+          <button type="button" class="trow" aria-label={toolLabel(item)} aria-expanded={open} onclick={() => (aiChat.expanded[item.id] = !open)}>
             <span class="icon" aria-hidden="true">{open ? "▾" : "▸"}</span>
             <span class="tlabel">{toolLabel(item)}</span>
             {#if item.ok === false}<span class="bad">{t("ai.chat.failedTool")}</span>{/if}

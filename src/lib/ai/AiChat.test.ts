@@ -41,8 +41,8 @@ function type(text: string) {
   box().dispatchEvent(new Event("input", { bubbles: true }));
   flushSync();
 }
-function key(k: string, shiftKey = false) {
-  const ev = new KeyboardEvent("keydown", { key: k, shiftKey, bubbles: true, cancelable: true });
+function key(k: string, shiftKey = false, extra: KeyboardEventInit = {}) {
+  const ev = new KeyboardEvent("keydown", { key: k, shiftKey, bubbles: true, cancelable: true, ...extra });
   box().dispatchEvent(ev);
   flushSync();
   return ev;
@@ -154,4 +154,35 @@ it("new_chat_clears", async () => {
   button("New chat")!.click();
   await vi.waitFor(() => expect(document.body.textContent).not.toContain("old"));
   expect(document.body.textContent).toContain("Ask something like");
+});
+
+it("enter_during_composition_does_not_send", async () => {
+  await show();
+  type("hello");
+  expect(key("Enter", false, { isComposing: true }).defaultPrevented).toBe(false);
+  expect(key("Enter", false, { keyCode: 229 }).defaultPrevented).toBe(false);
+  expect(ipc.aiChatSend).not.toHaveBeenCalled();
+});
+
+it("open_in_tab_without_database", async () => {
+  aiChat.items.push({ kind: "tool", id: "t1", tool: "run_query", input: { connection: "localtest", sql: "SELECT 2" } });
+  await show();
+  button("run_query · localtest")!.click();
+  flushSync();
+  expect(button("Open in tab")!.disabled).toBe(false);
+  button("Open in tab")!.click();
+  expect(open).toHaveBeenCalledWith({ kind: "query", connectionId: "c1", database: undefined, sql: "SELECT 2" });
+});
+
+it("expanded_tool_rows_survive_remount_and_reset", async () => {
+  aiChat.items.push({ kind: "tool", id: "t1", tool: "run_query", input: { connection: "localtest", sql: "SELECT 3" } });
+  await show();
+  button("run_query · localtest")!.click();
+  flushSync();
+  unmount(cmp!);
+  document.body.innerHTML = "";
+  await show();
+  expect(document.body.textContent).toContain("SELECT 3");
+  await aiChat.reset();
+  expect(aiChat.expanded).toEqual({});
 });

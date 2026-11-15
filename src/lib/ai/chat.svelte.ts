@@ -42,6 +42,8 @@ export class AiChat {
   running = $state(false);
   sessionId = $state<string | null>(null);
   useContext = $state(true);
+  /** Tool rows the user opened, by tool call id. */
+  expanded = $state<Record<string, boolean>>({});
   private chatId = crypto.randomUUID();
 
   apply(ev: ChatEvent): void {
@@ -122,6 +124,7 @@ export class AiChat {
     const wasRunning = this.running;
     this.chatId = crypto.randomUUID();
     this.items = [];
+    this.expanded = {};
     this.running = false;
     this.sessionId = null;
     if (wasRunning) await ipc.aiChatStop(old).catch(() => {});
