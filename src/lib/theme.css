@@ -1,6 +1,8 @@
 @import "./fonts.css";
 
 :root {
+  /* Native controls (select, number spinners, scrollbars) are drawn dark, so their text stays readable. */
+  color-scheme: dark;
   --ground: #171719;
   --surface: #131217;
   --raised: #212023;
