@@ -543,19 +543,26 @@ async fn reusable_saved_password(state: &AppState, conn: &ConnectionConfig) -> b
 /// The saved password of `stored` may be used to log in as `requested` only
 /// when it targets the same server, port and user (the instance is part of
 /// the server name) and the TLS settings are not weaker: encryption not
-/// turned off and certificate trust not turned on.
+/// turned off and certificate trust not turned on. When both the stored and
+/// the requested connection are Local, weaker TLS does not matter: a local
+/// server is typically a throwaway instance with a self-signed certificate.
+/// Requiring the stored environment to be Local too means that moving a
+/// Production connection to Local cannot be used to weaken TLS.
 pub(crate) fn may_reuse_saved_password(
     stored: &ConnectionConfig,
     requested: &ConnectionConfig,
 ) -> bool {
+    let both_local = stored.environment == tulka_core::Environment::Local
+        && requested.environment == tulka_core::Environment::Local;
     stored
         .server
         .trim()
         .eq_ignore_ascii_case(requested.server.trim())
         && stored.port == requested.port
         && stored.user == requested.user
-        && (requested.encrypt || !stored.encrypt)
-        && (!requested.trust_server_certificate || stored.trust_server_certificate)
+        && (both_local
+            || ((requested.encrypt || !stored.encrypt)
+                && (!requested.trust_server_certificate || stored.trust_server_certificate)))
 }
 
 /// Connects with `conn`, reads the server information and disconnects.
@@ -694,5 +701,58 @@ mod tests {
         weak_stored.trust_server_certificate = true;
         assert!(may_reuse_saved_password(&weak_stored, &weak_stored.clone()));
         assert!(may_reuse_saved_password(&weak_stored, &s));
+    }
+
+    fn local() -> ConnectionConfig {
+        let mut c = stored();
+        c.environment = Environment::Local;
+        c
+    }
+
+    #[test]
+    fn local_connections_keep_the_saved_password_with_weaker_tls() {
+        let s = local();
+        let mut weaker = s.clone();
+        weaker.encrypt = false;
+        weaker.trust_server_certificate = true;
+        assert!(may_reuse_saved_password(&s, &weaker));
+        // The target must still match.
+        weaker.server = "other".into();
+        assert!(!may_reuse_saved_password(&s, &weaker));
+        let mut weaker = s.clone();
+        weaker.trust_server_certificate = true;
+        weaker.port = 1444;
+        assert!(!may_reuse_saved_password(&s, &weaker));
+        let mut weaker = s.clone();
+        weaker.trust_server_certificate = true;
+        weaker.user = "admin".into();
+        assert!(!may_reuse_saved_password(&s, &weaker));
+    }
+
+    #[test]
+    fn weaker_tls_still_drops_the_password_outside_local() {
+        for env in [
+            Environment::Production,
+            Environment::Staging,
+            Environment::Test,
+        ] {
+            let mut s = stored();
+            s.environment = env;
+            let mut weaker = s.clone();
+            weaker.trust_server_certificate = true;
+            assert!(!may_reuse_saved_password(&s, &weaker));
+        }
+        // Production edited into Local while weakening TLS.
+        let s = stored();
+        let mut weaker = s.clone();
+        weaker.environment = Environment::Local;
+        weaker.trust_server_certificate = true;
+        assert!(!may_reuse_saved_password(&s, &weaker));
+        // Local edited into Production while weakening TLS.
+        let s = local();
+        let mut weaker = s.clone();
+        weaker.environment = Environment::Production;
+        weaker.encrypt = false;
+        assert!(!may_reuse_saved_password(&s, &weaker));
     }
 }
