@@ -43,3 +43,9 @@ test("headings_and_unclosed_fence", () => {
     { kind: "code", lang: "", text: "abc" },
   ]);
 });
+
+test("fence_line_with_many_spaces_is_fast", () => {
+  const start = Date.now();
+  parseMarkdown("```" + " ".repeat(10000) + "!");
+  expect(Date.now() - start).toBeLessThan(500);
+});

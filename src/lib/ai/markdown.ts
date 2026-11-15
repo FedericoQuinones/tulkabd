@@ -35,13 +35,13 @@ export function parseMarkdown(src: string): Block[] {
   };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const fence = /^\s*```\s*([\w+-]*)\s*$/.exec(line);
+    const fence = /^\s*```(?:\s*([\w+-]+))?\s*$/.exec(line);
     if (fence) {
       flush();
       const body: string[] = [];
       i++;
       while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) body.push(lines[i++]);
-      blocks.push({ kind: "code", lang: fence[1], text: body.join("\n") });
+      blocks.push({ kind: "code", lang: fence[1] ?? "", text: body.join("\n") });
       continue;
     }
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);

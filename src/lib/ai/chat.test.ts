@@ -116,3 +116,45 @@ test("context_prefix_only_for_visible_connection", async () => {
   await c.send("q", null);
   expect(send.mock.calls[3][2]).toBe("q");
 });
+
+test("second_send_while_running_is_ignored", async () => {
+  let release!: () => void;
+  send.mockImplementationOnce(() => new Promise<void>((r) => (release = r)));
+  const c = new AiChat();
+  const p = c.send("one", null);
+  await c.send("two", null);
+  await c.send("   ", null);
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(c.items).toHaveLength(1);
+  expect(c.running).toBe(true);
+  release();
+  await p;
+});
+
+test("streaming_cleared_on_every_assistant_item", () => {
+  const c = new AiChat();
+  c.items.push({ kind: "assistant", text: "a", streaming: true }, { kind: "tool", id: "t", tool: "x", input: {} });
+  c.apply({ kind: "text", text: "b" });
+  expect(c.items.filter((i) => i.kind === "assistant" && i.streaming)).toEqual([]);
+  c.items.push({ kind: "assistant", text: "c", streaming: true });
+  c.apply({ kind: "done", durationMs: 1, isError: false, result: "" });
+  expect(c.items.filter((i) => i.kind === "assistant" && i.streaming)).toEqual([]);
+});
+
+test("rejection_text_and_empty_error", async () => {
+  send.mockRejectedValueOnce("busy");
+  const c = new AiChat();
+  await c.send("hi", null);
+  expect((c.items.at(-1) as { text: string }).text).toMatch(/still answering/);
+  send.mockRejectedValueOnce(new Error("boom"));
+  await c.send("hi", null);
+  expect((c.items.at(-1) as { text: string }).text).toBe("boom");
+  c.apply({ kind: "done", durationMs: 1, isError: true, result: "" });
+  expect((c.items.at(-1) as { text: string }).text).toBe("Claude Code ended with an error.");
+});
+
+test("prefix_quotes_awkward_names", async () => {
+  const c = new AiChat();
+  await c.send("q", { connectionLabel: 'a"b\nc', database: null });
+  expect(send.mock.calls[0][2]).toBe('[Context: the user is looking at connection "a\\"b\\nc".]\n\nq');
+});

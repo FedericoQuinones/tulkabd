@@ -21,14 +21,19 @@ export function contextFor(connectionId: string | null, database: string | null,
 }
 
 function prefix(ctx: ChatContext): string {
-  const db = ctx.database === null ? "" : `, database "${ctx.database}"`;
-  return `[Context: the user is looking at connection "${ctx.connectionLabel}"${db}.]\n\n`;
+  const db = ctx.database === null ? "" : `, database ${JSON.stringify(ctx.database)}`;
+  return `[Context: the user is looking at connection ${JSON.stringify(ctx.connectionLabel)}${db}.]\n\n`;
 }
 
 function failure(message: string): string {
   if (message === "stopped") return t("ai.chat.stopped");
   if (message === "claude_not_found") return t("ai.chat.notInstalled");
   return message;
+}
+
+function rejection(e: unknown): string {
+  if (e === "busy") return t("ai.chat.busy");
+  return e instanceof Error ? e.message : String(e);
 }
 
 /** The conversation with Claude Code shown in the AI panel. */
@@ -54,6 +59,7 @@ export class AiChat {
           last.text = ev.text;
           last.streaming = false;
         } else this.items.push({ kind: "assistant", text: ev.text, streaming: false });
+        this.settle();
         break;
       case "toolCall": {
         const input = ev.input && typeof ev.input === "object" ? (ev.input as Record<string, unknown>) : {};
@@ -70,16 +76,24 @@ export class AiChat {
       }
       case "done":
         this.running = false;
-        if (ev.isError) this.items.push({ kind: "error", text: ev.result });
+        this.settle();
+        if (ev.isError) this.items.push({ kind: "error", text: ev.result.trim() ? ev.result : t("ai.chat.endedWithError") });
         break;
       case "failed":
         this.running = false;
+        this.settle();
         this.items.push({ kind: "error", text: failure(ev.message) });
         break;
     }
   }
 
+  /** Marks every answer as finished writing. */
+  private settle(): void {
+    for (const i of this.items) if (i.kind === "assistant") i.streaming = false;
+  }
+
   async send(text: string, context: ChatContext | null): Promise<void> {
+    if (this.running || !text.trim()) return;
     const chatId = this.chatId;
     this.items.push({ kind: "user", text });
     this.running = true;
@@ -89,12 +103,11 @@ export class AiChat {
         if (chatId === this.chatId) this.apply(ev);
       });
     } catch (e) {
-      if (chatId === this.chatId) this.apply({ kind: "failed", message: String(e) });
+      if (chatId === this.chatId) this.apply({ kind: "failed", message: rejection(e) });
     } finally {
       if (chatId === this.chatId) {
         this.running = false;
-        const last = this.items[this.items.length - 1];
-        if (last?.kind === "assistant") last.streaming = false;
+        this.settle();
       }
     }
   }
