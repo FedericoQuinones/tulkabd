@@ -605,3 +605,27 @@ export const mcpSetup = () => invoke<McpSetup>("mcp_setup");
 /** Copies one of the setups to the clipboard. */
 export type McpSetupKind = "claude" | "json" | "vscode";
 export const copyMcpSetup = (kind: McpSetupKind) => invoke<void>("copy_mcp_setup", { kind });
+
+/** Claude Code on this computer and whether tulkabd is registered in it. */
+export interface ClaudeStatus {
+  installed: boolean;
+  version: string | null;
+  /** Registered in Claude Code and pointing at this tulkabd. */
+  connected: boolean;
+  /** Registered in Claude Code but pointing at another tulkabd. */
+  connectedElsewhere: boolean;
+  path: string | null;
+}
+/** A connection with read-only AI access, named as the assistant sees it. */
+export interface AiVisible {
+  connectionId: string;
+  label: string;
+  /** The keychain has the password, so the assistant can log in. */
+  passwordSaved: boolean;
+}
+export const claudeStatus = () => invoke<ClaudeStatus>("ai_claude_status");
+/** Registers tulkabd in Claude Code. Rejects with `claude_not_found` when it is not installed. */
+export const connectClaude = () => invoke<ClaudeStatus>("ai_connect_claude");
+/** Opens a terminal running Claude Code with the tulkabd tools. */
+export const openClaudeTerminal = () => invoke<void>("ai_open_terminal");
+export const aiVisibleConnections = () => invoke<AiVisible[]>("ai_visible_connections");

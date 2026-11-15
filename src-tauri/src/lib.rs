@@ -2,7 +2,8 @@ mod commands;
 mod events;
 
 use commands::{
-    connections as conn, explorer as ex, files, guard, queries, query, runlog, session, settings,
+    ai, connections as conn, explorer as ex, files, guard, queries, query, runlog, session,
+    settings,
 };
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -131,6 +132,11 @@ commands![
     settings::clear_metadata_cache,
     settings::mcp_setup,
     settings::copy_mcp_setup,
+    ai::ai_claude_status,
+    ai::ai_connect_claude,
+    ai::ai_open_terminal,
+    ai::ai_visible_connections,
+    ai::ai_open_install_docs,
 ];
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -245,6 +251,11 @@ mod tests {
     /// on purpose: none may add to the allowed `.sql` files (that is done only
     /// from the native dialog and drop events).
     const EXPECTED: &[&str] = &[
+        "ai::ai_claude_status",
+        "ai::ai_connect_claude",
+        "ai::ai_open_install_docs",
+        "ai::ai_open_terminal",
+        "ai::ai_visible_connections",
         "conn::copy_connection_string",
         "conn::create_folder",
         "conn::delete_connection",

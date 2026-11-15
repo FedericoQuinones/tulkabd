@@ -7,6 +7,7 @@ use tauri::AppHandle;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tulka_app::Clipboard;
 
+pub mod ai;
 pub mod connections;
 pub mod explorer;
 pub mod files;
