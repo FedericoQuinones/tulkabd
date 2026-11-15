@@ -62,4 +62,55 @@ mod tests {
             r#"{"kind":"indexIdle","connectionId":"c1"}"#
         );
     }
+
+    /// The strings below are the `ChatEvent` type declared in `src/lib/ipc.ts`.
+    #[test]
+    fn chat_events_match_the_ipc_contract() {
+        use tulka_app::ai::chat::ChatEvent;
+        let j = |ev: ChatEvent| serde_json::to_string(&ev).unwrap();
+        assert_eq!(
+            j(ChatEvent::Started {
+                session_id: "s".into()
+            }),
+            r#"{"kind":"started","sessionId":"s"}"#
+        );
+        assert_eq!(
+            j(ChatEvent::TextDelta { text: "a".into() }),
+            r#"{"kind":"textDelta","text":"a"}"#
+        );
+        assert_eq!(
+            j(ChatEvent::Text { text: "a".into() }),
+            r#"{"kind":"text","text":"a"}"#
+        );
+        assert_eq!(
+            j(ChatEvent::ToolCall {
+                id: "t".into(),
+                tool: "run_query".into(),
+                input: serde_json::json!({"sql":"SELECT 1"}),
+            }),
+            r#"{"kind":"toolCall","id":"t","tool":"run_query","input":{"sql":"SELECT 1"}}"#
+        );
+        assert_eq!(
+            j(ChatEvent::ToolResult {
+                id: "t".into(),
+                ok: true,
+                preview: "p".into()
+            }),
+            r#"{"kind":"toolResult","id":"t","ok":true,"preview":"p"}"#
+        );
+        assert_eq!(
+            j(ChatEvent::Done {
+                duration_ms: 5,
+                is_error: false,
+                result: "r".into()
+            }),
+            r#"{"kind":"done","durationMs":5,"isError":false,"result":"r"}"#
+        );
+        assert_eq!(
+            j(ChatEvent::Failed {
+                message: "m".into()
+            }),
+            r#"{"kind":"failed","message":"m"}"#
+        );
+    }
 }

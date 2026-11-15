@@ -61,6 +61,7 @@ use tulka_core::{
 use tulka_mssql::MssqlDriver;
 use tulka_store::{MetaCache, RunLogStore, SessionStore};
 
+use crate::ai::chat::ChatRuns;
 use crate::explorer::Explorer;
 use crate::files::AllowedFiles;
 use crate::queries::{QueriesStore, SavedQueries};
@@ -99,6 +100,8 @@ pub struct AppState {
     /// Highest run log id already looked at for AI entries; `-1` until the
     /// first poll fixes it to the current end of the log.
     pub(crate) ai_runs_seen: AtomicI64,
+    /// The in-app chats that are running.
+    pub chats: ChatRuns,
 }
 
 /// A result buffer shared between the run that fills it and the commands
@@ -163,6 +166,7 @@ impl AppState {
             remembered: RememberedPasswords::default(),
             runlog: Arc::new(RunLogStore::in_memory()),
             ai_runs_seen: AtomicI64::new(-1),
+            chats: ChatRuns::default(),
         })
     }
 
@@ -191,6 +195,7 @@ impl AppState {
             remembered: RememberedPasswords::default(),
             runlog: Arc::new(RunLogStore::in_memory()),
             ai_runs_seen: AtomicI64::new(-1),
+            chats: ChatRuns::default(),
         }
     }
 

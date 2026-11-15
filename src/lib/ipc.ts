@@ -633,3 +633,29 @@ export const openClaudeTerminal = () => invoke<void>("ai_open_terminal");
 export const aiVisibleConnections = () => invoke<AiVisible[]>("ai_visible_connections");
 /** Opens the Claude Code install page in the browser. */
 export const openClaudeInstallDocs = () => invoke<void>("ai_open_install_docs");
+
+/** One step of an in-app chat run, as `aiChatSend` reports it. */
+export type ChatEvent =
+  | { kind: "started"; sessionId: string }
+  /** A piece of the answer being written. */
+  | { kind: "textDelta"; text: string }
+  /** A whole text block; it replaces the deltas since the last `text` or `toolCall`. */
+  | { kind: "text"; text: string }
+  /** `tool` is the tool's name without the `mcp__tulkabd__` prefix. */
+  | { kind: "toolCall"; id: string; tool: string; input: unknown }
+  /** `preview` is at most 2000 characters. */
+  | { kind: "toolResult"; id: string; ok: boolean; preview: string }
+  | { kind: "done"; durationMs: number; isError: boolean; result: string }
+  /** `claude_not_found`, `stopped`, or what Claude Code said. */
+  | { kind: "failed"; message: string };
+/**
+ * Sends a message to Claude Code in the background (continuing `sessionId` when given) and
+ * reports each step to `onEvent`; resolves when the run ends. Rejects with `busy` while that chat runs.
+ */
+export const aiChatSend = (chatId: string, sessionId: string | null, text: string, onEvent: (e: ChatEvent) => void) => {
+  const channel = new Channel<ChatEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>("ai_chat_send", { chatId, sessionId, text, onEvent: channel });
+};
+/** Stops the run of a chat; its `aiChatSend` reports `failed` with `stopped`. */
+export const aiChatStop = (chatId: string) => invoke<void>("ai_chat_stop", { chatId });

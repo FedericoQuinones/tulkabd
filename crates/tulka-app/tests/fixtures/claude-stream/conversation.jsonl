@@ -1,0 +1,11 @@
+{"type":"system","subtype":"hook_started","hook_id":"h1","hook_name":"SessionStart"}
+{"type":"system","subtype":"init","session_id":"sess-0001","tools":["mcp__tulkabd__run_query"]}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_01"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me "}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"check."}}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Let me check."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01","name":"mcp__tulkabd__run_query","input":{"connection":"Sales","database":"shop","sql":"SELECT 1"}}]}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_01","content":[{"type":"text","text":"1 row\n1"}],"is_error":false}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"Done: one row.","duration_ms":1234,"session_id":"sess-0001"}
