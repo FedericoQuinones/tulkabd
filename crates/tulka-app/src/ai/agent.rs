@@ -459,11 +459,14 @@ pub fn open_claude_terminal() -> Result<(), String> {
     let invocation = terminal_invocation(terminal, &dir, &claude, &files.mcp_config)
         .map_err(|e| format!("{e}; run this in a terminal: {}", by_hand()))?;
     let mut cmd = std::process::Command::new(&terminal.program);
-    cmd.args(&invocation.args)
-        .current_dir(&dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    cmd.args(&invocation.args).current_dir(&dir);
+    // The console `cmd.exe` opens supplies its own standard handles; for the
+    // other launchers nothing is read or shown.
+    if invocation.raw_arg.is_none() {
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
