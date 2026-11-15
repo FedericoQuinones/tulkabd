@@ -95,7 +95,7 @@
     }
   }
 
-  const connectionIdOf = (item: ToolItem) => aiStatus.visible.find((v) => v.label === str(item.input.connection))?.connectionId;
+  const connectionIdOf = (item: ToolItem) => aiStatus.visible.find((v) => v.label.toLowerCase() === str(item.input.connection).toLowerCase())?.connectionId;
 
   function openInTab(item: ToolItem) {
     const connectionId = connectionIdOf(item);

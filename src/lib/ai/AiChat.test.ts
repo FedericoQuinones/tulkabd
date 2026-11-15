@@ -201,6 +201,16 @@ it("composer_returns_after_a_refresh_finds_claude", async () => {
   expect(document.body.textContent).not.toContain("not installed");
 });
 
+it("open_in_tab_matches_the_label_in_any_case", async () => {
+  aiChat.items.push({ kind: "tool", id: "t1", tool: "run_query", input: { connection: "LOCALTEST", sql: "SELECT 4" } });
+  await show();
+  button("run_query · LOCALTEST")!.click();
+  flushSync();
+  expect(button("Open in tab")!.disabled).toBe(false);
+  button("Open in tab")!.click();
+  expect(open).toHaveBeenCalledWith({ kind: "query", connectionId: "c1", database: undefined, sql: "SELECT 4" });
+});
+
 it("visible_list_refreshes_after_a_run_ends", async () => {
   await show();
   vi.mocked(ipc.aiVisibleConnections).mockResolvedValue([{ connectionId: "c9", label: "other", passwordSaved: true }]);
