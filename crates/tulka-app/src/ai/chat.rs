@@ -283,7 +283,7 @@ async fn run_registered(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::too_many_arguments)]
 async fn send_with(
     runs: &ChatRuns,
