@@ -749,15 +749,17 @@ export class TabsStore {
   }
 
   /** Opens (or reopens) the tab's session. The password prompt is raised through `passwordRequest`. */
-  async connectTab(id: string, conn: ConnectionConfig, password?: string, database?: string): Promise<void> {
+  async connectTab(
+    id: string,
+    conn: ConnectionConfig,
+    password?: string,
+    database?: string,
+    savePassword = false,
+  ): Promise<void> {
     const tab = this.list.find((x) => x.id === id);
     const pane = tab?.pane;
     if (!pane || pane.status === "connecting" || pane.status === "running") return;
     tab.connectError = null;
-    if (!conn.passwordSaved && password === undefined) {
-      this.request({ tabId: id, conn, database });
-      return;
-    }
     const result = await pane.open(conn, password, database);
     if (!this.list.some((x) => x.id === id)) {
       // Closed while connecting: do not leave the session behind.
@@ -769,6 +771,7 @@ export class TabsStore {
     } else if (result.kind === "error") {
       tab.connectError = t("explorer.connectFailed", { error: result.error });
     } else if (result.kind === "ok") {
+      if (savePassword && password !== undefined) await connections.savePassword(conn.id);
       // Bound to a database now: "pick a database" no longer holds.
       if (pane.notice === t("queries.pickDatabase")) this.clearSaveNotice(pane);
       const p = this.pending.get(id);
@@ -777,10 +780,10 @@ export class TabsStore {
     }
   }
 
-  async submitPassword(password: string): Promise<void> {
+  async submitPassword(password: string, save = false): Promise<void> {
     const req = this.passwordRequest;
     if (req) this.dropRequest(req.tabId);
-    if (req) await this.connectTab(req.tabId, req.conn, password, req.database);
+    if (req) await this.connectTab(req.tabId, req.conn, password, req.database, save);
   }
 
   cancelPassword() {

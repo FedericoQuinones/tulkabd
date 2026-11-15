@@ -304,6 +304,10 @@ export const saveConnection = (conn: ConnectionConfig, password?: string) =>
 
 export const deleteConnection = (id: string) => invoke<boolean>("delete_connection", { id });
 
+/** Stores the password typed in the prompt, once a login with it worked; the backend holds it, not the UI. */
+export const saveRememberedPassword = (id: string) =>
+  invoke<SaveConnectionResult>("save_remembered_password", { id });
+
 export const testConnection = (conn: ConnectionConfig, password?: string) =>
   invoke<ServerInfo>("test_connection", { conn, password: password ?? null });
 

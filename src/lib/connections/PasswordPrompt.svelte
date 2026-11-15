@@ -6,13 +6,14 @@
 
   interface Props {
     connection: ConnectionConfig;
-    /** Called with the typed password; it is used for this connection attempt only. */
-    onsubmit: (password: string) => void;
+    /** Called with the typed password and whether to save it once the connect works. */
+    onsubmit: (password: string, save: boolean) => void;
     oncancel: () => void;
   }
   let { connection, onsubmit, oncancel }: Props = $props();
 
   let password = $state("");
+  let save = $state(true);
   let input: HTMLInputElement;
   onMount(() => input.focus());
 </script>
@@ -31,7 +32,7 @@
   <form
     onsubmit={(e) => {
       e.preventDefault();
-      onsubmit(password);
+      onsubmit(password, save);
     }}
   >
     <div class="head" id="pw-title">
@@ -40,6 +41,7 @@
     </div>
     <label for="pw-input">{t("password.label")}</label>
     <input id="pw-input" bind:this={input} type="password" bind:value={password} autocomplete="off" />
+    <label class="save"><input type="checkbox" bind:checked={save} /> {t("password.save")}</label>
     <div class="foot">
       <button type="button" class="ghost" onclick={oncancel}>{t("connection.cancel")}</button>
       <button type="submit" class="run">{t("password.connect")}</button>
@@ -96,6 +98,18 @@
     border: 1px solid var(--control);
     border-radius: var(--radius-control);
     font-family: var(--mono);
+  }
+  .save {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--soft);
+    font-size: 12px;
+  }
+  .save input {
+    height: auto;
+    padding: 0;
+    accent-color: var(--accent);
   }
   input:focus-visible,
   button:focus-visible {

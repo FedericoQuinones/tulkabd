@@ -56,7 +56,11 @@ let cmp: ReturnType<typeof mount> | undefined;
 beforeEach(async () => {
   vi.resetAllMocks();
   vi.mocked(ipc.closeSession).mockResolvedValue();
-  vi.mocked(ipc.openSession).mockResolvedValue(info);
+  // The backend asks for the password of c2 until one is typed.
+  vi.mocked(ipc.openSession).mockImplementation(async (_tab, id, _db, pw) => {
+    if (id === "c2" && pw === undefined) throw "password_required";
+    return info;
+  });
   vi.mocked(ipc.runQuery).mockResolvedValue(ok);
   vi.mocked(ipc.transactionCount).mockResolvedValue(0);
   vi.mocked(ipc.objectDefinition).mockRejectedValue("not_connected");
@@ -520,7 +524,7 @@ test("Run on a restored tab without a saved password asks for it, then runs", as
 
   tabs.run(id, "SELECT 2", 0);
   await flush();
-  expect(ipc.openSession).not.toHaveBeenCalled();
+  expect(ipc.openSession).toHaveBeenCalledWith(id, "c2", undefined, undefined);
   expect(tabs.passwordRequest?.tabId).toBe(id);
 
   await tabs.submitPassword("pw");

@@ -260,7 +260,7 @@ class ExplorerStore {
    * Connects the Explorer session. `then` gets `null` once connected, or the error when the connect
    * fails; a password prompt passes it on to the next attempt, and a cancelled prompt drops it.
    */
-  async connect(id: string, password?: string, then?: ConnectThen): Promise<void> {
+  async connect(id: string, password?: string, then?: ConnectThen, savePassword = false): Promise<void> {
     const conn = connections.list.find((c) => c.id === id);
     if (!conn) {
       then?.(t("tabs.connectionMissing"));
@@ -278,6 +278,7 @@ class ExplorerStore {
       await ipc.connectExplorer(id, password);
       if (!current()) return;
       st.status = "connected";
+      if (savePassword && password !== undefined) void connections.savePassword(id);
       then?.(null);
       await this.loadDatabases(id);
     } catch (e) {
@@ -335,10 +336,10 @@ class ExplorerStore {
     if (wasLive) void this.connect(id, password);
   }
 
-  async submitPassword(password: string): Promise<void> {
+  async submitPassword(password: string, save = false): Promise<void> {
     const req = this.passwordRequest;
     this.passwordRequest = null;
-    if (req) await this.connect(req.conn.id, password, req.then);
+    if (req) await this.connect(req.conn.id, password, req.then, save);
   }
 
   cancelPassword(): void {
