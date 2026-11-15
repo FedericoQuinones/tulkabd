@@ -510,17 +510,21 @@ pub async fn visible_connections() -> Result<Vec<AiVisible>, String> {
     let config = blocking(move || store.load())
         .await?
         .map_err(|e| e.to_string())?;
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore::new());
-    let mut out = Vec::new();
-    for (conn, label) in labels(&config) {
-        let password_saved = saved_password(secrets.clone(), &conn).await.is_ok();
-        out.push(AiVisible {
+    Ok(visible_in(&config))
+}
+
+/// The connections of `config` the assistant may use. Whether a password is
+/// saved comes from the config: the keychain is not opened, which could ask
+/// the user to unlock it.
+fn visible_in(config: &AppConfig) -> Vec<AiVisible> {
+    labels(config)
+        .into_iter()
+        .map(|(conn, label)| AiVisible {
             connection_id: conn.id,
             label,
-            password_saved,
-        });
-    }
-    Ok(out)
+            password_saved: conn.password_saved,
+        })
+        .collect()
 }
 
 /// `Parent/Child` for a folder, `None` for the root (or a broken chain).
@@ -561,6 +565,21 @@ mod tests {
             name: name.into(),
             parent_id: None,
         }
+    }
+
+    #[test]
+    fn visible_connections_report_the_saved_password_flag() {
+        let mut saved = conn("A", "id-a", None);
+        saved.password_saved = true;
+        let config = AppConfig {
+            connections: vec![saved, conn("B", "id-b", None)],
+            ..AppConfig::default()
+        };
+        let flags: Vec<bool> = visible_in(&config)
+            .iter()
+            .map(|v| v.password_saved)
+            .collect();
+        assert_eq!(flags, vec![true, false]);
     }
 
     #[test]
