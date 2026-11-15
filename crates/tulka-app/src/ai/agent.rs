@@ -32,6 +32,20 @@ pub struct ClaudeStatus {
     /// tulkabd is registered in Claude Code but points at another executable.
     pub connected_elsewhere: bool,
     pub path: Option<String>,
+    /// Claude Code was found but did not answer `--version`: what it said.
+    pub error: Option<String>,
+}
+
+/// The `PATH` for running `program`: its own folder first, so a launcher
+/// script that starts a sibling program (an npm or nvm install starts `node`)
+/// works although the app's `PATH` is short.
+fn path_with_parent(program: &Path) -> Option<OsString> {
+    let parent = program.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let mut dirs = vec![parent.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(dirs).ok()
 }
 
 /// A command that runs `program` from the home folder (so the project and
@@ -45,6 +59,9 @@ pub(crate) fn command(program: &Path) -> tokio::process::Command {
         .or_else(ai_dir)
     {
         cmd.current_dir(dir);
+    }
+    if let Some(path) = path_with_parent(program) {
+        cmd.env("PATH", path);
     }
     cmd.kill_on_drop(true)
         .stdin(std::process::Stdio::null())
@@ -161,13 +178,20 @@ async fn probe(program: &Path, exe: &str) -> (ClaudeStatus, bool) {
         path: Some(program.to_string_lossy().into_owned()),
         ..ClaudeStatus::default()
     };
-    let Some((ok, text)) = run(program, &[OsStr::new("--version")], VERSION_TIMEOUT).await else {
+    // The file exists, so Claude Code is installed even if it does not start.
+    status.installed = true;
+    let version = run(program, &[OsStr::new("--version")], VERSION_TIMEOUT).await;
+    let Some((true, text)) = version else {
+        let said = version
+            .map(|(_, t)| t.trim().to_string())
+            .unwrap_or_default();
+        status.error = Some(if said.is_empty() {
+            "it did not answer".to_string()
+        } else {
+            said
+        });
         return (status, false);
     };
-    if !ok {
-        return (status, false);
-    }
-    status.installed = true;
     status.version = text
         .lines()
         .next()
@@ -200,8 +224,8 @@ pub async fn claude_status() -> ClaudeStatus {
 
 async fn connect_with(program: &Path, exe: &str) -> Result<ClaudeStatus, String> {
     let (status, unanswered) = probe(program, exe).await;
-    if !status.installed {
-        return Err(CLAUDE_NOT_FOUND.to_string());
+    if let Some(error) = status.error {
+        return Err(format!("Claude Code did not start: {error}"));
     }
     if unanswered {
         return Err("claude mcp get did not finish".to_string());
@@ -235,7 +259,22 @@ async fn connect_with(program: &Path, exe: &str) -> Result<ClaudeStatus, String>
         }
         None => return Err("claude mcp add did not finish".to_string()),
     }
-    Ok(status_with(program, exe).await)
+    let status = status_with(program, exe).await;
+    if status.connected_elsewhere {
+        let get = [
+            OsStr::new("mcp"),
+            OsStr::new("get"),
+            OsStr::new(SERVER_NAME),
+        ];
+        let shown = run(program, &get, COMMAND_TIMEOUT)
+            .await
+            .map(|(_, t)| t.trim().to_string())
+            .unwrap_or_default();
+        return Err(format!(
+            "Another tulkabd registration in a project or local scope takes precedence over the one just added. Remove it with `claude mcp remove tulkabd` in that project.\n{shown}"
+        ));
+    }
+    Ok(status)
 }
 
 /// Registers this tulkabd in Claude Code (replacing a registration that
@@ -288,8 +327,8 @@ pub enum TerminalStyle {
     WindowsTerminal,
     /// `cmd /C start "" /D <dir> cmd /K <command...>`.
     CmdStart,
-    /// Terminal.app through `osascript`.
-    AppleScript,
+    /// Terminal.app opens a `.command` script: `open -a Terminal <script>`.
+    MacScript,
 }
 
 /// A way to open a terminal.
@@ -325,9 +364,9 @@ pub fn terminal_candidates(os: &str, env_terminal: Option<String>) -> Vec<Termin
             },
         ],
         "macos" => vec![TerminalCmd {
-            program: "osascript".into(),
+            program: "open".into(),
             lead: Vec::new(),
-            style: TerminalStyle::AppleScript,
+            style: TerminalStyle::MacScript,
         }],
         _ => {
             let mut list = Vec::new();
@@ -374,8 +413,47 @@ struct Invocation {
     raw_arg: Option<String>,
 }
 
+/// File name of the script macOS opens in Terminal.
+const MAC_SCRIPT: &str = "claude.command";
+
+/// The script that starts Claude Code in `dir` for macOS Terminal.
+fn mac_script(dir: &Path, claude: &Path, mcp_config: &Path) -> String {
+    let claude_dir = claude.parent().unwrap_or_else(|| Path::new("."));
+    format!(
+        "#!/bin/sh\ncd {}\nexport PATH={}:\"$PATH\"\nexec {} --mcp-config {}\n",
+        sh_quote(&dir.to_string_lossy()),
+        sh_quote(&claude_dir.to_string_lossy()),
+        sh_quote(&claude.to_string_lossy()),
+        sh_quote(&mcp_config.to_string_lossy())
+    )
+}
+
+/// Writes the macOS script into `dir` and makes it executable.
+fn write_mac_script(dir: &Path, claude: &Path, mcp_config: &Path) -> std::io::Result<()> {
+    let path = dir.join(MAC_SCRIPT);
+    std::fs::write(&path, mac_script(dir, claude, mcp_config))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
 /// The line to run by hand in a terminal.
 fn copy_command(dir: &Path, claude: &Path, mcp_config: &Path) -> String {
+    copy_command_for(cfg!(windows), dir, claude, mcp_config)
+}
+
+fn copy_command_for(windows: bool, dir: &Path, claude: &Path, mcp_config: &Path) -> String {
+    if windows {
+        return format!(
+            "cd /d \"{}\" && \"{}\" --mcp-config \"{}\"",
+            dir.display(),
+            claude.display(),
+            mcp_config.display()
+        );
+    }
     format!(
         "cd {} && {} --mcp-config {}",
         sh_quote(&dir.to_string_lossy()),
@@ -420,18 +498,11 @@ fn terminal_invocation(
             args.extend(claude_args);
         }
         TerminalStyle::CmdStart => raw_arg = Some(cmd_keep_open(claude, mcp_config)?),
-        TerminalStyle::AppleScript => {
-            let script = copy_command(dir, claude, mcp_config);
-            let script = script.replace('\\', "\\\\").replace('"', "\\\"");
-            args.extend([
-                OsString::from("-e"),
-                OsString::from(format!(
-                    "tell application \"Terminal\" to do script \"{script}\""
-                )),
-                OsString::from("-e"),
-                OsString::from("tell application \"Terminal\" to activate"),
-            ]);
-        }
+        TerminalStyle::MacScript => args.extend([
+            OsString::from("-a"),
+            OsString::from("Terminal"),
+            dir.join(MAC_SCRIPT).into_os_string(),
+        ]),
     }
     Ok(Invocation { args, raw_arg })
 }
@@ -458,8 +529,15 @@ pub fn open_claude_terminal() -> Result<(), String> {
     let by_hand = || copy_command(&dir, &claude, &files.mcp_config);
     let invocation = terminal_invocation(terminal, &dir, &claude, &files.mcp_config)
         .map_err(|e| format!("{e}; run this in a terminal: {}", by_hand()))?;
+    if terminal.style == TerminalStyle::MacScript {
+        write_mac_script(&dir, &claude, &files.mcp_config)
+            .map_err(|e| format!("could not write the script for Terminal: {e}"))?;
+    }
     let mut cmd = std::process::Command::new(&terminal.program);
     cmd.args(&invocation.args).current_dir(&dir);
+    if let Some(path) = path_with_parent(&claude) {
+        cmd.env("PATH", path);
+    }
     // The console `cmd.exe` opens supplies its own standard handles; for the
     // other launchers nothing is read or shown.
     if invocation.raw_arg.is_none() {
@@ -591,35 +669,92 @@ mod tests {
     }
 
     #[test]
-    fn macos_script_quotes_paths() {
+    fn macos_opens_a_command_script_in_terminal() {
         let t = &terminal_candidates("macos", None)[0];
-        let args = terminal_invocation(
-            t,
-            Path::new("/Users/o'neil/ai"),
-            Path::new("/bin/claude"),
-            Path::new("/Users/o'neil/ai/mcp.json"),
-        )
-        .unwrap()
-        .args;
-        let script = args[1].to_string_lossy();
-        assert!(script.contains(r"cd '/Users/o'\\''neil/ai' && '/bin/claude' --mcp-config"));
+        assert_eq!(t.program, "open");
+        let dir = Path::new("/Users/o'neil/ai");
+        let claude = Path::new("/Users/o'neil/.nvm/bin/claude");
+        let file = Path::new("/Users/o'neil/ai/mcp.json");
+        let args = terminal_invocation(t, dir, claude, file).unwrap().args;
+        assert_eq!(
+            args,
+            ["-a", "Terminal", "/Users/o'neil/ai/claude.command"].map(OsString::from)
+        );
+        assert_eq!(
+            mac_script(dir, claude, file),
+            "#!/bin/sh\ncd '/Users/o'\\''neil/ai'\nexport PATH='/Users/o'\\''neil/.nvm/bin':\"$PATH\"\nexec '/Users/o'\\''neil/.nvm/bin/claude' --mcp-config '/Users/o'\\''neil/ai/mcp.json'\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_mac_script_is_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        write_mac_script(dir.path(), Path::new("/b/claude"), Path::new("/b/mcp.json")).unwrap();
+        let mode = std::fs::metadata(dir.path().join("claude.command"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o755, 0o755);
+    }
+
+    #[test]
+    fn the_hand_command_uses_the_shell_of_the_system() {
+        let (d, c, f) = (
+            Path::new(r"C:\Users\Jane Doe\ai"),
+            Path::new(r"C:\Users\Jane Doe\claude.exe"),
+            Path::new(r"C:\Users\Jane Doe\ai\mcp.json"),
+        );
+        assert_eq!(
+            copy_command_for(true, d, c, f),
+            r#"cd /d "C:\Users\Jane Doe\ai" && "C:\Users\Jane Doe\claude.exe" --mcp-config "C:\Users\Jane Doe\ai\mcp.json""#
+        );
+        assert!(copy_command_for(false, d, c, f).starts_with("cd 'C:"));
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn status_reads_version_and_registration() {
+    async fn a_launcher_that_needs_its_own_folder_on_the_path_starts() {
+        let _turn = SPAWN.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        script(dir.path(), "helper-node", r#"echo "9.9.9 (Claude Code)""#);
+        let claude = script(dir.path(), "claude", r#"helper-node "$@""#);
+        let status = status_with(&claude, "/opt/tulkabd").await;
+        assert!(status.installed);
+        assert_eq!(status.version.as_deref(), Some("9.9.9 (Claude Code)"));
+        assert_eq!(status.error, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_claude_that_does_not_start_is_installed_with_an_error() {
         let _turn = SPAWN.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let claude = script(
             dir.path(),
             "claude",
-            r#"case "$1" in --version) echo "2.0.1 (Claude Code)";; mcp) echo "Command: /opt/tulkabd";; esac"#,
+            r#"echo "env: node: not found" >&2; exit 127"#,
         );
-        let here = status_with(&claude, "/opt/tulkabd").await;
-        assert!(here.installed && here.connected && !here.connected_elsewhere);
-        assert_eq!(here.version.as_deref(), Some("2.0.1 (Claude Code)"));
-        let other = status_with(&claude, "/elsewhere/tulkabd").await;
-        assert!(other.connected_elsewhere && !other.connected);
+        let status = status_with(&claude, "/opt/tulkabd").await;
+        assert!(status.installed && status.version.is_none());
+        assert_eq!(status.error.as_deref(), Some("env: node: not found"));
+        assert!(connect_with(&claude, "/opt/tulkabd").await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_explains_a_registration_that_takes_precedence() {
+        let _turn = SPAWN.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let claude = script(
+            dir.path(),
+            "claude",
+            r#"case "$1" in --version) echo 2.0.1;; mcp) if [ "$2" = get ]; then echo "Command: /project/tulkabd"; fi;; esac"#,
+        );
+        let err = connect_with(&claude, "/opt/tulkabd").await.unwrap_err();
+        assert!(err.contains("project or local scope"));
+        assert!(err.contains("/project/tulkabd"));
     }
 
     #[test]
