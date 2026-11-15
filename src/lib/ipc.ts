@@ -629,3 +629,5 @@ export const connectClaude = () => invoke<ClaudeStatus>("ai_connect_claude");
 /** Opens a terminal running Claude Code with the tulkabd tools. */
 export const openClaudeTerminal = () => invoke<void>("ai_open_terminal");
 export const aiVisibleConnections = () => invoke<AiVisible[]>("ai_visible_connections");
+/** Opens the Claude Code install page in the browser. */
+export const openClaudeInstallDocs = () => invoke<void>("ai_open_install_docs");
