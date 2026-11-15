@@ -5,6 +5,7 @@
   import * as ipc from "../ipc";
   import type { AiAccess, ConnectionConfig, DatabaseScope, GuardLevel, ParsedConnection } from "../ipc";
   import { connStrErrorText, fillFrom, ignoredText, proposeName } from "./connstr";
+  import { weakerTlsDropsPassword } from "./savedPassword";
   import { applyEnvironment, ENVIRONMENTS, initialEnvState, type EnvState } from "./env";
   import { explorer } from "../explorer/tree.svelte";
   import { prefs } from "../settings/prefs.svelte";
@@ -56,6 +57,14 @@
   let timeout = $state<number | null>(initial?.connectTimeoutS ?? 15);
   let advancedOpen = $state(false);
   let env = $state<EnvState>(initialEnvState(initial, prefs.environments));
+  // The password is dropped on save when TLS gets weaker than the stored one (see `may_reuse_saved_password`).
+  const dropsPassword = $derived(
+    weakerTlsDropsPassword(
+      isEdit ? (savedConn ?? initial) : undefined,
+      { environment: env.environment, encrypt, trustServerCertificate: trust },
+      password,
+    ),
+  );
   let dbKind = $state<"all" | "selected">(initial?.databases.kind ?? "all");
   let dbNames = $state<string[]>(initial?.databases.kind === "selected" ? [...new Set(initial.databases.names)] : []);
   // The backend keeps the stored folder on edit, so the selector only exists when creating.
@@ -425,6 +434,9 @@
             {#if errors.timeout}<div class="err">{t(errors.timeout)}</div>{/if}
           </div>
         </details>
+        {#if dropsPassword}
+          <div class="note warn" role="status" data-testid="weaker-tls-note">{t("connection.weakerTlsDropsPassword")}</div>
+        {/if}
         {#if keyringUnavailable}
           <div class="note warn" role="status">{t("connection.keyringUnavailable")}</div>
         {/if}

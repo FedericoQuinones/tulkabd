@@ -2340,7 +2340,9 @@ async fn running_a_query_does_not_prune_the_run_log() {
 #[tokio::test]
 async fn saved_password_is_not_sent_to_another_server() {
     let f = fixture(Arc::new(MemoryStore::default()));
-    let saved = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+    let mut production = new_conn();
+    production.environment = Environment::Production;
+    let saved = save_connection(&f.state, production, Some(PASSWORD.into()))
         .await
         .unwrap()
         .connection;
@@ -2370,6 +2372,14 @@ async fn saved_password_is_not_sent_to_another_server() {
             PASSWORD_REQUIRED
         );
     }
+    // Local connections keep the saved password with weaker TLS.
+    let local = save_connection(&f.state, new_conn(), Some(PASSWORD.into()))
+        .await
+        .unwrap()
+        .connection;
+    let mut trusting = local.clone();
+    trusting.trust_server_certificate = true;
+    assert!(test_connection(&f.state, trusting, None).await.is_ok());
     // A typed password is always used.
     let mut other_host = saved.clone();
     other_host.server = "other-host".into();
