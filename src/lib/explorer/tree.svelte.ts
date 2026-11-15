@@ -603,8 +603,8 @@ class ExplorerStore {
     if (open) this.connectionChildren(ctx, node.connection, st, level + 1, childIn);
   }
 
-  private notice(parent: string, tag: string, level: number, tone: "error" | "muted", text: string, action: NoticeAction | null = null): Row {
-    return { key: keyOf.notice(parent, tag), level, parent, expandable: false, expanded: false, kind: "notice", tone, text, action };
+  private notice(c: string, parent: string, tag: string, level: number, tone: "error" | "muted", text: string, action: NoticeAction | null = null): Row {
+    return { key: keyOf.notice(parent, tag), level, parent, expandable: false, expanded: false, kind: "notice", connectionId: c, tone, text, action };
   }
 
   private later(load: () => Promise<void>) {
@@ -627,15 +627,15 @@ class ExplorerStore {
     if (inMatch) {
       const connectAction = { label: t("explorer.connect"), run: () => this.connect(id) };
       if (status === "error") {
-        out.push(this.notice(id, "status", level, "error", st?.message ?? t("explorer.connectError"), {
+        out.push(this.notice(id, id, "status", level, "error", st?.message ?? t("explorer.connectError"), {
           label: t("explorer.retry"),
           run: () => this.connect(id),
         }));
       } else if (status === "offline") {
         const text = dbs && dbs.length > 0 ? t("explorer.offlineCached") : t("explorer.notConnected");
-        out.push(this.notice(id, "status", level, "muted", text, connectAction));
+        out.push(this.notice(id, id, "status", level, "muted", text, connectAction));
       } else if (status === "connected" && dbs && dbs.length === 0) {
-        out.push(this.notice(id, "status", level, "muted", t("explorer.noDatabases")));
+        out.push(this.notice(id, id, "status", level, "muted", t("explorer.noDatabases")));
       }
     }
     dbs ??= [];
@@ -712,17 +712,17 @@ class ExplorerStore {
         const loaded = this.objects[key];
         if (loaded === undefined) {
           if (!this.objLoads.has(key)) this.later(() => this.loadObjects(c, db.name, kind));
-          out.push(this.notice(key, "loading", level + 1, "muted", t("explorer.loading")));
+          out.push(this.notice(c, key, "loading", level + 1, "muted", t("explorer.loading")));
           continue;
         }
         if (!Array.isArray(loaded)) {
-          out.push(this.notice(key, "error", level + 1, "error", loaded.error, {
+          out.push(this.notice(c, key, "error", level + 1, "error", loaded.error, {
             label: t("explorer.retry"),
             run: () => this.reloadObjects(c, db.name, kind),
           }));
           continue;
         }
-        if (loaded.length === 0) out.push(this.notice(key, "empty", level + 1, "muted", t("explorer.none")));
+        if (loaded.length === 0) out.push(this.notice(c, key, "empty", level + 1, "muted", t("explorer.none")));
         objects = loaded;
       } else {
         objects = fs?.hits.get(key) ?? [];
@@ -733,7 +733,7 @@ class ExplorerStore {
       if (objects.length > limit) {
         const more = Math.min(OBJECT_PAGE, objects.length - limit);
         out.push(
-          this.notice(key, "more", level + 1, "muted", t("explorer.showing", { shown: limit, total: objects.length }), {
+          this.notice(c, key, "more", level + 1, "muted", t("explorer.showing", { shown: limit, total: objects.length }), {
             label: t("explorer.showMore", { n: more }),
             run: () => (this.limits = { ...this.limits, [key]: (this.limits[key] ?? OBJECT_PAGE) + OBJECT_PAGE }),
           }),
@@ -752,7 +752,7 @@ class ExplorerStore {
     const parent = keyOf.db(c, database);
     out.push({ key, level, parent, expandable: true, expanded: open, kind: "saved", connectionId: c, database, count: list.length });
     if (!open) return;
-    if (list.length === 0) out.push(this.notice(key, "empty", level + 1, "muted", t("explorer.none")));
+    if (list.length === 0) out.push(this.notice(c, key, "empty", level + 1, "muted", t("explorer.none")));
     for (const q of list) {
       out.push({
         key: keyOf.savedQuery(c, database, q.name),
@@ -789,14 +789,14 @@ class ExplorerStore {
     const cols = this.columns[key];
     if (cols === undefined) {
       if (!this.colLoads.has(key)) this.later(() => this.loadColumns(c, d, o));
-      out.push(this.notice(key, "loading", level + 1, "muted", t("explorer.loading")));
+      out.push(this.notice(c, key, "loading", level + 1, "muted", t("explorer.loading")));
     } else if (!Array.isArray(cols)) {
-      out.push(this.notice(key, "error", level + 1, "error", cols.error, {
+      out.push(this.notice(c, key, "error", level + 1, "error", cols.error, {
         label: t("explorer.retry"),
         run: () => this.reloadColumns(c, d, o),
       }));
     } else if (cols.length === 0) {
-      out.push(this.notice(key, "empty", level + 1, "muted", t("explorer.none")));
+      out.push(this.notice(c, key, "empty", level + 1, "muted", t("explorer.none")));
     } else {
       for (const column of cols) {
         out.push({

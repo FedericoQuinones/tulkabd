@@ -20,11 +20,13 @@
     posinset: number;
     onclick: (row: Row) => void;
     onmenu: (row: Row, x: number, y: number) => void;
+    /** Opens the full text of an error notice. */
+    ondetails: (row: Row) => void;
     onrename: (row: Row, name: string | null) => void;
     /** A press on a folder or connection row that is not being renamed: it may become a drag. */
     ondragpress: (row: Row, e: PointerEvent) => void;
   }
-  let { row, focused, env, renaming, dropTarget, index, top, setsize, posinset, onclick, onmenu, onrename, ondragpress }: Props = $props();
+  let { row, focused, env, renaming, dropTarget, index, top, setsize, posinset, onclick, onmenu, ondetails, onrename, ondragpress }: Props = $props();
 
   // 16x16 icons drawn with the 1.5px stroke of svg.i (theme.css).
   const icons = {
@@ -155,7 +157,10 @@
     <span class="tail mono">{row.column.typeName}</span>
     <span class="nul mono">{row.column.nullable ? t("explorer.null") : t("explorer.notNull")}</span>
   {:else if row.kind === "notice"}
-    <span class="lab note" class:err={row.tone === "error"} title={row.text}>{row.text}</span>
+    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+    <span class="lab note" class:err={row.tone === "error"} title={row.text} onclick={row.tone === "error" ? () => ondetails(row) : undefined}
+      >{row.text}</span
+    >
     {#if row.action}
       {@const action = row.action}
       <button
@@ -269,6 +274,7 @@
   }
   .note.err {
     color: var(--negative);
+    cursor: pointer;
   }
   .act {
     flex: none;

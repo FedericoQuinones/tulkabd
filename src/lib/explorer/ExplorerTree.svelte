@@ -6,6 +6,7 @@
   import { connections } from "../connections/store.svelte";
   import { startDrag } from "../drag/pointerDrag";
   import ContextMenu from "./ContextMenu.svelte";
+  import ErrorDialog from "./ErrorDialog.svelte";
   import FolderDialog, { type FolderDialogMode } from "./FolderDialog.svelte";
   import TreeNode from "./TreeNode.svelte";
   import { revealRowTop, spacerHeight, isScaled, maxVirtualTop, toRealTop, toVirtualTop, visibleRange, type ScrollGeometry } from "../results/virtual";
@@ -37,6 +38,8 @@
   let addEl = $state<HTMLButtonElement>();
   let menu = $state<{ items: MenuItem[]; x: number; y: number; label: string; returnTo: HTMLElement | null } | null>(null);
   let dialog = $state<FolderDialogMode | null>(null);
+  /** The error notice whose full text is open in a dialog. */
+  let details = $state<Extract<Row, { kind: "notice" }> | null>(null);
   let renaming = $state<string | null>(null);
   let dropKey = $state<string | null>(null);
 
@@ -304,6 +307,12 @@
     else if (row.kind === "savedQuery") void explorer.openSavedQuery(row.connectionId, row.database, row.name);
   }
 
+  /** The dialog's title: a failed connection, or a load that failed under it. */
+  function detailsTitle(row: Extract<Row, { kind: "notice" }>): string {
+    const name = connections.list.find((c) => c.id === row.connectionId)?.name ?? "";
+    return t(row.parent === row.connectionId ? "explorer.error.connectTitle" : "explorer.error.loadTitle", { name });
+  }
+
   async function onrename(row: Row, value: string | null) {
     renaming = null;
     const name = value?.trim() ?? "";
@@ -344,7 +353,11 @@
     else if ("collapse" in nav) explorer.collapse(nav.collapse);
     else {
       const target = rows.find((r) => r.key === nav.activate);
-      if (target?.kind === "notice") void target.action?.run();
+      if (target?.kind === "notice") {
+        // An error opens its full text (Retry is in the dialog and on the row's button); other notices run their action.
+        if (target.tone === "error") details = target;
+        else void target.action?.run();
+      }
       else if (target?.kind === "savedQuery") void explorer.openSavedQuery(target.connectionId, target.database, target.name);
     }
   }
@@ -523,6 +536,7 @@
             posinset={positions[i].posinset}
             onclick={onrowclick}
             onmenu={openMenu}
+            ondetails={(r) => r.kind === "notice" && (details = r)}
             {onrename}
             {ondragpress}
           />
@@ -539,6 +553,23 @@
 
 {#if menu}
   <ContextMenu items={menu.items} x={menu.x} y={menu.y} label={menu.label} onclose={closeMenu} />
+{/if}
+
+{#if details}
+  {@const shown = details}
+  <ErrorDialog
+    title={detailsTitle(shown)}
+    message={shown.text}
+    onretry={() => {
+      const action = shown.action;
+      details = null;
+      void action?.run();
+    }}
+    onclose={() => {
+      details = null;
+      treeEl?.querySelector<HTMLElement>('[tabindex="0"]')?.focus();
+    }}
+  />
 {/if}
 
 {#if dialog}
