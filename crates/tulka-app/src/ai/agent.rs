@@ -34,10 +34,18 @@ pub struct ClaudeStatus {
     pub path: Option<String>,
 }
 
-/// A command that runs a program in `dir`; on Windows it hides the console
-/// window.
+/// A command that runs `program` from the home folder (so the project and
+/// local settings of whatever folder the app started in do not apply); on
+/// Windows it hides the console window.
 pub(crate) fn command(program: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(program);
+    if let Some(dir) = directories::BaseDirs::new()
+        .map(|d| d.home_dir().to_path_buf())
+        .filter(|d| d.is_dir())
+        .or_else(ai_dir)
+    {
+        cmd.current_dir(dir);
+    }
     cmd.kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -128,16 +136,36 @@ async fn run(program: &Path, args: &[&OsStr], timeout: Duration) -> Option<(bool
     Some((out.status.success(), text))
 }
 
+/// Whether the output of `claude mcp get` names `exe` as the command.
+fn registered_command_is(output: &str, exe: &str) -> bool {
+    output
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("Command:"))
+        .any(|c| {
+            let c = c.trim();
+            if cfg!(windows) {
+                c.eq_ignore_ascii_case(exe)
+            } else {
+                c == exe
+            }
+        })
+}
+
 async fn status_with(program: &Path, exe: &str) -> ClaudeStatus {
+    probe(program, exe).await.0
+}
+
+/// The status, and whether `mcp get` did not answer in time.
+async fn probe(program: &Path, exe: &str) -> (ClaudeStatus, bool) {
     let mut status = ClaudeStatus {
         path: Some(program.to_string_lossy().into_owned()),
         ..ClaudeStatus::default()
     };
     let Some((ok, text)) = run(program, &[OsStr::new("--version")], VERSION_TIMEOUT).await else {
-        return status;
+        return (status, false);
     };
     if !ok {
-        return status;
+        return (status, false);
     }
     status.installed = true;
     status.version = text
@@ -151,14 +179,15 @@ async fn status_with(program: &Path, exe: &str) -> ClaudeStatus {
         OsStr::new("get"),
         OsStr::new(SERVER_NAME),
     ];
-    if let Some((true, text)) = run(program, &get, COMMAND_TIMEOUT).await {
-        if text.contains(exe) {
+    let answer = run(program, &get, COMMAND_TIMEOUT).await;
+    if let Some((true, text)) = &answer {
+        if registered_command_is(text, exe) {
             status.connected = true;
         } else {
             status.connected_elsewhere = true;
         }
     }
-    status
+    (status, answer.is_none())
 }
 
 /// Whether Claude Code is installed and connected to this tulkabd.
@@ -170,9 +199,12 @@ pub async fn claude_status() -> ClaudeStatus {
 }
 
 async fn connect_with(program: &Path, exe: &str) -> Result<ClaudeStatus, String> {
-    let status = status_with(program, exe).await;
+    let (status, unanswered) = probe(program, exe).await;
     if !status.installed {
         return Err(CLAUDE_NOT_FOUND.to_string());
+    }
+    if unanswered {
+        return Err("claude mcp get did not finish".to_string());
     }
     if status.connected {
         return Ok(status);
@@ -334,20 +366,50 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// The program and arguments that open `terminal` running Claude Code with
-/// the tulkabd tools.
+/// What to start to open a terminal.
+#[derive(Debug, PartialEq, Eq)]
+struct Invocation {
+    args: Vec<OsString>,
+    /// Text passed to the program as it is (Windows `cmd /K`).
+    raw_arg: Option<String>,
+}
+
+/// The line to run by hand in a terminal.
+fn copy_command(dir: &Path, claude: &Path, mcp_config: &Path) -> String {
+    format!(
+        "cd {} && {} --mcp-config {}",
+        sh_quote(&dir.to_string_lossy()),
+        sh_quote(&claude.to_string_lossy()),
+        sh_quote(&mcp_config.to_string_lossy())
+    )
+}
+
+/// The `cmd.exe` argument that runs Claude Code and stays open. The outer
+/// quotes make `cmd /K` keep the inner ones; paths with `"` or `%` cannot be
+/// quoted safely, so they are refused.
+fn cmd_keep_open(claude: &Path, mcp_config: &Path) -> Result<String, String> {
+    let (claude, file) = (claude.to_string_lossy(), mcp_config.to_string_lossy());
+    if claude.contains(['"', '%']) || file.contains(['"', '%']) {
+        return Err("a path contains a character cmd.exe cannot quote".to_string());
+    }
+    Ok(format!("/K \"\"{claude}\" --mcp-config \"{file}\"\""))
+}
+
+/// The arguments that open `terminal` running Claude Code with the tulkabd
+/// tools.
 fn terminal_invocation(
     terminal: &TerminalCmd,
     dir: &Path,
     claude: &Path,
     mcp_config: &Path,
-) -> Vec<OsString> {
+) -> Result<Invocation, String> {
     let claude_args = [
         claude.as_os_str().to_owned(),
         OsString::from("--mcp-config"),
         mcp_config.as_os_str().to_owned(),
     ];
     let mut args: Vec<OsString> = Vec::new();
+    let mut raw_arg = None;
     match terminal.style {
         TerminalStyle::Exec => {
             args.extend(terminal.lead.iter().map(OsString::from));
@@ -357,23 +419,9 @@ fn terminal_invocation(
             args.extend([OsString::from("-d"), dir.as_os_str().to_owned()]);
             args.extend(claude_args);
         }
-        TerminalStyle::CmdStart => {
-            args.extend(
-                ["/C", "start", "", "/D"]
-                    .iter()
-                    .map(OsString::from)
-                    .chain([dir.as_os_str().to_owned(), OsString::from("cmd")])
-                    .chain([OsString::from("/K")]),
-            );
-            args.extend(claude_args);
-        }
+        TerminalStyle::CmdStart => raw_arg = Some(cmd_keep_open(claude, mcp_config)?),
         TerminalStyle::AppleScript => {
-            let script = format!(
-                "cd {} && {} --mcp-config {}",
-                sh_quote(&dir.to_string_lossy()),
-                sh_quote(&claude.to_string_lossy()),
-                sh_quote(&mcp_config.to_string_lossy())
-            );
+            let script = copy_command(dir, claude, mcp_config);
             let script = script.replace('\\', "\\\\").replace('"', "\\\"");
             args.extend([
                 OsString::from("-e"),
@@ -385,7 +433,7 @@ fn terminal_invocation(
             ]);
         }
     }
-    args
+    Ok(Invocation { args, raw_arg })
 }
 
 /// Opens a terminal running Claude Code with the tulkabd tools. The error is
@@ -403,22 +451,39 @@ pub fn open_claude_terminal() -> Result<(), String> {
         .find(|t| on_path(&t.program, path_var.as_deref()))
     else {
         return Err(format!(
-            "no terminal found; run this in one: cd {} && {} --mcp-config {}",
-            sh_quote(&dir.to_string_lossy()),
-            sh_quote(&claude.to_string_lossy()),
-            sh_quote(&files.mcp_config.to_string_lossy())
+            "no terminal found; run this in one: {}",
+            copy_command(&dir, &claude, &files.mcp_config)
         ));
     };
-    let args = terminal_invocation(terminal, &dir, &claude, &files.mcp_config);
+    let by_hand = || copy_command(&dir, &claude, &files.mcp_config);
+    let invocation = terminal_invocation(terminal, &dir, &claude, &files.mcp_config)
+        .map_err(|e| format!("{e}; run this in a terminal: {}", by_hand()))?;
     let mut cmd = std::process::Command::new(&terminal.program);
-    cmd.args(args)
+    cmd.args(&invocation.args)
         .current_dir(&dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    cmd.spawn()
-        .map(drop)
-        .map_err(|e| format!("could not open {}: {e}", terminal.program))
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        if let Some(raw) = &invocation.raw_arg {
+            // The one console that is meant to show.
+            cmd.raw_arg(raw).creation_flags(CREATE_NEW_CONSOLE);
+        } else {
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("could not open {}: {e}", terminal.program))?;
+    // Reap the launcher when it exits, so it does not stay a zombie.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -530,7 +595,9 @@ mod tests {
             Path::new("/Users/o'neil/ai"),
             Path::new("/bin/claude"),
             Path::new("/Users/o'neil/ai/mcp.json"),
-        );
+        )
+        .unwrap()
+        .args;
         let script = args[1].to_string_lossy();
         assert!(script.contains(r"cd '/Users/o'\\''neil/ai' && '/bin/claude' --mcp-config"));
     }
@@ -550,6 +617,37 @@ mod tests {
         assert_eq!(here.version.as_deref(), Some("2.0.1 (Claude Code)"));
         let other = status_with(&claude, "/elsewhere/tulkabd").await;
         assert!(other.connected_elsewhere && !other.connected);
+    }
+
+    #[test]
+    fn cmd_keeps_paths_with_spaces_quoted() {
+        let raw = cmd_keep_open(
+            Path::new(r"C:\Users\Jane Doe\.local\bin\claude.exe"),
+            Path::new(r"C:\Users\Jane Doe\AppData\ai\mcp.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            raw,
+            r#"/K ""C:\Users\Jane Doe\.local\bin\claude.exe" --mcp-config "C:\Users\Jane Doe\AppData\ai\mcp.json"""#
+        );
+        let t = &terminal_candidates("windows", None)[1];
+        let inv = terminal_invocation(t, Path::new("d"), Path::new("c"), Path::new("f")).unwrap();
+        assert!(inv.args.is_empty() && inv.raw_arg.is_some());
+    }
+
+    #[test]
+    fn cmd_refuses_paths_it_cannot_quote() {
+        for bad in ["C:\\100%\\claude.exe", "C:\\a\"b\\claude.exe"] {
+            assert!(cmd_keep_open(Path::new(bad), Path::new("f.json")).is_err());
+            assert!(cmd_keep_open(Path::new("c.exe"), Path::new(bad)).is_err());
+        }
+    }
+
+    #[test]
+    fn registration_must_name_exactly_this_executable() {
+        let out = "tulkabd:\n  Scope: User config\n  Command: /usr/bin/tulkabd-beta\n  Args: mcp\n";
+        assert!(!registered_command_is(out, "/usr/bin/tulkabd"));
+        assert!(registered_command_is(out, "/usr/bin/tulkabd-beta"));
     }
 
     #[cfg(unix)]
