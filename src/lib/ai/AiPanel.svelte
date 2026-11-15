@@ -1,12 +1,12 @@
 <script lang="ts">
   import { t } from "../i18n/t";
+  import AiChat from "./AiChat.svelte";
   import AiConnect from "./AiConnect.svelte";
 </script>
 
 <section class="ai" aria-label={t("ai.panel.label")}>
   <AiConnect />
-  <!-- The chat is mounted here, below the connect section. -->
-  <div class="chat" data-ai-chat></div>
+  <div class="chat" data-ai-chat><AiChat /></div>
 </section>
 
 <style>
