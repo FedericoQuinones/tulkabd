@@ -48,7 +48,10 @@
   let user = $state(initial?.user ?? "");
   let password = $state("");
   let encrypt = $state(initial?.encrypt ?? true);
-  let trust = $state(initial?.trustServerCertificate ?? false);
+  // A new connection trusts the server certificate on Local (self-signed certificates are
+  // common there) and not elsewhere, until the checkbox is changed by hand or a string sets it.
+  let trust = $state(initial?.trustServerCertificate ?? (initial?.environment ?? "local") === "local");
+  let trustTouched = $state(initial?.trustServerCertificate !== undefined);
   // `null` while the number field is empty.
   let timeout = $state<number | null>(initial?.connectTimeoutS ?? 15);
   let advancedOpen = $state(false);
@@ -82,7 +85,10 @@
     dbKind = fill.databases.kind;
     dbNames = fill.databases.kind === "selected" ? fill.databases.names : [];
     if (fill.encrypt !== undefined) encrypt = fill.encrypt;
-    if (fill.trust !== undefined) trust = fill.trust;
+    if (fill.trust !== undefined) {
+      trust = fill.trust;
+      trustTouched = true;
+    }
     if (fill.timeout !== undefined) timeout = fill.timeout;
     if (name.trim() === "") name = proposeName(p);
     connStrError = null;
@@ -343,7 +349,10 @@
                 role="radio"
                 aria-checked={env.environment === e.id}
                 class:on={env.environment === e.id}
-                onclick={() => (env = applyEnvironment(env, e.id, prefs.environments, startsEdit))}
+                onclick={() => {
+                  env = applyEnvironment(env, e.id, prefs.environments, startsEdit);
+                  if (!trustTouched) trust = e.id === "local";
+                }}
               >
                 <span class="dot" style:background={`var(${e.token})`}></span>{t(e.label)}
               </button>
@@ -401,7 +410,7 @@
         <details class="adv" bind:open={advancedOpen}>
           <summary>{t("connection.advanced")}</summary>
           <label class="chk"><input type="checkbox" bind:checked={encrypt} />{t("connection.field.encrypt")}</label>
-          <label class="chk"><input type="checkbox" bind:checked={trust} />{t("connection.field.trust")}</label>
+          <label class="chk"><input type="checkbox" bind:checked={trust} onchange={() => (trustTouched = true)} />{t("connection.field.trust")}</label>
           <div class="fl">
             <label for="c-timeout">{t("connection.field.timeout")}</label>
             <input
