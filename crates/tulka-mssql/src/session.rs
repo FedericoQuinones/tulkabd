@@ -304,10 +304,49 @@ fn login_error(e: TdsError) -> DriverError {
             DriverError::AuthFailed(te.message().to_string())
         }
         TdsError::Server(te) => DriverError::Other(te.message().to_string()),
-        TdsError::Tls(msg) => DriverError::Tls(msg),
+        TdsError::Tls(msg) => DriverError::Tls(explain_tls_error(&msg)),
+        TdsError::Io { message, .. } if is_handshake_failure(&message) => {
+            DriverError::Tls(HANDSHAKE_FAILED.into())
+        }
         TdsError::Io { message, .. } => DriverError::Unreachable(message),
         other => DriverError::Other(other.to_string()),
     }
+}
+
+const HANDSHAKE_FAILED: &str = "the TLS negotiation with the server failed. The server is \
+    reachable but ended the connection while the secure channel was being set up. This often \
+    means it only supports older TLS versions or ciphers than this app supports.";
+
+/// The server closed the connection while the TLS handshake was running.
+fn is_handshake_failure(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("handshake")
+}
+
+/// Rewrites the driver's certificate-rejection message, which advises on
+/// library settings, into one for the person using the connection dialog.
+/// Other TLS messages are kept as they are.
+fn explain_tls_error(msg: &str) -> String {
+    const PREFIX: &str = "the server's certificate was rejected during the TLS handshake: ";
+    let Some(rest) = msg.strip_prefix(PREFIX) else {
+        return msg.to_string();
+    };
+    // The cause ends where the driver's own advice starts.
+    let end = [" The SQL Server presented", " To connect anyway"]
+        .iter()
+        .filter_map(|marker| rest.find(marker))
+        .min()
+        .unwrap_or(rest.len());
+    let cause = rest[..end].trim_end_matches('.');
+    let cause = if cause.contains("UnsupportedCertVersion") {
+        "UnsupportedCertVersion"
+    } else {
+        cause
+    };
+    format!(
+        "the server's certificate is not trusted. SQL Server often uses a self-signed \
+         certificate, which is common on local and test servers. If you trust this server, \
+         turn on \"Trust server certificate\" in the connection. (certificate: {cause})"
+    )
 }
 
 /// Where the batch being run sits in the editor, to turn the line numbers
@@ -1328,6 +1367,53 @@ mod tests {
             browser_error("db01\\NOPE", dns),
             DriverError::Unreachable(m) if m == "db01\\NOPE: no such host"
         ));
+    }
+
+    #[test]
+    fn certificate_rejection_asks_to_trust_the_server() {
+        let raw = "the server's certificate was rejected during the TLS handshake: \
+            Other(OtherError(UnsupportedCertVersion)). The SQL Server presented a certificate \
+            rustls considers too old. To connect anyway you can: (1) trust a specific CA \
+            certificate with `Config::trust_cert_ca(path)` ... (4) build tiberius with the \
+            `native-tls` backend.";
+        match login_error(TdsError::Tls(raw.into())) {
+            DriverError::Tls(m) => {
+                assert!(m.contains("not trusted"));
+                assert!(m.contains("self-signed"));
+                assert!(m.contains("\"Trust server certificate\""));
+                assert!(m.ends_with("(certificate: UnsupportedCertVersion)"));
+                assert!(!m.contains("Config::"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let unknown = "the server's certificate was rejected during the TLS handshake: \
+            UnknownIssuer. To connect anyway you can: (1) trust";
+        assert!(matches!(
+            login_error(TdsError::Tls(unknown.into())),
+            DriverError::Tls(m) if m.ends_with("(certificate: UnknownIssuer)")
+        ));
+    }
+
+    #[test]
+    fn other_tls_errors_keep_their_message() {
+        assert_eq!(explain_tls_error("bad server name"), "bad server name");
+    }
+
+    #[test]
+    fn handshake_eof_is_a_tls_failure_not_unreachable() {
+        let eof = TdsError::Io {
+            kind: std::io::ErrorKind::UnexpectedEof,
+            message: "tls handshake eof".into(),
+        };
+        assert!(matches!(
+            login_error(eof),
+            DriverError::Tls(m) if m.contains("TLS negotiation") && m.contains("older TLS versions")
+        ));
+        let refused = TdsError::Io {
+            kind: std::io::ErrorKind::ConnectionRefused,
+            message: "connection refused".into(),
+        };
+        assert!(matches!(login_error(refused), DriverError::Unreachable(_)));
     }
 
     fn target(host: &str, instance: Option<&str>, port: Option<u16>) -> Target {

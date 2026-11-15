@@ -454,6 +454,36 @@ test("new connection follows the environment default both ways", () => {
   expect(radio("c-ai", "Read only").getAttribute("aria-checked")).toBe("true");
 });
 
+const trustCheckbox = () =>
+  [...document.querySelectorAll<HTMLLabelElement>("label.chk")].find((l) => l.textContent?.includes("Trust server certificate"))!
+    .querySelector("input")!;
+
+test("a new connection trusts the server certificate on Local and follows the environment until toggled", () => {
+  open({});
+  expect(trustCheckbox().checked).toBe(true);
+  envButton("Production").click();
+  flushSync();
+  expect(trustCheckbox().checked).toBe(false);
+  envButton("Local").click();
+  flushSync();
+  expect(trustCheckbox().checked).toBe(true);
+  trustCheckbox().click();
+  flushSync();
+  envButton("Staging").click();
+  flushSync();
+  expect(trustCheckbox().checked).toBe(false);
+  envButton("Local").click();
+  flushSync();
+  expect(trustCheckbox().checked).toBe(false);
+});
+
+test("editing keeps the stored trust setting when the environment changes", () => {
+  open({ initial: { ...base, environment: "production", trustServerCertificate: false } });
+  envButton("Local").click();
+  flushSync();
+  expect(trustCheckbox().checked).toBe(false);
+});
+
 test("Test connection asks for the password when the saved one cannot be reused", async () => {
   vi.mocked(ipc.testConnection).mockRejectedValue("password_required");
   open({ initial: base });
