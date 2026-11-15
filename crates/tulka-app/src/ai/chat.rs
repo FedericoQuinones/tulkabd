@@ -379,27 +379,43 @@ async fn run(
                         done |= matches!(ev, ChatEvent::Done { .. });
                         on_event(ev);
                     }
+                    if done {
+                        break;
+                    }
                 }
                 _ => break,
             }
         }
     }
     drop(out);
+    // After the answer the process gets a moment to exit; then it is killed
+    // so the chat is free again.
+    let grace = if done {
+        Duration::from_secs(2)
+    } else {
+        Duration::from_secs(365 * 24 * 3600)
+    };
     let status = tokio::select! {
         () = stop.notified() => {
             let _ = child.kill().await;
             return if done { Ok(()) } else { Err("stopped".to_string()) };
         }
-        status = child.wait() => status,
+        status = tokio::time::timeout(grace, child.wait()) => match status {
+            Ok(status) => status,
+            Err(_) => {
+                let _ = child.kill().await;
+                return Ok(());
+            }
+        },
     };
+    if done {
+        return Ok(());
+    }
     let tail = tokio::time::timeout(Duration::from_secs(1), stderr_tail)
         .await
         .ok()
         .and_then(Result::ok)
         .unwrap_or_default();
-    if done {
-        return Ok(());
-    }
     if !tail.is_empty() {
         return Err(tail);
     }
@@ -715,6 +731,34 @@ sleep 30"#,
                     result: "ok".into()
                 }]
             );
+        }
+
+        #[tokio::test]
+        async fn a_lingering_process_is_killed_after_the_answer() {
+            let _turn = SPAWN.lock().await;
+            let dir = tempfile::tempdir().unwrap();
+            let program = script(
+                dir.path(),
+                r#"cat >/dev/null &
+echo '{"type":"result","is_error":false,"result":"ok","duration_ms":1}'
+sleep 30"#,
+            );
+            let runs = ChatRuns::default();
+            let started = std::time::Instant::now();
+            let (out, events) = go(&runs, &program, dir.path(), "hi").await;
+            assert_eq!(out, Ok(()));
+            assert!(started.elapsed() < Duration::from_secs(3));
+            assert_eq!(
+                events,
+                vec![ChatEvent::Done {
+                    duration_ms: 1,
+                    is_error: false,
+                    result: "ok".into()
+                }]
+            );
+            let (out, events) = go(&runs, &program, dir.path(), "again").await;
+            assert_eq!(out, Ok(()), "not busy");
+            assert_eq!(events.len(), 1);
         }
 
         #[tokio::test]

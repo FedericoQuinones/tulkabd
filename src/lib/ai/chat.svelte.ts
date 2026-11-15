@@ -78,7 +78,6 @@ export class AiChat {
         break;
       }
       case "done":
-        this.running = false;
         this.settle();
         if (ev.isError) this.items.push({ kind: "error", text: ev.result.trim() ? ev.result : t("ai.chat.endedWithError") });
         break;

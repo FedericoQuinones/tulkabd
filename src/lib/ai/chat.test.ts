@@ -52,6 +52,23 @@ test("started_sets_session_and_next_send_resumes", async () => {
   expect(send.mock.calls[1][0]).toBe(send.mock.calls[0][0]);
 });
 
+test("done_keeps_running_until_the_send_ends", async () => {
+  let release!: () => void;
+  send.mockImplementationOnce(
+    (_c, _s, _t, onEvent) =>
+      new Promise<void>((r) => {
+        onEvent({ kind: "done", durationMs: 1, isError: false, result: "" });
+        release = r;
+      }),
+  );
+  const c = new AiChat();
+  const p = c.send("hi", null);
+  expect(c.running).toBe(true);
+  release();
+  await p;
+  expect(c.running).toBe(false);
+});
+
 test("failed_stopped_message", () => {
   const c = new AiChat();
   c.running = true;
