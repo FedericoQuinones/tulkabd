@@ -9,6 +9,7 @@
 //! to servers at once. The assistant never sees a password and is never
 //! asked for one.
 
+pub mod agent;
 pub mod setup;
 
 mod format;
@@ -25,8 +26,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tulka_core::{
-    AiAccess, ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, Driver, Folder,
-    KeyringStore, Preferences, SecretStore, AI_APPLICATION_NAME,
+    AiAccess, AppConfig, ConfigStore, ConnectParams, ConnectionConfig, DatabaseScope, Driver,
+    Folder, KeyringStore, Preferences, SecretStore, AI_APPLICATION_NAME,
 };
 use tulka_mssql::MssqlDriver;
 use tulka_store::{MetaCache, SharedRunLog};
@@ -196,45 +197,9 @@ impl AiState {
             .await
             .map_err(|e| ToolText::error(format::config_unreadable(&e)))?
             .map_err(|e| ToolText::error(format::config_unreadable(&e.to_string())))?;
-        let connections: Vec<&ConnectionConfig> = config
-            .connections
-            .iter()
-            .filter(|c| c.ai_access == AiAccess::ReadOnly)
-            .collect();
-        let lower = |s: &str| s.to_lowercase();
-
-        // The plain name when it is unique; else the folders plus the name;
-        // else, if even that repeats, the id's first characters too.
-        let mut labels: Vec<String> = connections
-            .iter()
-            .map(|c| {
-                let same = connections
-                    .iter()
-                    .filter(|o| lower(&o.name) == lower(&c.name))
-                    .count();
-                match (same, folder_path(&config.folders, c.folder_id.as_deref())) {
-                    (1, _) | (_, None) => c.name.clone(),
-                    (_, Some(path)) => format!("{path}/{}", c.name),
-                }
-            })
-            .collect();
-        let counts: Vec<usize> = labels
-            .iter()
-            .map(|l| labels.iter().filter(|o| lower(o) == lower(l)).count())
-            .collect();
-        for ((label, count), c) in labels.iter_mut().zip(counts).zip(&connections) {
-            if count > 1 {
-                let short: String = c.id.chars().take(8).collect();
-                label.push_str(&format!(" #{short}"));
-            }
-        }
-        let visible = connections
+        let visible = labels(&config)
             .into_iter()
-            .zip(labels)
-            .map(|(conn, label)| Visible {
-                label,
-                conn: conn.clone(),
-            })
+            .map(|(conn, label)| Visible { label, conn })
             .collect();
         Ok((visible, config.preferences.clone()))
     }
@@ -487,6 +452,81 @@ impl Visible {
     }
 }
 
+/// The connections the assistant may use, each with the name it uses for it.
+///
+/// The plain name when it is unique; else the folders plus the name; else, if
+/// even that repeats, the id's first characters too.
+pub(crate) fn labels(config: &AppConfig) -> Vec<(ConnectionConfig, String)> {
+    let connections: Vec<&ConnectionConfig> = config
+        .connections
+        .iter()
+        .filter(|c| c.ai_access == AiAccess::ReadOnly)
+        .collect();
+    let lower = |s: &str| s.to_lowercase();
+    let mut labels: Vec<String> = connections
+        .iter()
+        .map(|c| {
+            let same = connections
+                .iter()
+                .filter(|o| lower(&o.name) == lower(&c.name))
+                .count();
+            match (same, folder_path(&config.folders, c.folder_id.as_deref())) {
+                (1, _) | (_, None) => c.name.clone(),
+                (_, Some(path)) => format!("{path}/{}", c.name),
+            }
+        })
+        .collect();
+    let counts: Vec<usize> = labels
+        .iter()
+        .map(|l| labels.iter().filter(|o| lower(o) == lower(l)).count())
+        .collect();
+    for ((label, count), c) in labels.iter_mut().zip(counts).zip(&connections) {
+        if count > 1 {
+            let short: String = c.id.chars().take(8).collect();
+            label.push_str(&format!(" #{short}"));
+        }
+    }
+    connections
+        .into_iter()
+        .zip(labels)
+        .map(|(conn, label)| (conn.clone(), label))
+        .collect()
+}
+
+/// A connection the assistant may use, as the app shows it.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiVisible {
+    pub connection_id: String,
+    pub label: String,
+    /// Whether the keychain has the password, so the assistant can log in.
+    pub password_saved: bool,
+}
+
+/// The connections with read-only AI access, named as the MCP server names
+/// them.
+pub async fn visible_connections() -> Result<Vec<AiVisible>, String> {
+    let store = ConfigStore::open_default().map_err(|e| e.to_string())?;
+    let config = blocking(move || store.load())
+        .await?
+        .map_err(|e| e.to_string())?;
+    Ok(visible_in(&config))
+}
+
+/// The connections of `config` the assistant may use. Whether a password is
+/// saved comes from the config: the keychain is not opened, which could ask
+/// the user to unlock it.
+fn visible_in(config: &AppConfig) -> Vec<AiVisible> {
+    labels(config)
+        .into_iter()
+        .map(|(conn, label)| AiVisible {
+            connection_id: conn.id,
+            label,
+            password_saved: conn.password_saved,
+        })
+        .collect()
+}
+
 /// `Parent/Child` for a folder, `None` for the root (or a broken chain).
 fn folder_path(folders: &[Folder], folder_id: Option<&str>) -> Option<String> {
     let mut names = Vec::new();
@@ -509,6 +549,64 @@ fn folder_path(folders: &[Folder], folder_id: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tulka_core::Environment;
+
+    fn conn(name: &str, id: &str, folder: Option<&str>) -> ConnectionConfig {
+        let mut c = ConnectionConfig::new(name, "h", 1433, "sa", Environment::Local);
+        c.id = id.into();
+        c.folder_id = folder.map(str::to_string);
+        c.ai_access = AiAccess::ReadOnly;
+        c
+    }
+
+    fn folder(id: &str, name: &str) -> Folder {
+        Folder {
+            id: id.into(),
+            name: name.into(),
+            parent_id: None,
+        }
+    }
+
+    #[test]
+    fn visible_connections_report_the_saved_password_flag() {
+        let mut saved = conn("A", "id-a", None);
+        saved.password_saved = true;
+        let config = AppConfig {
+            connections: vec![saved, conn("B", "id-b", None)],
+            ..AppConfig::default()
+        };
+        let flags: Vec<bool> = visible_in(&config)
+            .iter()
+            .map(|v| v.password_saved)
+            .collect();
+        assert_eq!(flags, vec![true, false]);
+    }
+
+    #[test]
+    fn labels_match_the_mcp_server() {
+        let config = AppConfig {
+            folders: vec![folder("f1", "Prod"), folder("f2", "Dev")],
+            connections: vec![
+                conn("Sales", "aaaaaaaa-1", Some("f1")),
+                conn("sales", "bbbbbbbb-2", Some("f2")),
+                conn("Core", "cccccccc-3", Some("f1")),
+                conn("Core", "dddddddd-4", Some("f1")),
+                conn("Solo", "eeeeeeee-5", None),
+            ],
+            ..AppConfig::default()
+        };
+        let names: Vec<String> = labels(&config).into_iter().map(|(_, l)| l).collect();
+        assert_eq!(
+            names,
+            vec![
+                "Prod/Sales",
+                "Dev/sales",
+                "Prod/Core #cccccccc",
+                "Prod/Core #dddddddd",
+                "Solo"
+            ]
+        );
+    }
 
     #[test]
     fn long_answers_are_cut_with_a_notice() {

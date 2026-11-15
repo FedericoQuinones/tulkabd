@@ -17,6 +17,7 @@
     { key: "rail.search", d: '<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/>' },
     { key: "rail.saved", d: '<path d="M8 1.8l1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.6l-3.8 2 .7-4.3-3.1-3 4.3-.6z"/>' },
     { key: "rail.log", d: '<circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/>' },
+    { key: "rail.ai", d: '<path d="M7 2l1.3 3.7L12 7l-3.7 1.3L7 12 5.7 8.3 2 7l3.7-1.3zM12.5 10.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z"/>' },
   ];
   const bottom = [
     { key: "rail.drivers", d: '<path d="M6 2v3M10 2v3M4 5h8v2.5a4 4 0 0 1-8 0zM8 11.5V14"/>' },

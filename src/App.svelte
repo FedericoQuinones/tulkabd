@@ -17,6 +17,7 @@
   import Palette from "./lib/palette/Palette.svelte";
   import { palette } from "./lib/palette/paletteState.svelte";
   import NameDialog from "./lib/queries/NameDialog.svelte";
+  import AiPanel from "./lib/ai/AiPanel.svelte";
   import SavedQueriesPanel from "./lib/queries/SavedQueriesPanel.svelte";
   import { queries } from "./lib/queries/queries.svelte";
   import { shortcutAction } from "./lib/tabs/shortcuts";
@@ -127,7 +128,7 @@
   let explorerWidth = $state(layout.width);
   let explorerHidden = $state(layout.hidden);
   // What the left panel shows: the Explorer tree or the saved queries (Rail icons).
-  let leftPanel = $state<"rail.explorer" | "rail.saved">("rail.explorer");
+  let leftPanel = $state<"rail.explorer" | "rail.saved" | "rail.ai">("rail.explorer");
   const remember = () => saveLayout({ width: explorerWidth, hidden: explorerHidden });
 
   // The Settings screen takes the place of the workspace; the tabs stay mounted underneath.
@@ -157,7 +158,7 @@
     closeSettings(false);
     if (key === "rail.search") palette.show();
     if (key === "rail.log") void showRunLog();
-    if (key !== "rail.explorer" && key !== "rail.saved") return;
+    if (key !== "rail.explorer" && key !== "rail.saved" && key !== "rail.ai") return;
     if (!explorerHidden && leftPanel !== key) leftPanel = key;
     else {
       leftPanel = key;
@@ -218,6 +219,8 @@
       <aside class="explorer" style:width="{explorerWidth}px">
         {#if leftPanel === "rail.saved"}
           <SavedQueriesPanel />
+        {:else if leftPanel === "rail.ai"}
+          <AiPanel />
         {:else}
         {#if connections.startupError}
           <p class="error" role="alert">{t("explorer.startupError", { error: connections.startupError })}</p>
