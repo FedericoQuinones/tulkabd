@@ -3,11 +3,11 @@
   import AiConnect from "./AiConnect.svelte";
 </script>
 
-<div class="ai" aria-label={t("ai.panel.label")}>
+<section class="ai" aria-label={t("ai.panel.label")}>
   <AiConnect />
   <!-- The chat is mounted here, below the connect section. -->
   <div class="chat" data-ai-chat></div>
-</div>
+</section>
 
 <style>
   .ai {

@@ -64,9 +64,9 @@ it("connect_calls_ipc_and_shows_connected", async () => {
   button("Connect")!.click();
   await vi.waitFor(() => expect(document.body.textContent).toContain("Connected to Claude Code"));
   expect(ipc.connectClaude).toHaveBeenCalledOnce();
-  // Connected: the section folds to its summary line.
+  // Connected: the section folds to its summary line, which keeps Open in terminal.
   expect(button("Connect")).toBeUndefined();
-  expect(button("Open in terminal")).toBeUndefined();
+  expect(button("Open in terminal")).toBeDefined();
 });
 
 it("reconnect_when_connected_elsewhere", async () => {
@@ -109,10 +109,55 @@ it("maps claude_not_found to a friendly alert", async () => {
 it("collapses to one line once connected and expands again", async () => {
   vi.mocked(ipc.claudeStatus).mockResolvedValue(status({ connected: true }));
   await show();
-  expect(button("Open in terminal")).toBeUndefined();
-  document.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')!.click();
+  expect(document.body.textContent).not.toContain("Claude Code 2.1.0");
+  const toggle = document.querySelector<HTMLButtonElement>('button[aria-label="Connection details"]')!;
+  expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  toggle.click();
   flushSync();
-  expect(button("Open in terminal")).toBeDefined();
+  expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  expect(document.body.textContent).toContain("Claude Code 2.1.0");
+});
+
+it("keeps other agents and the shared list visible while connected and collapsed", async () => {
+  vi.mocked(ipc.claudeStatus).mockResolvedValue(status({ connected: true }));
+  vi.mocked(ipc.aiVisibleConnections).mockResolvedValue([{ connectionId: "b", label: "Staging", passwordSaved: false }]);
+  await show();
+  expect(button("Other agents")).toBeDefined();
+  expect(document.querySelector("li")!.textContent).toContain("password not saved");
+});
+
+it("open in terminal calls ipc and shows its error", async () => {
+  vi.mocked(ipc.claudeStatus).mockResolvedValue(status());
+  vi.mocked(ipc.openClaudeTerminal).mockResolvedValueOnce(undefined).mockRejectedValueOnce("run: claude --mcp-config x");
+  await show();
+  button("Open in terminal")!.click();
+  await vi.waitFor(() => expect(ipc.openClaudeTerminal).toHaveBeenCalledOnce());
+  await new Promise((r) => setTimeout(r, 0));
+  flushSync();
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  button("Open in terminal")!.click();
+  await vi.waitFor(() => expect(document.querySelector('[role="alert"]')).not.toBeNull());
+  expect(document.querySelector('[role="alert"]')!.textContent).toContain("claude --mcp-config x");
+});
+
+it("disables the buttons while connect is in flight", async () => {
+  vi.mocked(ipc.claudeStatus).mockResolvedValue(status());
+  let finish!: (s: ClaudeStatus) => void;
+  vi.mocked(ipc.connectClaude).mockReturnValue(new Promise((r) => (finish = r)));
+  await show();
+  button("Connect")!.click();
+  flushSync();
+  expect(button("Refresh")!.disabled).toBe(true);
+  expect(button("Open in terminal")!.disabled).toBe(true);
+  finish(status({ connected: true }));
+  await vi.waitFor(() => expect(button("Refresh")!.disabled).toBe(false));
+});
+
+it("shows other agents even when the first status load fails", async () => {
+  vi.mocked(ipc.claudeStatus).mockRejectedValue("boom");
+  await show();
+  expect(document.querySelector('[role="alert"]')).not.toBeNull();
+  expect(button("Other agents")).toBeDefined();
 });
 
 it("other agents copies the JSON and the VS Code setup", async () => {
@@ -123,6 +168,7 @@ it("other agents copies the JSON and the VS Code setup", async () => {
   flushSync();
   button("Copy JSON (Cursor, Claude Desktop)")!.click();
   expect(ipc.copyMcpSetup).toHaveBeenCalledWith("json");
+  await vi.waitFor(() => expect(document.querySelector('[role="status"]')!.textContent).toBe("Copied"));
   button("Other agents")!.click();
   flushSync();
   button("Copy for VS Code")!.click();

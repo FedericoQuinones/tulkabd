@@ -11,23 +11,16 @@
   let busy = $state(false);
   let expanded = $state(false);
   let menuOpen = $state(false);
+  let loaded = $state(false);
+  let othersEl = $state<HTMLElement>();
+  let noteTimer: ReturnType<typeof setTimeout> | undefined;
 
   function message(e: unknown): string {
     const text = e instanceof Error ? e.message : typeof e === "string" ? e : JSON.stringify(e);
     return text.includes("claude_not_found") ? t("ai.connect.notFound") : t("ai.connect.failed", { error: text });
   }
 
-  async function refresh() {
-    error = null;
-    note = null;
-    try {
-      [status, visible] = await Promise.all([ipc.claudeStatus(), ipc.aiVisibleConnections()]);
-    } catch (e) {
-      error = message(e);
-    }
-  }
-  onMount(() => void refresh());
-
+  /** Runs one action at a time, so a slow refresh can never overwrite a newer result. */
   async function run(action: () => Promise<unknown>) {
     error = null;
     note = null;
@@ -41,6 +34,15 @@
     }
   }
 
+  const refresh = () =>
+    run(async () => {
+      [status, visible] = await Promise.all([ipc.claudeStatus(), ipc.aiVisibleConnections()]);
+    }).finally(() => (loaded = true));
+  onMount(() => {
+    void refresh();
+    return () => clearTimeout(noteTimer);
+  });
+
   const connect = () =>
     run(async () => {
       status = await ipc.connectClaude();
@@ -51,71 +53,82 @@
       menuOpen = false;
       await ipc.copyMcpSetup(kind);
       note = t("ai.connect.copied");
+      clearTimeout(noteTimer);
+      noteTimer = setTimeout(() => (note = null), 3000);
     });
 
-  const collapsed = $derived(!!status?.connected && !expanded);
+  function closeMenu(e: Event) {
+    if (!menuOpen) return;
+    if (e instanceof KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+    } else if (othersEl?.contains(e.target as Node)) return;
+    menuOpen = false;
+  }
 </script>
+
+<svelte:window onkeydown={closeMenu} onclick={closeMenu} />
 
 <section class="connect">
   <div class="head">
     <span class="sect">{t("ai.panel.label")}</span>
-    <button type="button" class="link" onclick={() => void refresh()}>{t("ai.connect.refresh")}</button>
+    <button type="button" class="link" disabled={busy} onclick={() => void refresh()}>{t("ai.connect.refresh")}</button>
   </div>
 
   {#if error}<p class="error" role="alert">{error}</p>{/if}
 
-  {#if status && collapsed}
-    <div class="summary">
-      <span class="ok">✓ {t("ai.connect.connected")}</span>
-      <button type="button" class="link" aria-expanded="false" aria-label={t("ai.connect.expand")} onclick={() => (expanded = true)}>▾</button>
-    </div>
+  {#if !loaded}
+    <p class="text muted">{t("ai.connect.loading")}</p>
+  {:else if status && !status.installed}
+    <p class="text">{t("ai.connect.notInstalled")}</p>
+    <button type="button" class="link" disabled={busy} onclick={() => void run(() => ipc.openClaudeInstallDocs())}>{t("ai.connect.install")}</button>
   {:else if status}
-    {#if !status.installed}
-      <p class="text">{t("ai.connect.notInstalled")}</p>
-      <button type="button" class="link" onclick={() => void run(() => ipc.openClaudeInstallDocs())}>{t("ai.connect.install")}</button>
-    {:else}
-      {#if status.connected}
-        <div class="summary">
-          <span class="ok">✓ {t("ai.connect.connected")}</span>
-          <button type="button" class="link" aria-expanded="true" aria-label={t("ai.connect.collapse")} onclick={() => (expanded = false)}>▴</button>
-        </div>
-      {/if}
+    {#if status.connected}
+      <div class="summary">
+        <span class="ok">✓ {t("ai.connect.connected")}</span>
+        <span class="right">
+          <button type="button" class="link" disabled={busy} onclick={() => void run(() => ipc.openClaudeTerminal())}>{t("ai.connect.openTerminal")}</button>
+          <button type="button" class="link" aria-expanded={expanded} aria-label={t("ai.connect.details")} onclick={() => (expanded = !expanded)}>{expanded ? "▴" : "▾"}</button>
+        </span>
+      </div>
+    {/if}
+    {#if !status.connected || expanded}
       {#if status.version}<p class="text muted">{t("ai.connect.version", { version: status.version })}</p>{/if}
       {#if status.connectedElsewhere}<p class="text">{t("ai.connect.elsewhere")}</p>{/if}
+    {/if}
+    {#if !status.connected}
       <div class="actions">
-        {#if !status.connected}
-          <button type="button" class="primary" disabled={busy} onclick={() => void connect()}>
-            {status.connectedElsewhere ? t("ai.connect.reconnect") : t("ai.connect.connect")}
-          </button>
-        {/if}
+        <button type="button" class="primary" disabled={busy} onclick={() => void connect()}>
+          {status.connectedElsewhere ? t("ai.connect.reconnect") : t("ai.connect.connect")}
+        </button>
         <button type="button" disabled={busy} onclick={() => void run(() => ipc.openClaudeTerminal())}>{t("ai.connect.openTerminal")}</button>
       </div>
     {/if}
+  {/if}
 
-    <div class="others">
-      <button type="button" class="link" aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}>{t("ai.connect.otherAgents")}</button>
-      {#if menuOpen}
-        <div class="menu">
-          <button type="button" onclick={() => void copy("json")}>{t("ai.connect.copyJson")}</button>
-          <button type="button" onclick={() => void copy("vscode")}>{t("ai.connect.copyVscode")}</button>
-        </div>
-      {/if}
-      {#if note}<span class="muted" role="status">{note}</span>{/if}
-    </div>
-
-    <div class="sect shared">{t("ai.connect.sharedTitle")}</div>
-    {#if visible.length === 0}
-      <p class="text muted">{t("ai.connect.noneShared")}</p>
-    {:else}
-      <ul>
-        {#each visible as c (c.connectionId)}
-          <li>
-            <span class="lab" title={c.label}>{c.label}</span>
-            {#if !c.passwordSaved}<span class="hint">{t("ai.connect.passwordNotSaved")}</span>{/if}
-          </li>
-        {/each}
-      </ul>
+  <div class="others" bind:this={othersEl}>
+    <button type="button" class="link" aria-expanded={menuOpen} disabled={busy} onclick={() => (menuOpen = !menuOpen)}>{t("ai.connect.otherAgents")}</button>
+    {#if menuOpen}
+      <div class="menu">
+        <button type="button" disabled={busy} onclick={() => void copy("json")}>{t("ai.connect.copyJson")}</button>
+        <button type="button" disabled={busy} onclick={() => void copy("vscode")}>{t("ai.connect.copyVscode")}</button>
+      </div>
     {/if}
+    <span class="muted" role="status">{note ?? ""}</span>
+  </div>
+
+  <div class="sect shared" id="ai-shared-title">{t("ai.connect.sharedTitle")}</div>
+  {#if visible.length === 0}
+    <p class="text muted">{t("ai.connect.noneShared")}</p>
+  {:else}
+    <ul aria-labelledby="ai-shared-title">
+      {#each visible as c (c.connectionId)}
+        <li>
+          <span class="lab" title={c.label}>{c.label}</span>
+          {#if !c.passwordSaved}<span class="hint">{t("ai.connect.passwordNotSaved")}</span>{/if}
+        </li>
+      {/each}
+    </ul>
   {/if}
 </section>
 
@@ -151,6 +164,15 @@
   }
   .ok {
     color: var(--text);
+  }
+  .right {
+    display: flex;
+    gap: 8px;
+  }
+  .link:disabled,
+  .menu button:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
   .actions {
     display: flex;
