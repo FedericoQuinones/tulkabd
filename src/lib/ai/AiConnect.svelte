@@ -2,16 +2,16 @@
   import { onMount } from "svelte";
   import { t } from "../i18n/t";
   import * as ipc from "../ipc";
-  import type { AiVisible, ClaudeStatus, McpSetupKind } from "../ipc";
+  import type { McpSetupKind } from "../ipc";
+  import { aiStatus } from "./status.svelte";
 
-  let status = $state<ClaudeStatus | null>(null);
-  let visible = $state<AiVisible[]>([]);
+  const status = $derived(aiStatus.status);
   let error = $state<string | null>(null);
   let note = $state<string | null>(null);
   let busy = $state(false);
   let expanded = $state(false);
   let menuOpen = $state(false);
-  let loaded = $state(false);
+  const loaded = $derived(aiStatus.loaded);
   let othersEl = $state<HTMLElement>();
   let noteTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -36,8 +36,9 @@
 
   const refresh = () =>
     run(async () => {
-      [status, visible] = await Promise.all([ipc.claudeStatus(), ipc.aiVisibleConnections()]);
-    }).finally(() => (loaded = true));
+      await aiStatus.refresh();
+      if (aiStatus.error !== null) error = message(aiStatus.error);
+    });
   onMount(() => {
     void refresh();
     return () => clearTimeout(noteTimer);
@@ -45,7 +46,7 @@
 
   const connect = () =>
     run(async () => {
-      status = await ipc.connectClaude();
+      aiStatus.status = await ipc.connectClaude();
       expanded = false;
     });
   const copy = (kind: McpSetupKind) =>
@@ -120,11 +121,11 @@
   </div>
 
   <div class="sect shared" id="ai-shared-title">{t("ai.connect.sharedTitle")}</div>
-  {#if visible.length === 0}
+  {#if aiStatus.visible.length === 0}
     <p class="text muted">{t("ai.connect.noneShared")}</p>
   {:else}
     <ul aria-labelledby="ai-shared-title">
-      {#each visible as c (c.connectionId)}
+      {#each aiStatus.visible as c (c.connectionId)}
         <li>
           <span class="lab" title={c.label}>{c.label}</span>
           {#if !c.passwordSaved}<span class="hint">{t("ai.connect.passwordNotSaved")}</span>{/if}

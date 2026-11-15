@@ -137,6 +137,8 @@ commands![
     ai::ai_open_terminal,
     ai::ai_visible_connections,
     ai::ai_open_install_docs,
+    ai::ai_chat_send,
+    ai::ai_chat_stop,
 ];
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -251,6 +253,8 @@ mod tests {
     /// on purpose: none may add to the allowed `.sql` files (that is done only
     /// from the native dialog and drop events).
     const EXPECTED: &[&str] = &[
+        "ai::ai_chat_send",
+        "ai::ai_chat_stop",
         "ai::ai_claude_status",
         "ai::ai_connect_claude",
         "ai::ai_open_install_docs",

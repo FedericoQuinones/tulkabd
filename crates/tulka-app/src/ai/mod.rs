@@ -10,6 +10,7 @@
 //! asked for one.
 
 pub mod agent;
+pub mod chat;
 pub mod setup;
 
 mod format;

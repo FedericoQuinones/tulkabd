@@ -1,5 +1,9 @@
+use tauri::State;
+use tauri::ipc::Channel;
+use tulka_app::AppState;
 use tulka_app::ai::AiVisible;
 use tulka_app::ai::agent::{self, ClaudeStatus};
+use tulka_app::ai::chat::{self, ChatEvent};
 
 /// Where Claude Code's install instructions are.
 const CLAUDE_INSTALL_DOCS: &str = "https://code.claude.com/docs/en/setup";
@@ -38,4 +42,27 @@ pub async fn ai_open_install_docs() -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("internal error: {e}"))?
+}
+
+/// Sends a message to Claude Code in the background and streams what it does
+/// to `on_event`. Fails with `busy` while that chat is already running.
+#[tauri::command]
+pub async fn ai_chat_send(
+    state: State<'_, AppState>,
+    chat_id: String,
+    session_id: Option<String>,
+    text: String,
+    on_event: Channel<ChatEvent>,
+) -> Result<(), String> {
+    // A send fails only when the window is gone; there is nobody to tell.
+    chat::send(&state.chats, chat_id, session_id, text, move |ev| {
+        let _ = on_event.send(ev);
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn ai_chat_stop(state: State<'_, AppState>, chat_id: String) -> Result<(), String> {
+    chat::stop(&state.chats, &chat_id).await;
+    Ok(())
 }

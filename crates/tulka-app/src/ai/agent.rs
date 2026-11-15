@@ -19,7 +19,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The system prompt given to Claude Code when it runs inside tulkabd.
-pub const SYSTEM_PROMPT: &str = "You are a database diagnostics assistant inside tulkabd, a SQL Server client. You can only use the tulkabd tools, which are read-only. Start with list_connections. Use search_objects and describe_table to find the right tables instead of guessing names. When you reach a conclusion, show the SQL that supports it. Never claim to have changed data. Answer in the language the user writes in.";
+pub const SYSTEM_PROMPT: &str = "You are a database diagnostics assistant inside tulkabd, a SQL Server client. You can only use the tulkabd tools, which are read-only. Start with list_connections. Use search_objects and describe_table to find the right tables instead of guessing names. When you reach a conclusion, show the SQL that supports it. Never claim to have changed data. Answer in the language the user writes in. Show tabular results as Markdown tables.";
 
 /// What is known about Claude Code and tulkabd.
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -647,6 +647,9 @@ mod tests {
         assert_eq!(v["mcpServers"]["tulkabd"]["args"], json!(["mcp"]));
         let prompt = std::fs::read_to_string(&files.system_prompt).unwrap();
         assert!(prompt.starts_with("You are a database diagnostics assistant"));
+        assert!(prompt.ends_with(
+            "Answer in the language the user writes in. Show tabular results as Markdown tables."
+        ));
     }
 
     #[test]
