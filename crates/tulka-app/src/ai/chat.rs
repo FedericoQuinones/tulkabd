@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -222,20 +223,24 @@ pub async fn send(
     text: String,
     on_event: impl Fn(ChatEvent) + Send + 'static,
 ) -> Result<(), String> {
+    let stop = runs.start(&chat_id)?;
     let Some(program) = agent::find_claude() else {
+        runs.finish(&chat_id);
         on_event(ChatEvent::Failed {
             message: CLAUDE_NOT_FOUND.to_string(),
         });
         return Ok(());
     };
     let Some(dir) = agent::ai_dir() else {
+        runs.finish(&chat_id);
         on_event(ChatEvent::Failed {
             message: "could not create the folder for the assistant's files".to_string(),
         });
         return Ok(());
     };
-    send_with(
+    run_registered(
         runs,
+        &stop,
         &program,
         &dir,
         &mcp_setup().command,
@@ -247,6 +252,38 @@ pub async fn send(
     .await
 }
 
+/// Runs a chat already registered in `runs` (with `stop` as its stop signal)
+/// and removes it when it ends.
+#[allow(clippy::too_many_arguments)]
+async fn run_registered(
+    runs: &ChatRuns,
+    stop: &Notify,
+    program: &Path,
+    dir: &Path,
+    exe: &str,
+    chat_id: String,
+    session_id: Option<String>,
+    text: String,
+    on_event: impl Fn(ChatEvent) + Send + 'static,
+) -> Result<(), String> {
+    let outcome = run(
+        program,
+        dir,
+        exe,
+        session_id.as_deref(),
+        text,
+        stop,
+        &on_event,
+    )
+    .await;
+    runs.finish(&chat_id);
+    if let Err(message) = outcome {
+        on_event(ChatEvent::Failed { message });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn send_with(
     runs: &ChatRuns,
@@ -259,21 +296,10 @@ async fn send_with(
     on_event: impl Fn(ChatEvent) + Send + 'static,
 ) -> Result<(), String> {
     let stop = runs.start(&chat_id)?;
-    let outcome = run(
-        program,
-        dir,
-        exe,
-        session_id.as_deref(),
-        text,
-        &stop,
-        &on_event,
+    run_registered(
+        runs, &stop, program, dir, exe, chat_id, session_id, text, on_event,
     )
-    .await;
-    runs.finish(&chat_id);
-    if let Err(message) = outcome {
-        on_event(ChatEvent::Failed { message });
-    }
-    Ok(())
+    .await
 }
 
 /// Runs Claude Code to its end. `Err` is a failure not yet reported.
@@ -322,17 +348,19 @@ async fn run(
         String::from_utf8_lossy(&kept).trim().to_string()
     });
 
-    let mut lines = BufReader::new(child.stdout.take().ok_or("no output pipe")?).lines();
+    let mut out = BufReader::new(child.stdout.take().ok_or("no output pipe")?);
     let mut done = false;
+    let mut buf: Vec<u8> = Vec::new();
     loop {
+        buf.clear();
         tokio::select! {
             () = stop.notified() => {
                 let _ = child.kill().await;
-                return Err("stopped".to_string());
+                return if done { Ok(()) } else { Err("stopped".to_string()) };
             }
-            line = lines.next_line() => match line {
-                Ok(Some(line)) => {
-                    for ev in parse_line(&line) {
+            read = out.read_until(b'\n', &mut buf) => match read {
+                Ok(n) if n > 0 => {
+                    for ev in parse_line(&String::from_utf8_lossy(&buf)) {
                         done |= matches!(ev, ChatEvent::Done { .. });
                         on_event(ev);
                     }
@@ -341,14 +369,19 @@ async fn run(
             }
         }
     }
+    drop(out);
     let status = tokio::select! {
         () = stop.notified() => {
             let _ = child.kill().await;
-            return Err("stopped".to_string());
+            return if done { Ok(()) } else { Err("stopped".to_string()) };
         }
         status = child.wait() => status,
     };
-    let tail = stderr_tail.await.unwrap_or_default();
+    let tail = tokio::time::timeout(Duration::from_secs(1), stderr_tail)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
     if done {
         return Ok(());
     }
@@ -461,15 +494,33 @@ mod tests {
                 .map(|s| s.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
         };
-        let plain = text(claude_args(&files, None));
-        assert_eq!(plain[..3], ["-p", "--output-format", "stream-json"]);
-        assert!(plain.windows(2).any(|w| w == ["--tools", ""]));
-        assert!(plain
-            .windows(2)
-            .any(|w| w == ["--allowedTools", "mcp__tulkabd"]));
-        assert!(!plain.contains(&"--resume".to_string()));
-        let resumed = text(claude_args(&files, Some("abc")));
-        assert_eq!(resumed[resumed.len() - 2..], ["--resume", "abc"]);
+        let base: Vec<String> = [
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--mcp-config",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .chain([
+            files.mcp_config.to_string_lossy().into_owned(),
+            "--allowedTools".into(),
+            "mcp__tulkabd".into(),
+            "--setting-sources".into(),
+            "".into(),
+            "--append-system-prompt-file".into(),
+            files.system_prompt.to_string_lossy().into_owned(),
+        ])
+        .collect();
+        assert_eq!(text(claude_args(&files, None)), base);
+        let mut resumed = base;
+        resumed.extend(["--resume".into(), "abc".into()]);
+        assert_eq!(text(claude_args(&files, Some("abc"))), resumed);
     }
 
     #[cfg(unix)]
@@ -477,7 +528,6 @@ mod tests {
         use super::*;
         use std::path::PathBuf;
         use std::sync::mpsc;
-        use std::time::Duration;
 
         /// Starting a program right after writing it can fail with "text file
         /// busy" when another test forks at that moment, so those tests take
@@ -590,6 +640,68 @@ mod tests {
                     message: "stopped".into()
                 }]
             );
+        }
+
+        #[tokio::test]
+        async fn stop_after_the_answer_stays_quiet() {
+            let _turn = SPAWN.lock().await;
+            let dir = tempfile::tempdir().unwrap();
+            let program = script(
+                dir.path(),
+                r#"cat >/dev/null &
+echo '{"type":"result","is_error":false,"result":"ok","duration_ms":1}'
+sleep 30"#,
+            );
+            let runs = Arc::new(ChatRuns::default());
+            let stopper = runs.clone();
+            let handle = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                stop(&stopper, "chat").await;
+            });
+            let (out, events) = go(&runs, &program, dir.path(), "hi").await;
+            handle.await.unwrap();
+            assert_eq!(out, Ok(()));
+            assert_eq!(
+                events,
+                vec![ChatEvent::Done {
+                    duration_ms: 1,
+                    is_error: false,
+                    result: "ok".into()
+                }]
+            );
+        }
+
+        #[tokio::test]
+        async fn stop_before_the_run_starts_is_kept() {
+            let _turn = SPAWN.lock().await;
+            let dir = tempfile::tempdir().unwrap();
+            let program = script(dir.path(), "sleep 30");
+            let runs = ChatRuns::default();
+            let signal = runs.start("chat").unwrap();
+            stop(&runs, "chat").await;
+            let (tx, rx) = mpsc::channel();
+            run_registered(
+                &runs,
+                &signal,
+                &program,
+                &dir.path().join("ai"),
+                "tulkabd",
+                "chat".into(),
+                None,
+                "hi".into(),
+                move |e| {
+                    let _ = tx.send(e);
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                rx.try_iter().collect::<Vec<_>>(),
+                vec![ChatEvent::Failed {
+                    message: "stopped".into()
+                }]
+            );
+            assert!(runs.start("chat").is_ok(), "the entry is removed");
         }
 
         #[tokio::test]
