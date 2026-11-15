@@ -61,6 +61,8 @@
   "connection.field.guard": "Guard against risky statements",
   "connection.field.ai": "AI access",
   "ai.panel.label": "AI assistant",
+  "ai.chat.stopped": "Stopped.",
+  "ai.chat.notInstalled": "Claude Code is not installed on this computer. Install it to chat here.",
   "ai.connect.refresh": "Refresh",
   "ai.connect.notInstalled": "Claude Code is not installed on this computer.",
   "ai.connect.startFailed": "Claude Code was found but did not start: {error}",
