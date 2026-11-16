@@ -2,10 +2,10 @@
   import { onMount } from "svelte";
   import { EditorState, Transaction } from "@codemirror/state";
   import { EditorView, drawSelection, keymap, lineNumbers } from "@codemirror/view";
-  import { defaultKeymap, history, historyField, historyKeymap } from "@codemirror/commands";
-  import { HighlightStyle, bracketMatching, indentOnInput, syntaxHighlighting } from "@codemirror/language";
+  import { defaultKeymap, history, historyField, historyKeymap, indentLess, indentMore } from "@codemirror/commands";
+  import { HighlightStyle, bracketMatching, indentOnInput, indentUnit, syntaxHighlighting } from "@codemirror/language";
   import { MSSQL, sql } from "@codemirror/lang-sql";
-  import { autocompletion, type CompletionContext, type CompletionSource } from "@codemirror/autocomplete";
+  import { acceptCompletion, autocompletion, type CompletionContext, type CompletionSource } from "@codemirror/autocomplete";
   import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
   import { searchPhrases } from "./searchPhrases";
   import { tags } from "@lezer/highlight";
@@ -176,6 +176,14 @@
     applyInserts();
   });
 
+  /** Tab: indents at the cursor, or every selected line when there is a selection. */
+  function indentWithTab(view: EditorView): boolean {
+    const { state } = view;
+    if (state.selection.ranges.some((r) => !r.empty)) return indentMore(view);
+    view.dispatch(state.replaceSelection(state.facet(indentUnit)), { scrollIntoView: true, userEvent: "input" });
+    return true;
+  }
+
   onMount(() => {
     const extensions = [
           lineNumbers(),
@@ -183,6 +191,7 @@
           drawSelection(),
           indentOnInput(),
           bracketMatching(),
+          indentUnit.of("    "),
           sql({ dialect: MSSQL }),
           autocompletion({ override: [complete] }),
           syntaxHighlighting(highlight),
@@ -200,6 +209,9 @@
                 return true;
               },
             },
+            // Tab stays in the editor (Escape then Tab still moves the focus on).
+            { key: "Tab", run: acceptCompletion },
+            { key: "Tab", run: indentWithTab, shift: indentLess },
             // Ctrl+Shift+\ is the app's "split down", not "go to matching bracket".
             ...defaultKeymap.filter((b) => b.key !== "Shift-Mod-\\"),
             ...historyKeymap,
