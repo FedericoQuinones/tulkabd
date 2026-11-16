@@ -123,3 +123,47 @@ test("Ctrl+F opens the translated search panel and Escape closes it", () => {
   panel!.querySelector("input")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
   expect(document.querySelector(".cm-search")).toBeNull();
 });
+
+function key(target: HTMLElement, init: KeyboardEventInit): KeyboardEvent {
+  const e = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+  target.dispatchEvent(e);
+  return e;
+}
+const tab = { key: "Tab", code: "Tab", keyCode: 9 };
+
+test("Tab indents at the cursor instead of leaving the editor", () => {
+  const pane = new PaneState("t");
+  pane.initialDoc = "SELECT\nname";
+  show(pane);
+  const content = document.querySelector<HTMLElement>(".cm-content")!;
+  const view = EditorView.findFromDOM(document.querySelector<HTMLElement>(".cm-editor")!)!;
+  view.dispatch({ selection: { anchor: 7 } });
+  const e = key(content, tab);
+  expect(e.defaultPrevented).toBe(true);
+  expect(view.state.doc.toString()).toBe("SELECT\n    name");
+  expect(view.state.selection.main.head).toBe(11);
+});
+
+test("Tab and Shift+Tab indent and outdent the selected lines", () => {
+  const pane = new PaneState("t");
+  pane.initialDoc = "SELECT a,\nb\nFROM t";
+  show(pane);
+  const content = document.querySelector<HTMLElement>(".cm-content")!;
+  const view = EditorView.findFromDOM(document.querySelector<HTMLElement>(".cm-editor")!)!;
+  view.dispatch({ selection: { anchor: 0, head: 12 } });
+  key(content, tab);
+  expect(view.state.doc.toString()).toBe("    SELECT a,\n    b\nFROM t");
+  const e = key(content, { ...tab, shiftKey: true });
+  expect(e.defaultPrevented).toBe(true);
+  expect(view.state.doc.toString()).toBe("SELECT a,\nb\nFROM t");
+});
+
+test("Escape then Tab still moves the focus out of the editor", () => {
+  show(new PaneState("t"));
+  const content = document.querySelector<HTMLElement>(".cm-content")!;
+  const view = EditorView.findFromDOM(document.querySelector<HTMLElement>(".cm-editor")!)!;
+  key(content, { key: "Escape", code: "Escape", keyCode: 27 });
+  const e = key(content, tab);
+  expect(e.defaultPrevented).toBe(false);
+  expect(view.state.doc.toString()).toBe("");
+});
